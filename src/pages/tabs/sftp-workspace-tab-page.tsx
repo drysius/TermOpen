@@ -1235,7 +1235,7 @@ function SftpBlockView({
         }
       }}
     >
-      <div className="grid grid-cols-[minmax(180px,1fr)_minmax(220px,2fr)_auto] gap-2 border-b border-white/10 px-2 py-1.5">
+      <div className="grid grid-cols-[minmax(140px,0.9fr)_minmax(0,1.7fr)_auto] gap-2 border-b border-white/10 px-2 py-1.5">
         <select
           className="h-8 rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
           value={block.sourceId}
@@ -1248,9 +1248,9 @@ function SftpBlockView({
           ))}
         </select>
 
-        <div className="flex items-center gap-1">
+        <div className="flex min-w-0 items-center gap-1">
           <input
-            className="h-8 w-full rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-purple-400/70"
+            className="h-8 min-w-0 w-full rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-purple-400/70"
             value={pathDraft}
             list={pathListId}
             onChange={(event) => setPathDraft(event.target.value)}

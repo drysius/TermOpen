@@ -104,3 +104,8 @@
   - foco em protocolo `termopen://auth` e fluxo OAuth via deeplink.
 - Este `docs/AGENT_APP.md`:
   - visao geral do produto + leitura minima por contexto.
+
+## Contribution Language Policy
+- Commit messages must be written in English.
+- Code comments must be written in English.
+- Technical notes such as `TODO` and `FIXME` must be written in English.
