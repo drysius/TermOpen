@@ -9,7 +9,8 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use models::{
     AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, KeychainEntry, KnownHostEntry,
-    SftpEntry, SshConnectResult, SshSessionInfo, SyncState, VaultStatus,
+    RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult, SshSessionInfo,
+    SyncConflictDecision, SyncConflictPreview, SyncState, VaultStatus, WindowState,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
@@ -34,6 +35,9 @@ const DEFAULT_SFTP_CHUNK_SIZE_KB: u32 = 1024;
 const MIN_SFTP_CHUNK_SIZE_KB: u32 = 64;
 const MAX_SFTP_CHUNK_SIZE_KB: u32 = 8192;
 const DEFAULT_BINARY_PREVIEW_LIMIT_BYTES: u64 = 25 * 1024 * 1024;
+const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/MarcosBrendonDePaula/TermOpen/releases/latest";
+const DEFAULT_WORKSPACE_WIDTH: f64 = 1440.0;
+const DEFAULT_WORKSPACE_HEIGHT: f64 = 900.0;
 
 fn app_error(error: impl ToString) -> String {
     error.to_string()
@@ -103,6 +107,19 @@ async fn vault_unlock(
 async fn vault_lock(state: State<'_, AppState>) -> Result<VaultStatus, String> {
     let mut vault = state.vault.lock().await;
     Ok(vault.lock())
+}
+
+#[tauri::command]
+async fn vault_reset_all(state: State<'_, AppState>) -> Result<VaultStatus, String> {
+    let status = {
+        let mut vault = state.vault.lock().await;
+        vault.reset_all().map_err(app_error)?
+    };
+    {
+        let sync = state.sync.lock().await;
+        sync.clear_local_auth();
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -455,7 +472,8 @@ async fn sftp_delete(
     is_dir: bool,
 ) -> Result<(), String> {
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_delete(&session_id, &path, is_dir).map_err(app_error)
+    ssh.sftp_delete(&session_id, &path, is_dir)
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -696,11 +714,21 @@ async fn local_rename(from_path: String, to_path: String) -> Result<(), String> 
 async fn local_delete(path: String, is_dir: bool) -> Result<(), String> {
     let target = resolve_local_path(Some(&path))?;
     if is_dir {
-        fs::remove_dir_all(&target)
-            .map_err(|error| format!("Falha ao remover pasta local {}: {}", target.display(), error))
+        fs::remove_dir_all(&target).map_err(|error| {
+            format!(
+                "Falha ao remover pasta local {}: {}",
+                target.display(),
+                error
+            )
+        })
     } else {
-        fs::remove_file(&target)
-            .map_err(|error| format!("Falha ao remover arquivo local {}: {}", target.display(), error))
+        fs::remove_file(&target).map_err(|error| {
+            format!(
+                "Falha ao remover arquivo local {}: {}",
+                target.display(),
+                error
+            )
+        })
     }
 }
 
@@ -718,7 +746,13 @@ async fn local_create_file(path: String) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(app_error)?;
     }
     fs::File::create(&target)
-        .map_err(|error| format!("Falha ao criar arquivo local {}: {}", target.display(), error))
+        .map_err(|error| {
+            format!(
+                "Falha ao criar arquivo local {}: {}",
+                target.display(),
+                error
+            )
+        })
         .map(|_| ())
 }
 
@@ -834,11 +868,19 @@ async fn auth_servers_fetch_remote(state: State<'_, AppState>) -> Result<Vec<Aut
             merged.push(server);
         }
     }
+    if !merged.iter().any(|server| server.id == "default") {
+        merged.push(models::AuthServer::default_server());
+    }
+    merged.sort_by(|a, b| a.label.cmp(&b.label));
 
     let mut vault = state.vault.lock().await;
-    vault.merge_remote_servers(merged).ok();
+    if vault.merge_remote_servers(merged.clone()).is_ok() {
+        if let Ok(list) = vault.auth_servers_list() {
+            return Ok(list);
+        }
+    }
 
-    Ok(vault.auth_servers_list().unwrap_or_default())
+    Ok(merged)
 }
 
 fn load_local_servers() -> Vec<AuthServer> {
@@ -850,8 +892,14 @@ fn load_local_servers() -> Vec<AuthServer> {
 async fn sync_google_login(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    server_address: Option<String>,
 ) -> Result<SyncState, String> {
-    let server_address = {
+    let server_address = if let Some(address) = server_address
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        address
+    } else {
         let vault = state.vault.lock().await;
         vault.selected_auth_server().map_err(app_error)?.address
     };
@@ -886,6 +934,26 @@ fn resolve_server_addresses(vault: &vault::VaultManager) -> Result<(String, Vec<
     Ok((primary, fallbacks))
 }
 
+fn resolve_server_addresses_with_override(
+    vault: &vault::VaultManager,
+    override_address: Option<String>,
+) -> Result<(String, Vec<String>), String> {
+    if let Some(primary) = override_address
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        let fallbacks: Vec<String> = vault
+            .auth_servers_list()
+            .map_err(app_error)?
+            .into_iter()
+            .map(|server| server.address)
+            .filter(|address| address != &primary)
+            .collect();
+        return Ok((primary, fallbacks));
+    }
+    resolve_server_addresses(vault)
+}
+
 #[tauri::command]
 async fn sync_push(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncState, String> {
     let (server_address, fallbacks) = {
@@ -910,6 +978,87 @@ async fn sync_pull(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
     sync.pull(&app, &mut vault, &server_address, &fallbacks)
         .await
         .map_err(app_error)
+}
+
+#[tauri::command]
+async fn sync_startup_preview(
+    state: State<'_, AppState>,
+) -> Result<SyncConflictPreview, String> {
+    let (server_address, fallbacks) = {
+        let vault = state.vault.lock().await;
+        resolve_server_addresses(&vault)?
+    };
+
+    let mut sync = state.sync.lock().await;
+    let vault = state.vault.lock().await;
+    sync.startup_conflicts(&vault, &server_address, &fallbacks)
+        .await
+        .map_err(app_error)
+}
+
+#[tauri::command]
+async fn sync_startup_resolve(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    decisions: Vec<SyncConflictDecision>,
+) -> Result<SyncState, String> {
+    let (server_address, fallbacks) = {
+        let vault = state.vault.lock().await;
+        resolve_server_addresses(&vault)?
+    };
+
+    let mut sync = state.sync.lock().await;
+    let mut vault = state.vault.lock().await;
+    sync.resolve_startup_conflicts(
+        &app,
+        &mut vault,
+        &server_address,
+        &fallbacks,
+        decisions,
+    )
+    .await
+    .map_err(app_error)
+}
+
+#[tauri::command]
+async fn sync_recovery_probe(
+    state: State<'_, AppState>,
+    server_address: Option<String>,
+) -> Result<RecoveryProbeResult, String> {
+    let (server_address, fallbacks) = {
+        let vault = state.vault.lock().await;
+        resolve_server_addresses_with_override(&vault, server_address)?
+    };
+
+    let mut sync = state.sync.lock().await;
+    sync.recovery_probe(&server_address, &fallbacks)
+        .await
+        .map_err(app_error)
+}
+
+#[tauri::command]
+async fn sync_recovery_restore(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    server_address: Option<String>,
+    password: String,
+) -> Result<VaultStatus, String> {
+    let (server_address, fallbacks) = {
+        let vault = state.vault.lock().await;
+        resolve_server_addresses_with_override(&vault, server_address)?
+    };
+
+    let mut sync = state.sync.lock().await;
+    let mut vault = state.vault.lock().await;
+    sync.recovery_restore(
+        &app,
+        &mut vault,
+        &server_address,
+        &fallbacks,
+        password,
+    )
+    .await
+    .map_err(app_error)
 }
 
 #[tauri::command]
@@ -946,6 +1095,132 @@ async fn open_external_editor(
 }
 
 #[tauri::command]
+async fn window_state_save(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let position = window.outer_position().map_err(app_error)?;
+    let size = window.outer_size().map_err(app_error)?;
+    let maximized = window.is_maximized().map_err(app_error)?;
+
+    let snapshot = WindowState {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+        maximized,
+    };
+
+    let mut vault = state.vault.lock().await;
+    let _ = vault.save_window_state(snapshot);
+    Ok(())
+}
+
+#[tauri::command]
+async fn window_state_restore(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let maybe_state = {
+        let vault = state.vault.lock().await;
+        vault.window_state().ok().flatten()
+    };
+
+    let Some(snapshot) = maybe_state else {
+        let _ = window.unmaximize();
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            DEFAULT_WORKSPACE_WIDTH,
+            DEFAULT_WORKSPACE_HEIGHT,
+        )));
+        let _ = window.center();
+        return Ok(());
+    };
+
+    if !snapshot.maximized {
+        let _ = window.unmaximize();
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            snapshot.width as f64,
+            snapshot.height as f64,
+        )));
+        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+            snapshot.x as f64,
+            snapshot.y as f64,
+        )));
+    } else {
+        let _ = window.maximize();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn release_check_latest() -> Result<ReleaseCheckResult, String> {
+    #[derive(serde::Deserialize)]
+    struct GithubRelease {
+        tag_name: String,
+        html_url: String,
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let response = match client
+        .get(RELEASES_LATEST_URL)
+        .header("User-Agent", "TermOpen-Updater")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(ReleaseCheckResult {
+                available: false,
+                latest_version: None,
+                url: None,
+                message: format!("Falha ao verificar atualizacoes: {}", error),
+            });
+        }
+    };
+
+    if !response.status().is_success() {
+        return Ok(ReleaseCheckResult {
+            available: false,
+            latest_version: None,
+            url: None,
+            message: format!("Falha ao verificar atualizacoes ({})", response.status()),
+        });
+    }
+
+    let release: GithubRelease = match response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(ReleaseCheckResult {
+                available: false,
+                latest_version: None,
+                url: None,
+                message: format!("Resposta de release invalida: {}", error),
+            });
+        }
+    };
+
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = release.tag_name.trim_start_matches('v');
+    let available = is_remote_version_newer(current, latest);
+
+    Ok(ReleaseCheckResult {
+        available,
+        latest_version: Some(latest.to_string()),
+        url: Some(release.html_url),
+        message: if available {
+            format!("Nova versao disponivel: {}", latest)
+        } else {
+            "Aplicativo atualizado.".to_string()
+        },
+    })
+}
+
+#[tauri::command]
 fn window_minimize(window: tauri::Window) -> Result<(), String> {
     window.minimize().map_err(app_error)
 }
@@ -960,6 +1235,11 @@ fn window_toggle_maximize(window: tauri::Window) -> Result<bool, String> {
         window.maximize().map_err(app_error)?;
         Ok(true)
     }
+}
+
+#[tauri::command]
+fn window_is_maximized(window: tauri::Window) -> Result<bool, String> {
+    window.is_maximized().map_err(app_error)
 }
 
 #[tauri::command]
@@ -1018,6 +1298,24 @@ fn resolve_local_path(input: Option<&str>) -> Result<PathBuf, String> {
             .map_err(app_error)
             .map(|cwd| cwd.join(candidate))
     }
+}
+
+fn is_remote_version_newer(current: &str, latest: &str) -> bool {
+    fn parse_parts(value: &str) -> Vec<u32> {
+        value
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0))
+            .collect()
+    }
+
+    let mut current_parts = parse_parts(current);
+    let mut latest_parts = parse_parts(latest);
+    let max_len = current_parts.len().max(latest_parts.len());
+    current_parts.resize(max_len, 0);
+    latest_parts.resize(max_len, 0);
+
+    latest_parts > current_parts
 }
 
 fn focus_main_window(app: &tauri::AppHandle) {
@@ -1081,6 +1379,7 @@ pub fn run() {
             vault_init,
             vault_unlock,
             vault_lock,
+            vault_reset_all,
             vault_change_master_password,
             connections_list,
             connection_save,
@@ -1127,9 +1426,17 @@ pub fn run() {
             sync_cancel,
             sync_push,
             sync_pull,
+            sync_startup_preview,
+            sync_startup_resolve,
+            sync_recovery_probe,
+            sync_recovery_restore,
+            release_check_latest,
             open_external_editor,
+            window_state_save,
+            window_state_restore,
             window_minimize,
             window_toggle_maximize,
+            window_is_maximized,
             window_close,
         ])
         .run(tauri::generate_context!())

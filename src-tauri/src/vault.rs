@@ -1,11 +1,11 @@
 use std::{
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, Context, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     XChaCha20Poly1305, XNonce,
@@ -14,16 +14,23 @@ use chrono::Utc;
 use directories::ProjectDirs;
 use keyring::Entry;
 use rand::{rngs::OsRng, RngCore};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::models::{
-    AppSettings, AuthServer, ConnectionProfile, KeyMode, KeychainEntry, SyncMetadata, VaultFile,
-    VaultPayload, VaultStatus,
+    AppSettings, AuthServer, ConnectionProfile, KeyMode, KeychainEntry, ManifestBinPayload,
+    ProfileBinPayload, SyncMetadata, VaultPayload, VaultStatus, WindowState,
 };
 
 const KEYRING_SERVICE: &str = "com.drysius.termopen";
 const KEYRING_VAULT_KEY: &str = "vault-key";
-const VAULT_FILE_NAME: &str = "vault.enc.json";
-const CURRENT_VAULT_VERSION: u32 = 1;
+const STORAGE_DIR_NAME: &str = "TermOpen";
+const TERM_OPEN_FILE_NAME: &str = "term-open.bin";
+const PROFILE_FILE_NAME: &str = "profile.bin";
+const MANIFEST_FILE_NAME: &str = "manifest.bin";
+const FILE_EXTENSION: &str = "bin";
+const CURRENT_STORAGE_VERSION: u32 = 1;
+const CURRENT_PAYLOAD_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 struct VaultRuntime {
@@ -32,7 +39,7 @@ struct VaultRuntime {
     key: Option<[u8; 32]>,
     salt: Option<[u8; 16]>,
     payload: Option<VaultPayload>,
-    created_at: Option<String>,
+    created_at: Option<i64>,
 }
 
 impl Default for VaultRuntime {
@@ -49,8 +56,29 @@ impl Default for VaultRuntime {
 }
 
 pub struct VaultManager {
-    vault_path: PathBuf,
+    storage_root: PathBuf,
+    term_open_path: PathBuf,
+    profile_path: PathBuf,
+    manifest_path: PathBuf,
     runtime: VaultRuntime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TermOpenBin {
+    version: u32,
+    key_mode: KeyMode,
+    salt: Option<[u8; 16]>,
+    key_check: [u8; 32],
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedBin {
+    version: u32,
+    nonce: [u8; 24],
+    ciphertext: Vec<u8>,
+    updated_at: i64,
 }
 
 impl VaultManager {
@@ -62,38 +90,52 @@ impl VaultManager {
             format!("Falha ao criar diretorio de dados: {}", data_dir.display())
         })?;
 
+        let storage_root = data_dir.join(STORAGE_DIR_NAME);
+        fs::create_dir_all(&storage_root)
+            .with_context(|| format!("Falha ao criar diretorio {}", storage_root.display()))?;
+
+        cleanup_legacy_layout(data_dir, &storage_root)?;
+
         Ok(Self {
-            vault_path: data_dir.join(VAULT_FILE_NAME),
+            term_open_path: storage_root.join(TERM_OPEN_FILE_NAME),
+            profile_path: storage_root.join(PROFILE_FILE_NAME),
+            manifest_path: storage_root.join(MANIFEST_FILE_NAME),
+            storage_root,
             runtime: VaultRuntime::default(),
         })
     }
 
     pub fn status(&self) -> Result<VaultStatus> {
+        let initialized = self.vault_initialized();
+        let recoverable = self.term_open_exists() && !initialized;
+
         let key_mode = if self.runtime.key_mode.is_some() {
             self.runtime.key_mode.clone()
-        } else if self.vault_path.exists() {
-            let file = self.read_vault_file()?;
-            Some(file.key_mode)
+        } else if self.term_open_exists() {
+            Some(self.read_term_open_file()?.key_mode)
         } else {
             None
         };
 
         Ok(VaultStatus {
-            initialized: self.vault_path.exists(),
+            initialized,
             locked: !self.runtime.unlocked,
             key_mode,
+            recoverable,
         })
     }
 
     pub fn init(&mut self, password: Option<String>) -> Result<VaultStatus> {
-        if self.vault_path.exists() {
+        if self.vault_initialized() {
             return Err(anyhow!("Vault ja foi inicializado"));
         }
 
+        self.clear_local_storage()?;
+
         let (key_mode, key, salt) = if let Some(raw_password) = password {
             let pass = raw_password.trim().to_string();
-            if pass.is_empty() {
-                return Err(anyhow!("Senha mestre nao pode ser vazia"));
+            if pass.len() < 6 {
+                return Err(anyhow!("A senha mestre deve ter ao menos 6 caracteres"));
             }
 
             let mut salt = [0u8; 16];
@@ -107,12 +149,11 @@ impl VaultManager {
             (KeyMode::Keychain, key, None)
         };
 
-        let payload = VaultPayload {
-            version: CURRENT_VAULT_VERSION,
+        let mut payload = VaultPayload {
+            version: CURRENT_PAYLOAD_VERSION,
             ..VaultPayload::default()
         };
-
-        let now = Utc::now().to_rfc3339();
+        ensure_default_server(&mut payload.auth_servers);
 
         self.runtime = VaultRuntime {
             unlocked: true,
@@ -120,7 +161,7 @@ impl VaultManager {
             key: Some(key),
             salt,
             payload: Some(payload),
-            created_at: Some(now),
+            created_at: Some(Utc::now().timestamp()),
         };
 
         self.persist()?;
@@ -128,48 +169,51 @@ impl VaultManager {
     }
 
     pub fn unlock(&mut self, password: Option<String>) -> Result<VaultStatus> {
-        if !self.vault_path.exists() {
+        if !self.vault_initialized() {
             return Err(anyhow!("Vault ainda nao foi inicializado"));
         }
 
-        let file = self.read_vault_file()?;
-        if file.version != CURRENT_VAULT_VERSION {
+        let term_open = self.read_term_open_file()?;
+        if term_open.version != CURRENT_STORAGE_VERSION {
             return Err(anyhow!(
-                "Versao de vault nao suportada. Atual: {}, encontrada: {}",
-                CURRENT_VAULT_VERSION,
-                file.version
+                "Versao de term-open.bin nao suportada. Atual: {}, encontrada: {}",
+                CURRENT_STORAGE_VERSION,
+                term_open.version
             ));
         }
 
-        let (key, salt) = match file.key_mode {
+        let (key, salt) = match term_open.key_mode {
             KeyMode::Password => {
                 let raw_password =
-                    password.ok_or_else(|| anyhow!("Senha mestre obrigatoria para este perfil"))?;
+                    password.ok_or_else(|| anyhow!("Senha mestre obrigatoria para este vault"))?;
                 let pass = raw_password.trim();
                 if pass.is_empty() {
-                    return Err(anyhow!("Senha mestre obrigatoria para este perfil"));
+                    return Err(anyhow!("Senha mestre obrigatoria para este vault"));
                 }
-
-                let salt_bytes = decode_fixed_16(
-                    file.salt
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("Salt ausente no arquivo criptografado"))?,
-                )?;
-                let key = derive_key(pass, &salt_bytes)?;
-                (key, Some(salt_bytes))
+                let salt = term_open
+                    .salt
+                    .ok_or_else(|| anyhow!("Salt ausente no term-open.bin"))?;
+                let key = derive_key(pass, &salt)?;
+                (key, Some(salt))
             }
             KeyMode::Keychain => (load_keychain_key()?, None),
         };
 
-        let payload = decrypt_payload(&file, &key)?;
+        if compute_key_check(&key) != term_open.key_check {
+            return Err(anyhow!("Senha mestre invalida"));
+        }
+
+        let mut payload = self.read_payload_from_disk(&key)?;
+        payload.version = CURRENT_PAYLOAD_VERSION;
+        ensure_default_server(&mut payload.auth_servers);
 
         self.runtime = VaultRuntime {
             unlocked: true,
-            key_mode: Some(file.key_mode),
+            key_mode: Some(term_open.key_mode),
             key: Some(key),
             salt,
             payload: Some(payload),
-            created_at: Some(file.created_at),
+            created_at: Some(term_open.created_at),
         };
 
         self.status()
@@ -178,10 +222,18 @@ impl VaultManager {
     pub fn lock(&mut self) -> VaultStatus {
         self.runtime = VaultRuntime::default();
         VaultStatus {
-            initialized: self.vault_path.exists(),
+            initialized: self.vault_initialized(),
             locked: true,
             key_mode: None,
+            recoverable: self.term_open_exists() && !self.vault_initialized(),
         }
+    }
+
+    pub fn reset_all(&mut self) -> Result<VaultStatus> {
+        self.runtime = VaultRuntime::default();
+        self.clear_local_storage()?;
+        clear_keychain_key();
+        self.status()
     }
 
     pub fn change_master_password(
@@ -228,9 +280,7 @@ impl VaultManager {
                     return Err(anyhow!("Senha mestre atual invalida"));
                 }
             }
-            KeyMode::Keychain => {
-                // keychain mode does not require old password
-            }
+            KeyMode::Keychain => {}
         }
 
         let mut new_salt = [0u8; 16];
@@ -259,6 +309,10 @@ impl VaultManager {
 
         if profile.id.trim().is_empty() {
             profile.id = uuid::Uuid::new_v4().to_string();
+        }
+
+        if uuid::Uuid::parse_str(profile.id.trim()).is_err() {
+            return Err(anyhow!("ID de host invalido: deve ser UUID"));
         }
 
         if profile.port == 0 {
@@ -330,6 +384,10 @@ impl VaultManager {
             entry.created_at = Utc::now().timestamp();
         }
 
+        if uuid::Uuid::parse_str(entry.id.trim()).is_err() {
+            return Err(anyhow!("ID de keychain invalido: deve ser UUID"));
+        }
+
         entry.name = entry.name.trim().to_string();
         entry.private_key = normalize_option(entry.private_key);
         entry.public_key = normalize_option(entry.public_key);
@@ -364,24 +422,28 @@ impl VaultManager {
     }
 
     pub fn auth_servers_list(&self) -> Result<Vec<AuthServer>> {
-        let payload = self.payload()?;
-        let mut servers = payload.auth_servers.clone();
-        // Garantir que o default sempre existe
-        if !servers.iter().any(|s| s.id == "default") {
-            servers.insert(0, AuthServer::default_server());
-        }
+        let mut servers = if self.runtime.unlocked {
+            self.payload()?.auth_servers.clone()
+        } else {
+            Vec::new()
+        };
+        ensure_default_server(&mut servers);
         servers.sort_by(|a, b| a.label.cmp(&b.label));
         Ok(servers)
     }
 
     pub fn merge_remote_servers(&mut self, remote: Vec<AuthServer>) -> Result<()> {
-        self.assert_unlocked()?;
+        if !self.runtime.unlocked {
+            return Ok(());
+        }
+
         let payload = self.payload_mut()?;
         for server in remote {
             if !payload.auth_servers.iter().any(|s| s.id == server.id) {
                 payload.auth_servers.push(server);
             }
         }
+        ensure_default_server(&mut payload.auth_servers);
         self.persist()
     }
 
@@ -408,6 +470,7 @@ impl VaultManager {
         let payload = self.payload_mut()?;
         payload.auth_servers.retain(|s| s.id != server.id);
         payload.auth_servers.push(server.clone());
+        ensure_default_server(&mut payload.auth_servers);
         payload.auth_servers.sort_by(|a, b| a.label.cmp(&b.label));
         touch_local_change(payload);
         self.persist()?;
@@ -425,11 +488,16 @@ impl VaultManager {
         if payload.settings.selected_auth_server_id.as_deref() == Some(id) {
             payload.settings.selected_auth_server_id = None;
         }
+        ensure_default_server(&mut payload.auth_servers);
         touch_local_change(payload);
         self.persist()
     }
 
     pub fn selected_auth_server(&self) -> Result<AuthServer> {
+        if !self.runtime.unlocked {
+            return Ok(AuthServer::default_server());
+        }
+
         let payload = self.payload()?;
         let selected_id = payload
             .settings
@@ -476,39 +544,187 @@ impl VaultManager {
         self.persist()
     }
 
-    pub fn replace_encrypted_file(&mut self, encrypted_bytes: &[u8]) -> Result<()> {
-        fs::write(&self.vault_path, encrypted_bytes)
-            .with_context(|| format!("Falha ao escrever vault em {}", self.vault_path.display()))?;
+    pub fn current_key(&self) -> Result<[u8; 32]> {
+        self.runtime
+            .key
+            .ok_or_else(|| anyhow!("Chave do vault indisponivel"))
+    }
+
+    pub fn decrypt_manifest_bytes(&self, encrypted_bytes: &[u8]) -> Result<ManifestBinPayload> {
+        let key = self.current_key()?;
+        let encrypted: EncryptedBin = decode_bin(encrypted_bytes, "manifest.bin invalido")?;
+        decrypt_bin_payload(&encrypted, &key, "manifest.bin")
+    }
+
+    pub fn read_local_bin_file(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let normalized = normalize_bin_file_name(name)?;
+        let path = self.storage_root.join(&normalized);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)
+            .with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
+        Ok(Some(bytes))
+    }
+
+    pub fn write_local_bin_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let normalized = normalize_bin_file_name(name)?;
+        let path = self.storage_root.join(&normalized);
+        fs::write(&path, bytes).with_context(|| format!("Falha ao escrever {}", path.display()))
+    }
+
+    pub fn remove_local_bin_file(&self, name: &str) -> Result<()> {
+        let normalized = normalize_bin_file_name(name)?;
+        let path = self.storage_root.join(&normalized);
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("Falha ao remover arquivo {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    pub fn list_local_bin_files(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        if !self.storage_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = fs::read_dir(&self.storage_root)
+            .with_context(|| format!("Falha ao listar {}", self.storage_root.display()))?;
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|value| value.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if !is_bin_file_name(&name) {
+                continue;
+            }
+            let bytes = fs::read(&path)
+                .with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
+            files.push((name, bytes));
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(files)
+    }
+
+    pub fn replace_local_files(&mut self, files: &HashMap<String, Vec<u8>>) -> Result<()> {
+        self.clear_local_storage()?;
+        fs::create_dir_all(&self.storage_root)
+            .with_context(|| format!("Falha ao criar {}", self.storage_root.display()))?;
+
+        for (name, bytes) in files {
+            let normalized = normalize_bin_file_name(name)?;
+            let path = self.storage_root.join(&normalized);
+            fs::write(&path, bytes)
+                .with_context(|| format!("Falha ao escrever {}", path.display()))?;
+        }
 
         if self.runtime.unlocked {
-            let key = self
-                .runtime
-                .key
-                .ok_or_else(|| anyhow!("Chave de runtime indisponivel para recarregar vault"))?;
-            let file = self.read_vault_file()?;
-            let payload = decrypt_payload(&file, &key)?;
-
-            let salt = match file.key_mode {
-                KeyMode::Password => Some(decode_fixed_16(
-                    file.salt
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("Salt ausente no vault baixado"))?,
-                )?),
-                KeyMode::Keychain => None,
-            };
-
-            self.runtime.key_mode = Some(file.key_mode);
-            self.runtime.salt = salt;
-            self.runtime.payload = Some(payload);
-            self.runtime.created_at = Some(file.created_at);
+            self.reload_unlocked_from_disk()?;
         }
 
         Ok(())
     }
 
-    pub fn encrypted_file_bytes(&self) -> Result<Vec<u8>> {
-        fs::read(&self.vault_path)
-            .with_context(|| format!("Falha ao ler vault em {}", self.vault_path.display()))
+    pub fn clear_local_storage(&self) -> Result<()> {
+        if !self.storage_root.exists() {
+            return Ok(());
+        }
+
+        let entries = fs::read_dir(&self.storage_root)
+            .with_context(|| format!("Falha ao listar {}", self.storage_root.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+                    .with_context(|| format!("Falha ao remover pasta {}", path.display()))?;
+            } else {
+                fs::remove_file(&path)
+                    .with_context(|| format!("Falha ao remover arquivo {}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_password_for_term_open_bytes(
+        &self,
+        term_open_bytes: &[u8],
+        password: &str,
+    ) -> Result<bool> {
+        let term_open: TermOpenBin = decode_bin(term_open_bytes, "term-open.bin invalido")?;
+        match term_open.key_mode {
+            KeyMode::Password => {
+                let salt = term_open
+                    .salt
+                    .ok_or_else(|| anyhow!("Salt ausente no term-open.bin"))?;
+                let key = derive_key(password.trim(), &salt)?;
+                Ok(compute_key_check(&key) == term_open.key_check)
+            }
+            KeyMode::Keychain => Err(anyhow!(
+                "Backup usa keychain do sistema. Recuperacao remota exige senha mestre"
+            )),
+        }
+    }
+
+    pub fn local_manifest_snapshot(&self) -> Result<ManifestBinPayload> {
+        let key = self.current_key()?;
+        let encrypted: EncryptedBin = read_bin_file(&self.manifest_path)?;
+        decrypt_bin_payload(&encrypted, &key, "manifest.bin")
+    }
+
+    pub fn local_profile_hash(&self) -> Result<Option<String>> {
+        let Some(bytes) = self.read_local_bin_file(PROFILE_FILE_NAME)? else {
+            return Ok(None);
+        };
+        Ok(Some(hash_bytes_hex(&bytes)))
+    }
+
+    pub fn reload_unlocked_from_disk_and_persist(&mut self) -> Result<()> {
+        self.reload_unlocked_from_disk()?;
+        self.persist()
+    }
+
+    pub fn save_window_state(&mut self, next: WindowState) -> Result<()> {
+        self.assert_unlocked()?;
+        let payload = self.payload_mut()?;
+        payload.window_state = Some(next);
+        self.persist()
+    }
+
+    pub fn window_state(&self) -> Result<Option<WindowState>> {
+        Ok(self.payload()?.window_state.clone())
+    }
+
+    fn reload_unlocked_from_disk(&mut self) -> Result<()> {
+        self.assert_unlocked()?;
+
+        let key = self
+            .runtime
+            .key
+            .ok_or_else(|| anyhow!("Chave do vault indisponivel"))?;
+        let term_open = self.read_term_open_file()?;
+
+        if compute_key_check(&key) != term_open.key_check {
+            return Err(anyhow!(
+                "term-open.bin local pertence a outra chave mestre"
+            ));
+        }
+
+        let mut payload = self.read_payload_from_disk(&key)?;
+        payload.version = CURRENT_PAYLOAD_VERSION;
+        ensure_default_server(&mut payload.auth_servers);
+
+        self.runtime.payload = Some(payload);
+        self.runtime.key_mode = Some(term_open.key_mode);
+        self.runtime.salt = term_open.salt;
+        self.runtime.created_at = Some(term_open.created_at);
+
+        Ok(())
     }
 
     fn assert_unlocked(&self) -> Result<()> {
@@ -534,60 +750,282 @@ impl VaultManager {
             .ok_or_else(|| anyhow!("Payload do vault indisponivel"))
     }
 
-    fn persist(&self) -> Result<()> {
+    fn persist(&mut self) -> Result<()> {
         self.assert_unlocked()?;
 
-        let payload = self
-            .runtime
-            .payload
-            .as_ref()
-            .ok_or_else(|| anyhow!("Payload do vault indisponivel"))?;
-        let key = self
-            .runtime
-            .key
-            .as_ref()
-            .ok_or_else(|| anyhow!("Chave do vault indisponivel"))?;
         let key_mode = self
             .runtime
             .key_mode
             .clone()
             .ok_or_else(|| anyhow!("Modo de chave nao definido"))?;
-
-        let now = Utc::now().to_rfc3339();
-        let created_at = self
+        let key = self
             .runtime
-            .created_at
-            .clone()
-            .unwrap_or_else(|| now.clone());
+            .key
+            .ok_or_else(|| anyhow!("Chave do vault indisponivel"))?;
 
-        let file = encrypt_payload(
-            payload,
-            key_mode,
-            key,
-            self.runtime.salt.as_ref(),
-            created_at,
-            now,
-        )?;
-        let bytes = serde_json::to_vec_pretty(&file)?;
+        fs::create_dir_all(&self.storage_root)
+            .with_context(|| format!("Falha ao criar {}", self.storage_root.display()))?;
 
-        if let Some(parent) = self.vault_path.parent() {
-            fs::create_dir_all(parent)?;
+        let now = Utc::now().timestamp();
+        let created_at = self.runtime.created_at.unwrap_or(now);
+
+        let payload = self
+            .runtime
+            .payload
+            .as_mut()
+            .ok_or_else(|| anyhow!("Payload do vault indisponivel"))?;
+
+        for profile in &mut payload.connections {
+            if profile.id.trim().is_empty() {
+                profile.id = uuid::Uuid::new_v4().to_string();
+            }
+            ensure_uuid(&profile.id, "host")?;
+            profile.normalize_protocols();
         }
 
-        fs::write(&self.vault_path, bytes)
-            .with_context(|| format!("Falha ao escrever vault em {}", self.vault_path.display()))
+        for entry in &mut payload.keychain {
+            if entry.id.trim().is_empty() {
+                entry.id = uuid::Uuid::new_v4().to_string();
+                entry.created_at = now;
+            }
+            ensure_uuid(&entry.id, "keychain")?;
+        }
+
+        payload.connections.sort_by(|a, b| a.name.cmp(&b.name));
+        payload.keychain.sort_by(|a, b| a.name.cmp(&b.name));
+        ensure_default_server(&mut payload.auth_servers);
+
+        let mut hosts = BTreeMap::new();
+        let mut keychain = BTreeMap::new();
+        let mut expected_files = HashSet::new();
+
+        for profile in &payload.connections {
+            let file_name = format!("{}.bin", profile.id);
+            let path = self.storage_root.join(&file_name);
+            let encrypted = encrypt_bin_payload(profile, &key, &profile.id, now)?;
+            let encoded = encode_bin(&encrypted)?;
+            fs::write(&path, &encoded)
+                .with_context(|| format!("Falha ao escrever arquivo {}", path.display()))?;
+            hosts.insert(profile.id.clone(), hash_bytes_hex(&encoded));
+            expected_files.insert(file_name);
+        }
+
+        for entry in &payload.keychain {
+            let file_name = format!("{}.bin", entry.id);
+            let path = self.storage_root.join(&file_name);
+            let encrypted = encrypt_bin_payload(entry, &key, &entry.id, now)?;
+            let encoded = encode_bin(&encrypted)?;
+            fs::write(&path, &encoded)
+                .with_context(|| format!("Falha ao escrever arquivo {}", path.display()))?;
+            keychain.insert(entry.id.clone(), hash_bytes_hex(&encoded));
+            expected_files.insert(file_name);
+        }
+
+        let manifest_payload = ManifestBinPayload {
+            version: CURRENT_PAYLOAD_VERSION,
+            hosts,
+            keychain,
+        };
+        let manifest_encrypted =
+            encrypt_bin_payload(&manifest_payload, &key, MANIFEST_FILE_NAME, now)?;
+        write_bin_file(&self.manifest_path, &manifest_encrypted)?;
+
+        let profile_payload = ProfileBinPayload {
+            version: CURRENT_PAYLOAD_VERSION,
+            settings: payload.settings.clone(),
+            sync: payload.sync.clone(),
+            auth_servers: payload.auth_servers.clone(),
+            window_state: payload.window_state.clone(),
+        };
+        let profile_encrypted = encrypt_bin_payload(&profile_payload, &key, PROFILE_FILE_NAME, now)?;
+        write_bin_file(&self.profile_path, &profile_encrypted)?;
+
+        let term_open = TermOpenBin {
+            version: CURRENT_STORAGE_VERSION,
+            key_mode,
+            salt: self.runtime.salt,
+            key_check: compute_key_check(&key),
+            created_at,
+            updated_at: now,
+        };
+        write_bin_file(&self.term_open_path, &term_open)?;
+
+        self.runtime.created_at = Some(created_at);
+        self.cleanup_stale_item_files(&expected_files)
     }
 
-    fn read_vault_file(&self) -> Result<VaultFile> {
-        read_vault_file(&self.vault_path)
+    fn cleanup_stale_item_files(&self, expected: &HashSet<String>) -> Result<()> {
+        let entries = fs::read_dir(&self.storage_root)
+            .with_context(|| format!("Falha ao listar {}", self.storage_root.display()))?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|value| value.to_string_lossy().to_string()) else {
+                continue;
+            };
+
+            if !is_bin_file_name(&name) {
+                continue;
+            }
+            if name == TERM_OPEN_FILE_NAME || name == PROFILE_FILE_NAME || name == MANIFEST_FILE_NAME {
+                continue;
+            }
+            if expected.contains(&name) {
+                continue;
+            }
+
+            fs::remove_file(&path)
+                .with_context(|| format!("Falha ao remover arquivo obsoleto {}", path.display()))?;
+        }
+
+        Ok(())
+    }
+
+    fn read_term_open_file(&self) -> Result<TermOpenBin> {
+        read_bin_file(&self.term_open_path)
+    }
+
+    fn read_payload_from_disk(&self, key: &[u8; 32]) -> Result<VaultPayload> {
+        let profile_encrypted: EncryptedBin = read_bin_file(&self.profile_path)?;
+        let profile_payload: ProfileBinPayload =
+            decrypt_bin_payload(&profile_encrypted, key, PROFILE_FILE_NAME)?;
+
+        let manifest_encrypted: EncryptedBin = read_bin_file(&self.manifest_path)?;
+        let manifest_payload: ManifestBinPayload =
+            decrypt_bin_payload(&manifest_encrypted, key, MANIFEST_FILE_NAME)?;
+
+        if profile_payload.version != CURRENT_PAYLOAD_VERSION {
+            return Err(anyhow!(
+                "Versao de profile.bin nao suportada. Atual: {}, encontrada: {}",
+                CURRENT_PAYLOAD_VERSION,
+                profile_payload.version
+            ));
+        }
+
+        if manifest_payload.version != CURRENT_PAYLOAD_VERSION {
+            return Err(anyhow!(
+                "Versao de manifest.bin nao suportada. Atual: {}, encontrada: {}",
+                CURRENT_PAYLOAD_VERSION,
+                manifest_payload.version
+            ));
+        }
+
+        let mut connections = Vec::new();
+        let mut keychain = Vec::new();
+
+        for (uuid, expected_hash) in manifest_payload.hosts {
+            ensure_uuid(&uuid, "host")?;
+            let path = self.storage_root.join(format!("{}.bin", uuid));
+            let encoded = fs::read(&path)
+                .with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
+            let actual_hash = hash_bytes_hex(&encoded);
+            if actual_hash != expected_hash {
+                return Err(anyhow!(
+                    "Hash divergente para host {}. Esperado {}, obtido {}",
+                    uuid,
+                    expected_hash,
+                    actual_hash
+                ));
+            }
+            let encrypted: EncryptedBin = decode_bin(&encoded, "Arquivo de host invalido")?;
+            let mut profile: ConnectionProfile =
+                decrypt_bin_payload(&encrypted, key, "Arquivo de host")?;
+            profile.id = uuid;
+            profile.normalize_protocols();
+            connections.push(profile);
+        }
+
+        for (uuid, expected_hash) in manifest_payload.keychain {
+            ensure_uuid(&uuid, "keychain")?;
+            let path = self.storage_root.join(format!("{}.bin", uuid));
+            let encoded = fs::read(&path)
+                .with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
+            let actual_hash = hash_bytes_hex(&encoded);
+            if actual_hash != expected_hash {
+                return Err(anyhow!(
+                    "Hash divergente para keychain {}. Esperado {}, obtido {}",
+                    uuid,
+                    expected_hash,
+                    actual_hash
+                ));
+            }
+            let encrypted: EncryptedBin = decode_bin(&encoded, "Arquivo de keychain invalido")?;
+            let mut entry: KeychainEntry =
+                decrypt_bin_payload(&encrypted, key, "Arquivo de keychain")?;
+            entry.id = uuid;
+            keychain.push(entry);
+        }
+
+        Ok(VaultPayload {
+            version: CURRENT_PAYLOAD_VERSION,
+            connections,
+            keychain,
+            settings: profile_payload.settings,
+            sync: profile_payload.sync,
+            auth_servers: profile_payload.auth_servers,
+            window_state: profile_payload.window_state,
+        })
+    }
+
+    fn vault_initialized(&self) -> bool {
+        self.term_open_exists() && self.profile_path.exists() && self.manifest_path.exists()
+    }
+
+    fn term_open_exists(&self) -> bool {
+        self.term_open_path.exists()
     }
 }
 
-fn read_vault_file(path: &Path) -> Result<VaultFile> {
-    let raw = fs::read(path).with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
-    let file: VaultFile = serde_json::from_slice(&raw)
-        .with_context(|| format!("Falha ao decodificar arquivo {}", path.display()))?;
-    Ok(file)
+fn cleanup_legacy_layout(data_dir: &Path, storage_root: &Path) -> Result<()> {
+    let legacy_vault = data_dir.join("vault.enc.json");
+    if legacy_vault.exists() {
+        let _ = fs::remove_file(&legacy_vault);
+    }
+
+    let legacy_default = storage_root.join("default");
+    if legacy_default.exists() && legacy_default.is_dir() {
+        let _ = fs::remove_dir_all(&legacy_default);
+    }
+
+    if storage_root.exists() {
+        let entries = fs::read_dir(storage_root)
+            .with_context(|| format!("Falha ao listar {}", storage_root.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(&path);
+                continue;
+            }
+
+            let Some(name) = path.file_name().map(|value| value.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if is_bin_file_name(&name) {
+                continue;
+            }
+            let _ = fs::remove_file(&path);
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_default_server(servers: &mut Vec<AuthServer>) {
+    if !servers.iter().any(|item| item.id == "default") {
+        servers.push(AuthServer::default_server());
+    }
+}
+
+fn ensure_uuid(value: &str, kind: &str) -> Result<()> {
+    if uuid::Uuid::parse_str(value).is_err() {
+        return Err(anyhow!("ID de {} invalido: {}", kind, value));
+    }
+    Ok(())
 }
 
 fn derive_key(password: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
@@ -602,80 +1040,136 @@ fn derive_key(password: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn encrypt_payload(
-    payload: &VaultPayload,
-    key_mode: KeyMode,
-    key: &[u8; 32],
-    salt: Option<&[u8; 16]>,
-    created_at: String,
-    updated_at: String,
-) -> Result<VaultFile> {
+fn compute_key_check(key: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.update(b"termopen-key-check-v1");
+    let digest = hasher.finalize();
+
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn hash_bytes_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    to_hex(&digest)
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+fn encode_bin<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    bincode::serde::encode_to_vec(value, bincode::config::standard())
+        .map_err(|error| anyhow!("Falha ao serializar binario: {}", error))
+}
+
+fn decode_bin<T: DeserializeOwned>(bytes: &[u8], context: &str) -> Result<T> {
+    bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+        .map(|(value, _)| value)
+        .map_err(|error| anyhow!("{}: {}", context, error))
+}
+
+fn read_bin_file<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let raw = fs::read(path).with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
+    decode_bin(&raw, &format!("Falha ao decodificar {}", path.display()))
+}
+
+fn write_bin_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Falha ao criar diretorio {}", parent.display()))?;
+    }
+    let data = encode_bin(value)?;
+    fs::write(path, data).with_context(|| format!("Falha ao escrever arquivo {}", path.display()))
+}
+
+fn derive_nonce(key: &[u8; 32], file_tag: &str, plaintext: &[u8]) -> [u8; 24] {
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.update(file_tag.as_bytes());
+    hasher.update(plaintext);
+    let digest = hasher.finalize();
+
     let mut nonce = [0u8; 24];
-    OsRng.fill_bytes(&mut nonce);
+    nonce.copy_from_slice(&digest[..24]);
+    nonce
+}
+
+fn encrypt_bin_payload<T: Serialize>(
+    payload: &T,
+    key: &[u8; 32],
+    file_tag: &str,
+    updated_at: i64,
+) -> Result<EncryptedBin> {
+    let plaintext = encode_bin(payload)?;
+    let nonce = derive_nonce(key, file_tag, &plaintext);
 
     let cipher = XChaCha20Poly1305::new(key.into());
-    let plaintext = serde_json::to_vec(payload)?;
     let ciphertext = cipher
         .encrypt(XNonce::from_slice(&nonce), plaintext.as_ref())
         .map_err(|_| anyhow!("Falha ao criptografar payload"))?;
 
-    Ok(VaultFile {
-        version: CURRENT_VAULT_VERSION,
-        key_mode,
-        salt: salt.map(|value| BASE64.encode(value)),
-        nonce: BASE64.encode(nonce),
-        ciphertext: BASE64.encode(ciphertext),
-        created_at,
+    Ok(EncryptedBin {
+        version: CURRENT_STORAGE_VERSION,
+        nonce,
+        ciphertext,
         updated_at,
     })
 }
 
-fn decrypt_payload(file: &VaultFile, key: &[u8; 32]) -> Result<VaultPayload> {
-    let nonce = decode_fixed_24(&file.nonce)?;
-    let ciphertext = BASE64
-        .decode(&file.ciphertext)
-        .context("Falha ao decodificar ciphertext do vault")?;
+fn decrypt_bin_payload<T: DeserializeOwned>(
+    file: &EncryptedBin,
+    key: &[u8; 32],
+    context_message: &str,
+) -> Result<T> {
+    if file.version != CURRENT_STORAGE_VERSION {
+        return Err(anyhow!(
+            "Versao de arquivo nao suportada. Atual: {}, encontrada: {}",
+            CURRENT_STORAGE_VERSION,
+            file.version
+        ));
+    }
 
     let cipher = XChaCha20Poly1305::new(key.into());
     let plaintext = cipher
-        .decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
-        .map_err(|_| anyhow!("Senha/chave invalida para descriptografia do vault"))?;
+        .decrypt(XNonce::from_slice(&file.nonce), file.ciphertext.as_ref())
+        .map_err(|_| anyhow!("Falha ao descriptografar {}", context_message))?;
 
-    serde_json::from_slice::<VaultPayload>(&plaintext)
-        .context("Falha ao interpretar payload descriptografado")
+    decode_bin(&plaintext, &format!("Falha ao decodificar {}", context_message))
 }
 
-fn decode_fixed_16(encoded: &str) -> Result<[u8; 16]> {
-    let data = BASE64
-        .decode(encoded)
-        .context("Falha ao decodificar salt")?;
-    if data.len() != 16 {
-        return Err(anyhow!("Salt invalido: esperado 16 bytes"));
+fn normalize_bin_file_name(input: &str) -> Result<String> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Err(anyhow!("Nome de arquivo vazio"));
     }
-
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&data);
-    Ok(out)
+    if value.contains('/') || value.contains('\\') {
+        return Err(anyhow!("Nome de arquivo invalido"));
+    }
+    if !is_bin_file_name(value) {
+        return Err(anyhow!("Apenas arquivos .bin sao permitidos"));
+    }
+    Ok(value.to_string())
 }
 
-fn decode_fixed_24(encoded: &str) -> Result<[u8; 24]> {
-    let data = BASE64
-        .decode(encoded)
-        .context("Falha ao decodificar nonce")?;
-    if data.len() != 24 {
-        return Err(anyhow!("Nonce invalido: esperado 24 bytes"));
-    }
-
-    let mut out = [0u8; 24];
-    out.copy_from_slice(&data);
-    Ok(out)
+fn is_bin_file_name(name: &str) -> bool {
+    name.to_ascii_lowercase()
+        .ends_with(&format!(".{}", FILE_EXTENSION))
 }
 
 fn persist_keychain_key(key: &[u8; 32]) -> Result<()> {
     let entry =
         Entry::new(KEYRING_SERVICE, KEYRING_VAULT_KEY).context("Falha ao preparar keychain")?;
     entry
-        .set_password(&BASE64.encode(key))
+        .set_password(&to_hex(key))
         .context("Falha ao salvar chave no keychain")
 }
 
@@ -686,10 +1180,7 @@ fn load_keychain_key() -> Result<[u8; 32]> {
         .get_password()
         .context("Nao foi possivel ler chave do keychain")?;
 
-    let bytes = BASE64
-        .decode(value)
-        .context("Falha ao decodificar chave do keychain")?;
-
+    let bytes = hex_to_bytes(&value)?;
     if bytes.len() != 32 {
         return Err(anyhow!("Chave do keychain invalida"));
     }
@@ -703,6 +1194,21 @@ fn clear_keychain_key() {
     if let Ok(entry) = Entry::new(KEYRING_SERVICE, KEYRING_VAULT_KEY) {
         let _ = entry.delete_password();
     }
+}
+
+fn hex_to_bytes(input: &str) -> Result<Vec<u8>> {
+    let clean = input.trim();
+    if clean.len() % 2 != 0 {
+        return Err(anyhow!("Hex invalido"));
+    }
+    let mut out = Vec::with_capacity(clean.len() / 2);
+    let bytes = clean.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let chunk = std::str::from_utf8(&bytes[i..i + 2]).context("Hex invalido")?;
+        let value = u8::from_str_radix(chunk, 16).context("Hex invalido")?;
+        out.push(value);
+    }
+    Ok(out)
 }
 
 fn touch_local_change(payload: &mut VaultPayload) {
@@ -721,58 +1227,45 @@ mod tests {
     use crate::models::ConnectionProtocol;
 
     #[test]
-    fn should_encrypt_and_decrypt_payload() {
-        let payload = VaultPayload {
-            version: CURRENT_VAULT_VERSION,
-            connections: vec![ConnectionProfile {
-                id: "id-1".to_string(),
-                name: "srv".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: 22,
-                username: "root".to_string(),
-                password: Some("secret".to_string()),
-                private_key: None,
-                remote_path: Some("/".to_string()),
-                protocols: vec![ConnectionProtocol::Ssh, ConnectionProtocol::Sftp],
-                kind: None,
-            }],
-            ..VaultPayload::default()
+    fn should_encrypt_and_decrypt_record() {
+        let profile = ConnectionProfile {
+            id: "6ec2a7db-c0af-4435-b38c-228f0cc9ec31".to_string(),
+            name: "srv".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            password: Some("secret".to_string()),
+            private_key: None,
+            keychain_id: None,
+            remote_path: Some("/".to_string()),
+            protocols: vec![ConnectionProtocol::Ssh, ConnectionProtocol::Sftp],
+            kind: None,
         };
 
         let salt = [7u8; 16];
         let key = derive_key("master-password", &salt).expect("kdf should work");
-
-        let encrypted = encrypt_payload(
-            &payload,
-            KeyMode::Password,
-            &key,
-            Some(&salt),
-            "2026-01-01T00:00:00Z".to_string(),
-            "2026-01-01T00:00:00Z".to_string(),
-        )
-        .expect("encrypt should work");
-
-        let decrypted = decrypt_payload(&encrypted, &key).expect("decrypt should work");
-        assert_eq!(decrypted.connections.len(), 1);
-        assert_eq!(decrypted.connections[0].host, "127.0.0.1");
+        let encrypted =
+            encrypt_bin_payload(&profile, &key, &profile.id, 1_700_000_000).expect("encrypt");
+        let decrypted: ConnectionProfile =
+            decrypt_bin_payload(&encrypted, &key, "decrypt test").expect("decrypt");
+        assert_eq!(decrypted.host, "127.0.0.1");
     }
 
     #[test]
     fn should_fail_on_wrong_key() {
-        let payload = VaultPayload::default();
+        let value = ManifestBinPayload {
+            version: 1,
+            hosts: BTreeMap::new(),
+            keychain: BTreeMap::new(),
+        };
+
         let salt = [1u8; 16];
         let key = derive_key("correct", &salt).expect("kdf should work");
-        let encrypted = encrypt_payload(
-            &payload,
-            KeyMode::Password,
-            &key,
-            Some(&salt),
-            "2026-01-01T00:00:00Z".to_string(),
-            "2026-01-01T00:00:00Z".to_string(),
-        )
-        .expect("encrypt should work");
+        let encrypted = encrypt_bin_payload(&value, &key, "manifest.bin", 1_700_000_000)
+            .expect("encrypt");
 
         let wrong_key = derive_key("wrong", &salt).expect("kdf should work");
-        assert!(decrypt_payload(&encrypted, &wrong_key).is_err());
+        let decrypted = decrypt_bin_payload::<ManifestBinPayload>(&encrypted, &wrong_key, "decrypt");
+        assert!(decrypted.is_err());
     }
 }

@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicBool, Ordering},
     sync::{Mutex as StdMutex, OnceLock},
 };
@@ -15,14 +16,26 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
-use crate::{models::SyncState, vault::VaultManager};
+use crate::{
+    models::{
+        RecoveryProbeResult, SyncConflictDecision, SyncConflictItem, SyncConflictKind,
+        SyncConflictPreview, SyncKeepSide, SyncState, VaultStatus,
+    },
+    vault::VaultManager,
+};
 
 const KEYRING_SERVICE: &str = "com.drysius.termopen";
 const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
 const KEYRING_USER_EMAIL: &str = "google-user-email";
 const KEYRING_USER_NAME: &str = "google-user-name";
-const DRIVE_FILE_NAME: &str = "termopen-vault.enc.json";
+const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
+const DRIVE_ROOT_FOLDER_NAME: &str = "TermOpen";
+const DRIVE_TOP_PARENT_ID: &str = "root";
 const AUTH_DEEPLINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+const TERM_OPEN_FILE_NAME: &str = "term-open.bin";
+const PROFILE_FILE_NAME: &str = "profile.bin";
+const MANIFEST_FILE_NAME: &str = "manifest.bin";
 
 struct AuthCallbackQueue {
     queue: StdMutex<VecDeque<CallbackAuthData>>,
@@ -73,17 +86,19 @@ pub fn request_sync_cancel() -> SyncState {
 }
 
 #[derive(Default)]
-pub struct SyncManager {
-    pending_pull_confirmation: Option<String>,
-}
+pub struct SyncManager;
 
 impl SyncManager {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
-    /// Abre o browser para login via Google OAuth.
-    /// Em Windows aguarda callback via deep link; nos demais usa callback local.
+    pub fn clear_local_auth(&self) {
+        delete_keyring_field(KEYRING_REFRESH_TOKEN);
+        delete_keyring_field(KEYRING_USER_EMAIL);
+        delete_keyring_field(KEYRING_USER_NAME);
+    }
+
     pub async fn google_login(
         &mut self,
         app: &tauri::AppHandle,
@@ -146,7 +161,6 @@ impl SyncManager {
         }
     }
 
-    /// Retorna dados do usuário logado (se houver).
     pub fn logged_user(&self) -> Option<(String, String)> {
         let email = load_user_field(KEYRING_USER_EMAIL).ok();
         let name = load_user_field(KEYRING_USER_NAME).ok();
@@ -157,7 +171,6 @@ impl SyncManager {
         }
     }
 
-    /// Envia o vault criptografado para o Google Drive.
     pub async fn push(
         &mut self,
         app: &tauri::AppHandle,
@@ -173,40 +186,47 @@ impl SyncManager {
             app.emit("sync:status", &state).ok();
             return Ok(state);
         }
-        let client = Client::new();
-        let content = vault.encrypted_file_bytes()?;
 
-        let existing = lookup_drive_file(&client, &access_token).await?;
-        let remote = if let Some(found) = existing {
-            upload_file_bytes(&client, &access_token, &found.id, content).await?
-        } else {
-            let created = create_drive_file(&client, &access_token).await?;
-            upload_file_bytes(&client, &access_token, &created.id, content).await?
-        };
-        if is_sync_cancelled() {
-            let state = cancelled_state();
-            app.emit("sync:status", &state).ok();
-            return Ok(state);
+        let client = Client::new();
+        let folder_id = ensure_termopen_folder(&client, &access_token, true)
+            .await?
+            .ok_or_else(|| anyhow!("Falha ao preparar pasta TermOpen no Google Drive"))?;
+        let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+
+        let local_files = vault.list_local_bin_files()?;
+        let mut local_names = HashSet::new();
+
+        for (name, bytes) in local_files {
+            local_names.insert(name.clone());
+            if let Some(existing) = remote_files.get(&name) {
+                upload_file_bytes(&client, &access_token, &existing.id, bytes).await?;
+            } else {
+                let created = create_drive_file(&client, &access_token, &folder_id, &name).await?;
+                upload_file_bytes(&client, &access_token, &created.id, bytes).await?;
+            }
+        }
+
+        for (name, metadata) in remote_files {
+            if !local_names.contains(&name) {
+                delete_drive_file(&client, &access_token, &metadata.id).await?;
+            }
         }
 
         let now = Utc::now();
         let mut metadata = vault.sync_metadata()?;
-        metadata.last_remote_modified = remote.modified_time.clone();
+        metadata.last_remote_modified = Some(now.to_rfc3339());
         metadata.last_sync_at = Some(now.to_rfc3339());
         metadata.last_local_change = now.timestamp();
         vault.set_sync_metadata(metadata.clone())?;
 
-        self.pending_pull_confirmation = None;
-
         let state = SyncState::ok(
-            "Vault enviado para Google Drive com sucesso.",
+            "Arquivos enviados para o Google Drive com sucesso.",
             metadata.last_sync_at,
         );
         app.emit("sync:status", &state).ok();
         Ok(state)
     }
 
-    /// Baixa o vault do Google Drive.
     pub async fn pull(
         &mut self,
         app: &tauri::AppHandle,
@@ -222,58 +242,320 @@ impl SyncManager {
             app.emit("sync:status", &state).ok();
             return Ok(state);
         }
-        let client = Client::new();
 
-        let Some(remote_file) = lookup_drive_file(&client, &access_token).await? else {
+        let client = Client::new();
+        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
             let state = SyncState::idle("Nenhum backup encontrado no Google Drive.");
             app.emit("sync:status", &state).ok();
             return Ok(state);
         };
 
-        let metadata = vault.sync_metadata()?;
-        if is_conflict(&metadata, remote_file.modified_time.as_deref()) {
-            let remote_revision = remote_file
-                .modified_time
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
-            if self.pending_pull_confirmation.as_deref() != Some(remote_revision.as_str()) {
-                self.pending_pull_confirmation = Some(remote_revision.clone());
-                let state = SyncState::conflict(
-                    "Conflito detectado. Rode Pull novamente para aceitar nuvem ou Push para manter local.",
-                    metadata.last_sync_at,
-                );
-                app.emit("sync:status", &state).ok();
-                return Ok(state);
-            }
-        }
-
-        let payload = download_file_bytes(&client, &access_token, &remote_file.id).await?;
-        if is_sync_cancelled() {
-            let state = cancelled_state();
+        let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+        if !remote_files.contains_key(TERM_OPEN_FILE_NAME)
+            || !remote_files.contains_key(PROFILE_FILE_NAME)
+            || !remote_files.contains_key(MANIFEST_FILE_NAME)
+        {
+            let state = SyncState::idle("Backup remoto incompleto: faltam arquivos base.");
             app.emit("sync:status", &state).ok();
             return Ok(state);
         }
-        vault.replace_encrypted_file(&payload)?;
+
+        let mut snapshot = HashMap::new();
+        for (name, metadata) in &remote_files {
+            let bytes = download_file_bytes(&client, &access_token, &metadata.id).await?;
+            snapshot.insert(name.clone(), bytes);
+        }
+
+        vault.replace_local_files(&snapshot)?;
 
         let now = Utc::now();
         let mut next_metadata = vault.sync_metadata()?;
         next_metadata.last_sync_at = Some(now.to_rfc3339());
-        next_metadata.last_remote_modified = remote_file.modified_time;
+        next_metadata.last_remote_modified = Some(now.to_rfc3339());
         next_metadata.last_local_change = now.timestamp();
         vault.set_sync_metadata(next_metadata.clone())?;
 
-        self.pending_pull_confirmation = None;
-
         let state = SyncState::ok(
-            "Vault baixado do Google Drive com sucesso.",
+            "Arquivos baixados do Google Drive com sucesso.",
             next_metadata.last_sync_at,
         );
         app.emit("sync:status", &state).ok();
         Ok(state)
     }
+
+    pub async fn startup_conflicts(
+        &mut self,
+        vault: &VaultManager,
+        server_address: &str,
+        fallback_addresses: &[String],
+    ) -> Result<SyncConflictPreview> {
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
+        let client = Client::new();
+
+        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+            return Ok(SyncConflictPreview::default());
+        };
+
+        let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+        let (Some(remote_manifest_meta), Some(remote_profile_meta)) = (
+            remote_files.get(MANIFEST_FILE_NAME),
+            remote_files.get(PROFILE_FILE_NAME),
+        ) else {
+            return Ok(SyncConflictPreview::default());
+        };
+
+        let remote_manifest_bytes =
+            download_file_bytes(&client, &access_token, &remote_manifest_meta.id).await?;
+        let remote_profile_bytes =
+            download_file_bytes(&client, &access_token, &remote_profile_meta.id).await?;
+
+        let remote_manifest = vault.decrypt_manifest_bytes(&remote_manifest_bytes)?;
+        let local_manifest = vault.local_manifest_snapshot()?;
+
+        let mut conflicts = Vec::new();
+
+        let mut host_ids = HashSet::new();
+        host_ids.extend(local_manifest.hosts.keys().cloned());
+        host_ids.extend(remote_manifest.hosts.keys().cloned());
+        for id in host_ids {
+            let local_hash = local_manifest.hosts.get(&id).cloned();
+            let remote_hash = remote_manifest.hosts.get(&id).cloned();
+            if local_hash != remote_hash {
+                conflicts.push(SyncConflictItem {
+                    kind: SyncConflictKind::Host,
+                    id: id.clone(),
+                    label: format!("Host {}", id),
+                    local_hash,
+                    remote_hash,
+                });
+            }
+        }
+
+        let mut keychain_ids = HashSet::new();
+        keychain_ids.extend(local_manifest.keychain.keys().cloned());
+        keychain_ids.extend(remote_manifest.keychain.keys().cloned());
+        for id in keychain_ids {
+            let local_hash = local_manifest.keychain.get(&id).cloned();
+            let remote_hash = remote_manifest.keychain.get(&id).cloned();
+            if local_hash != remote_hash {
+                conflicts.push(SyncConflictItem {
+                    kind: SyncConflictKind::Keychain,
+                    id: id.clone(),
+                    label: format!("Keychain {}", id),
+                    local_hash,
+                    remote_hash,
+                });
+            }
+        }
+
+        let local_profile_hash = vault.local_profile_hash()?;
+        let remote_profile_hash = Some(hash_bytes_hex(&remote_profile_bytes));
+        if local_profile_hash != remote_profile_hash {
+            conflicts.push(SyncConflictItem {
+                kind: SyncConflictKind::Profile,
+                id: "profile".to_string(),
+                label: "Profile / Settings".to_string(),
+                local_hash: local_profile_hash,
+                remote_hash: remote_profile_hash,
+            });
+        }
+
+        conflicts.sort_by(|a, b| a.label.cmp(&b.label));
+        Ok(SyncConflictPreview { conflicts })
+    }
+
+    pub async fn resolve_startup_conflicts(
+        &mut self,
+        app: &tauri::AppHandle,
+        vault: &mut VaultManager,
+        server_address: &str,
+        fallback_addresses: &[String],
+        decisions: Vec<SyncConflictDecision>,
+    ) -> Result<SyncState> {
+        clear_sync_cancel();
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
+        let client = Client::new();
+        let folder_id = ensure_termopen_folder(&client, &access_token, true)
+            .await?
+            .ok_or_else(|| anyhow!("Falha ao preparar pasta TermOpen no Google Drive"))?;
+
+        let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+
+        let mut client_overrides: HashMap<String, Option<Vec<u8>>> = HashMap::new();
+        for decision in decisions {
+            if decision.keep != SyncKeepSide::Client {
+                continue;
+            }
+            let file_name = conflict_file_name(&decision)?;
+            let bytes = vault.read_local_bin_file(&file_name)?;
+            client_overrides.insert(file_name, bytes);
+        }
+
+        let mut remote_snapshot = HashMap::new();
+        for (name, metadata) in &remote_files {
+            let bytes = download_file_bytes(&client, &access_token, &metadata.id).await?;
+            remote_snapshot.insert(name.clone(), bytes);
+        }
+
+        if !remote_snapshot.is_empty() {
+            vault.replace_local_files(&remote_snapshot)?;
+        }
+
+        for (name, maybe_bytes) in client_overrides {
+            if let Some(bytes) = maybe_bytes {
+                vault.write_local_bin_file(&name, &bytes)?;
+            } else {
+                vault.remove_local_bin_file(&name)?;
+            }
+        }
+
+        vault.reload_unlocked_from_disk_and_persist()?;
+
+        let local_files = vault.list_local_bin_files()?;
+        let latest_remote = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+        let mut local_names = HashSet::new();
+
+        for (name, bytes) in local_files {
+            local_names.insert(name.clone());
+            if let Some(existing) = latest_remote.get(&name) {
+                upload_file_bytes(&client, &access_token, &existing.id, bytes).await?;
+            } else {
+                let created = create_drive_file(&client, &access_token, &folder_id, &name).await?;
+                upload_file_bytes(&client, &access_token, &created.id, bytes).await?;
+            }
+        }
+
+        for (name, metadata) in latest_remote {
+            if !local_names.contains(&name) {
+                delete_drive_file(&client, &access_token, &metadata.id).await?;
+            }
+        }
+
+        let now = Utc::now();
+        let mut next_metadata = vault.sync_metadata()?;
+        next_metadata.last_sync_at = Some(now.to_rfc3339());
+        next_metadata.last_remote_modified = Some(now.to_rfc3339());
+        next_metadata.last_local_change = now.timestamp();
+        vault.set_sync_metadata(next_metadata.clone())?;
+
+        let state = SyncState::ok(
+            "Conflitos resolvidos e sincronizados com sucesso.",
+            next_metadata.last_sync_at,
+        );
+        app.emit("sync:status", &state).ok();
+        Ok(state)
+    }
+
+    pub async fn recovery_probe(
+        &mut self,
+        server_address: &str,
+        fallback_addresses: &[String],
+    ) -> Result<RecoveryProbeResult> {
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
+        let client = Client::new();
+
+        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+            return Ok(RecoveryProbeResult {
+                found: false,
+                message: "Pasta TermOpen nao encontrada no Google Drive.".to_string(),
+            });
+        };
+
+        let files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+        if files.contains_key(TERM_OPEN_FILE_NAME) {
+            Ok(RecoveryProbeResult {
+                found: true,
+                message: "Backup encontrado no Google Drive.".to_string(),
+            })
+        } else {
+            Ok(RecoveryProbeResult {
+                found: false,
+                message: "Backup nao encontrado no Google Drive.".to_string(),
+            })
+        }
+    }
+
+    pub async fn recovery_restore(
+        &mut self,
+        app: &tauri::AppHandle,
+        vault: &mut VaultManager,
+        server_address: &str,
+        fallback_addresses: &[String],
+        password: String,
+    ) -> Result<VaultStatus> {
+        clear_sync_cancel();
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
+        let client = Client::new();
+
+        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+            return Err(anyhow!("Pasta TermOpen nao encontrada no Google Drive"));
+        };
+
+        let files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+        let term_open_meta = files
+            .get(TERM_OPEN_FILE_NAME)
+            .ok_or_else(|| anyhow!("term-open.bin nao encontrado na nuvem"))?;
+        let term_open_bytes = download_file_bytes(&client, &access_token, &term_open_meta.id).await?;
+
+        if !vault.validate_password_for_term_open_bytes(&term_open_bytes, password.trim())? {
+            return Err(anyhow!("Senha mestre invalida"));
+        }
+
+        let pending = SyncState {
+            connected: true,
+            status: "running".to_string(),
+            message: "Baixando arquivos da nuvem...".to_string(),
+            last_sync_at: None,
+            pending_user_code: None,
+            verification_url: None,
+        };
+        app.emit("sync:status", &pending).ok();
+
+        let mut snapshot = HashMap::new();
+        for (name, metadata) in files {
+            let bytes = download_file_bytes(&client, &access_token, &metadata.id).await?;
+            snapshot.insert(name, bytes);
+        }
+
+        if !snapshot.contains_key(TERM_OPEN_FILE_NAME)
+            || !snapshot.contains_key(PROFILE_FILE_NAME)
+            || !snapshot.contains_key(MANIFEST_FILE_NAME)
+        {
+            return Err(anyhow!("Backup remoto incompleto: faltam arquivos base"));
+        }
+
+        vault.replace_local_files(&snapshot)?;
+        let status = vault.unlock(Some(password))?;
+        Ok(status)
+    }
 }
 
-// ─── Callback listener ─────────────────────────────────────────────
+fn conflict_file_name(decision: &SyncConflictDecision) -> Result<String> {
+    match decision.kind {
+        SyncConflictKind::Profile => Ok(PROFILE_FILE_NAME.to_string()),
+        SyncConflictKind::Host | SyncConflictKind::Keychain => {
+            if uuid::Uuid::parse_str(decision.id.trim()).is_err() {
+                return Err(anyhow!("ID de conflito invalido: {}", decision.id));
+            }
+            Ok(format!("{}.bin", decision.id.trim()))
+        }
+    }
+}
+
+fn hash_bytes_hex(bytes: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
 
 fn finalize_auth_result(
     app: &tauri::AppHandle,
@@ -474,44 +756,12 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
     })
 }
 
-// ─── Conflict detection ────────────────────────────────────────────
-
-fn is_conflict(metadata: &crate::models::SyncMetadata, remote_modified: Option<&str>) -> bool {
-    let Some(remote) = remote_modified else {
-        return false;
-    };
-
-    let Some(previous_remote) = metadata.last_remote_modified.as_ref() else {
-        return false;
-    };
-
-    if previous_remote == remote {
-        return false;
-    }
-
-    let Some(last_sync) = metadata
-        .last_sync_at
-        .as_ref()
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|dt| dt.timestamp())
-    else {
-        return true;
-    };
-
-    metadata.last_local_change > last_sync
-}
-
-// ─── Google tokens via worker (com fallback) ───────────────────────
-
-/// Tenta renovar o access_token usando o servidor primário.
-/// Se falhar por erro de rede (servidor fora do ar), tenta os fallbacks.
-/// Nunca altera o servidor selecionado do usuário.
 async fn access_token_from_refresh_with_fallback(
     primary: &str,
     fallbacks: &[String],
 ) -> Result<String> {
     match try_refresh_token(primary).await {
-        Ok(token) => return Ok(token),
+        Ok(token) => Ok(token),
         Err(e) => {
             if e.to_string().contains("401") || e.to_string().contains("Execute login") {
                 return Err(e);
@@ -561,22 +811,118 @@ async fn try_refresh_token(server_address: &str) -> Result<String> {
     Ok(data.access_token)
 }
 
-// ─── Google Drive helpers ───────────────────────────────────────────
-
-async fn lookup_drive_file(
+async fn ensure_termopen_folder(
     client: &Client,
     access_token: &str,
-) -> Result<Option<DriveFileMetadata>> {
-    let query = "name='termopen-vault.enc.json' and trashed=false and appProperties has { key='termopen_profile' and value='vault' }";
+    create_if_missing: bool,
+) -> Result<Option<String>> {
+    ensure_named_folder(
+        client,
+        access_token,
+        DRIVE_ROOT_FOLDER_NAME,
+        DRIVE_TOP_PARENT_ID,
+        create_if_missing,
+    )
+    .await
+}
+
+async fn ensure_named_folder(
+    client: &Client,
+    access_token: &str,
+    folder_name: &str,
+    parent_id: &str,
+    create_if_missing: bool,
+) -> Result<Option<String>> {
+    let query = format!(
+        "name='{}' and mimeType='{}' and trashed=false and '{}' in parents",
+        folder_name, DRIVE_FOLDER_MIME_TYPE, parent_id
+    );
 
     let response = client
         .get("https://www.googleapis.com/drive/v3/files")
         .bearer_auth(access_token)
         .query(&[
-            ("q", query),
+            ("q", query.as_str()),
             ("spaces", "drive"),
-            ("fields", "files(id,name,modifiedTime)"),
-            ("pageSize", "1"),
+            ("fields", "files(id,name,mimeType,modifiedTime)"),
+            ("pageSize", "10"),
+        ])
+        .send()
+        .await
+        .context("Falha ao listar pastas no Google Drive")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "Falha ao listar pasta no Drive ({}): {}",
+            status,
+            body
+        ));
+    }
+
+    let list = response
+        .json::<DriveFileListResponse>()
+        .await
+        .context("Falha ao decodificar listagem de pastas")?;
+
+    if let Some(found) = list.files.into_iter().next() {
+        return Ok(Some(found.id));
+    }
+
+    if !create_if_missing {
+        return Ok(None);
+    }
+
+    let create_response = client
+        .post("https://www.googleapis.com/drive/v3/files")
+        .bearer_auth(access_token)
+        .query(&[("fields", "id,name,mimeType,modifiedTime")])
+        .json(&serde_json::json!({
+            "name": folder_name,
+            "mimeType": DRIVE_FOLDER_MIME_TYPE,
+            "parents": [parent_id],
+        }))
+        .send()
+        .await
+        .context("Falha ao criar pasta no Google Drive")?;
+
+    let create_status = create_response.status();
+    if !create_status.is_success() {
+        let body = create_response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "Falha ao criar pasta no Drive ({}): {}",
+            create_status,
+            body
+        ));
+    }
+
+    let created = create_response
+        .json::<DriveFileMetadata>()
+        .await
+        .context("Falha ao decodificar pasta criada")?;
+
+    Ok(Some(created.id))
+}
+
+async fn list_drive_bin_files(
+    client: &Client,
+    access_token: &str,
+    folder_id: &str,
+) -> Result<HashMap<String, DriveFileMetadata>> {
+    let query = format!(
+        "trashed=false and '{}' in parents and mimeType!='{}'",
+        folder_id, DRIVE_FOLDER_MIME_TYPE
+    );
+
+    let response = client
+        .get("https://www.googleapis.com/drive/v3/files")
+        .bearer_auth(access_token)
+        .query(&[
+            ("q", query.as_str()),
+            ("spaces", "drive"),
+            ("fields", "files(id,name,mimeType,modifiedTime)"),
+            ("pageSize", "1000"),
         ])
         .send()
         .await
@@ -586,7 +932,7 @@ async fn lookup_drive_file(
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(anyhow!(
-            "Falha ao listar backup no Drive ({}): {}",
+            "Falha ao listar arquivos no Drive ({}): {}",
             status,
             body
         ));
@@ -595,21 +941,41 @@ async fn lookup_drive_file(
     let list = response
         .json::<DriveFileListResponse>()
         .await
-        .context("Falha ao decodificar listagem do Drive")?;
+        .context("Falha ao decodificar listagem de arquivos")?;
 
-    Ok(list.files.into_iter().next())
+    let mut out: HashMap<String, DriveFileMetadata> = HashMap::new();
+    for item in list.files {
+        let Some(name) = item.name.clone() else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().ends_with(".bin") {
+            continue;
+        }
+
+        if let Some(current) = out.get(&name) {
+            if item.modified_time > current.modified_time {
+                out.insert(name, item);
+            }
+        } else {
+            out.insert(name, item);
+        }
+    }
+    Ok(out)
 }
 
-async fn create_drive_file(client: &Client, access_token: &str) -> Result<DriveFileMetadata> {
+async fn create_drive_file(
+    client: &Client,
+    access_token: &str,
+    folder_id: &str,
+    file_name: &str,
+) -> Result<DriveFileMetadata> {
     let response = client
         .post("https://www.googleapis.com/drive/v3/files")
         .bearer_auth(access_token)
-        .query(&[("fields", "id,name,modifiedTime")])
+        .query(&[("fields", "id,name,mimeType,modifiedTime")])
         .json(&serde_json::json!({
-            "name": DRIVE_FILE_NAME,
-            "appProperties": {
-                "termopen_profile": "vault"
-            }
+            "name": file_name,
+            "parents": [folder_id],
         }))
         .send()
         .await
@@ -637,20 +1003,17 @@ async fn upload_file_bytes(
     file_id: &str,
     content: Vec<u8>,
 ) -> Result<DriveFileMetadata> {
-    let url = format!(
-        "https://www.googleapis.com/upload/drive/v3/files/{}",
-        file_id
-    );
+    let url = format!("https://www.googleapis.com/upload/drive/v3/files/{}", file_id);
 
     let response = client
         .patch(url)
         .bearer_auth(access_token)
-        .query(&[("uploadType", "media"), ("fields", "id,name,modifiedTime")])
+        .query(&[("uploadType", "media"), ("fields", "id,name,mimeType,modifiedTime")])
         .header("Content-Type", "application/octet-stream")
         .body(content)
         .send()
         .await
-        .context("Falha ao enviar vault para o Drive")?;
+        .context("Falha ao enviar arquivo para o Drive")?;
 
     let status = response.status();
     if !status.is_success() {
@@ -677,7 +1040,7 @@ async fn download_file_bytes(
         .query(&[("alt", "media")])
         .send()
         .await
-        .context("Falha ao baixar vault do Drive")?;
+        .context("Falha ao baixar arquivo do Drive")?;
 
     let status = response.status();
     if !status.is_success() {
@@ -692,7 +1055,23 @@ async fn download_file_bytes(
         .context("Falha ao ler bytes de download")
 }
 
-// ─── Keyring helpers ────────────────────────────────────────────────
+async fn delete_drive_file(client: &Client, access_token: &str, file_id: &str) -> Result<()> {
+    let url = format!("https://www.googleapis.com/drive/v3/files/{}", file_id);
+    let response = client
+        .delete(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .context("Falha ao remover arquivo no Drive")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Falha ao remover arquivo no Drive ({}): {}", status, body));
+    }
+
+    Ok(())
+}
 
 fn store_refresh_token(token: &str) -> Result<()> {
     let entry =
@@ -722,7 +1101,11 @@ fn load_user_field(key: &str) -> Result<String> {
     entry.get_password().context("Campo ausente no keychain")
 }
 
-// ─── Types ──────────────────────────────────────────────────────────
+fn delete_keyring_field(key: &str) {
+    if let Ok(entry) = Entry::new(KEYRING_SERVICE, key) {
+        let _ = entry.delete_password();
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct RefreshTokenResponse {
@@ -737,8 +1120,9 @@ struct DriveFileListResponse {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct DriveFileMetadata {
     id: String,
-    #[allow(dead_code)]
     name: Option<String>,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
     #[serde(rename = "modifiedTime")]
     modified_time: Option<String>,
 }

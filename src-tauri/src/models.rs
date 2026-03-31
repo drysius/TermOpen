@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 fn default_ssh_port() -> u16 {
     22
@@ -264,6 +265,8 @@ pub struct VaultPayload {
     pub sync: SyncMetadata,
     #[serde(default)]
     pub auth_servers: Vec<AuthServer>,
+    #[serde(default)]
+    pub window_state: Option<WindowState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,21 +277,22 @@ pub enum KeyMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultFile {
-    pub version: u32,
-    pub key_mode: KeyMode,
-    pub salt: Option<String>,
-    pub nonce: String,
-    pub ciphertext: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultStatus {
     pub initialized: bool,
     pub locked: bool,
     pub key_mode: Option<KeyMode>,
+    #[serde(default)]
+    pub recoverable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WindowState {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,15 +400,77 @@ impl SyncState {
             verification_url: None,
         }
     }
+}
 
-    pub fn conflict(message: impl Into<String>, last_sync_at: Option<String>) -> Self {
-        Self {
-            connected: true,
-            status: "conflict".to_string(),
-            message: message.into(),
-            last_sync_at,
-            pending_user_code: None,
-            verification_url: None,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncConflictKind {
+    Host,
+    Keychain,
+    Profile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncConflictItem {
+    pub kind: SyncConflictKind,
+    pub id: String,
+    pub label: String,
+    pub local_hash: Option<String>,
+    pub remote_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncConflictPreview {
+    #[serde(default)]
+    pub conflicts: Vec<SyncConflictItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncKeepSide {
+    Client,
+    Server,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncConflictDecision {
+    pub kind: SyncConflictKind,
+    pub id: String,
+    pub keep: SyncKeepSide,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryProbeResult {
+    pub found: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseCheckResult {
+    pub available: bool,
+    pub latest_version: Option<String>,
+    pub url: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileBinPayload {
+    pub version: u32,
+    #[serde(default)]
+    pub settings: AppSettings,
+    #[serde(default)]
+    pub sync: SyncMetadata,
+    #[serde(default)]
+    pub auth_servers: Vec<AuthServer>,
+    #[serde(default)]
+    pub window_state: Option<WindowState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestBinPayload {
+    pub version: u32,
+    #[serde(default)]
+    pub hosts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub keychain: BTreeMap<String, String>,
 }
