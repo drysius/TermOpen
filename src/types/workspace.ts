@@ -1,6 +1,6 @@
 export type SidebarSection = "home" | "keychain" | "known_hosts" | "settings" | "about";
 
-export type WorkTabType = "ssh" | "sftp_workspace" | "editor";
+export type WorkTabType = "workspace" | "editor";
 
 export interface WorkTab {
   id: string;
@@ -10,6 +10,8 @@ export interface WorkTab {
   sessionId?: string;
   profileId?: string;
   path?: string;
+  initialBlock?: "terminal" | "sftp";
+  initialSourceId?: string;
 }
 
 export type PaneSource =

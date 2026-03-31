@@ -79,33 +79,14 @@ export function createSftpEditorActions(
       try {
         const session = await get().getOrCreateSession(profile);
         get().openTab({
-          id: `sftp:workspace:${session.session_id}:${Date.now()}`,
-          type: "sftp_workspace",
-          title: `SFTP - ${profile.name}`,
+          id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+          type: "workspace",
+          title: `Workspace - ${profile.name}`,
           closable: true,
-          sessionId: session.session_id,
           profileId: profile.id,
+          initialBlock: "sftp",
+          initialSourceId: session.session_id,
         });
-
-        const state = get();
-        const nextLeft =
-          state.leftPane.sourceId === "local"
-            ? { ...state.leftPane, sourceId: session.session_id, path: profile.remote_path || "/" }
-            : state.leftPane;
-        const nextRight =
-          state.rightPane.sourceId === "local"
-            ? { ...state.rightPane, sourceId: "local", path: state.rightPane.path || "" }
-            : state.rightPane;
-
-        set({
-          leftPane: nextLeft,
-          rightPane: nextRight,
-        });
-
-        await Promise.all([
-          get().refreshPane("left", nextLeft.sourceId, nextLeft.path),
-          get().refreshPane("right", nextRight.sourceId, nextRight.path),
-        ]);
       } catch (error) {
         toast.error(getError(error));
       }

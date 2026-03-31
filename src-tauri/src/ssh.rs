@@ -4,6 +4,8 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -21,12 +23,20 @@ use crate::models::{
 
 pub struct SshManager {
     sessions: HashMap<String, ManagedSession>,
+    local_sessions: HashMap<String, LocalManagedSession>,
 }
 
 struct ManagedSession {
     info: SshSessionInfo,
     session: Session,
     shell: Channel,
+}
+
+struct LocalManagedSession {
+    info: SshSessionInfo,
+    child: Child,
+    stdin: ChildStdin,
+    output: Arc<Mutex<Vec<u8>>>,
 }
 
 enum AuthFailure {
@@ -38,14 +48,18 @@ impl SshManager {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            local_sessions: HashMap::new(),
         }
     }
 
     pub fn list_sessions(&self) -> Vec<SshSessionInfo> {
-        self.sessions
+        let mut sessions = self
+            .sessions
             .values()
             .map(|item| item.info.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        sessions.extend(self.local_sessions.values().map(|item| item.info.clone()));
+        sessions
     }
 
     pub fn connect(
@@ -115,6 +129,7 @@ impl SshManager {
             session_id: session_id.clone(),
             profile_id: profile.id.clone(),
             connected_at: Utc::now().timestamp(),
+            session_kind: "ssh".to_string(),
         };
 
         self.sessions.insert(
@@ -129,43 +144,94 @@ impl SshManager {
         Ok(SshConnectResult::Connected { session: info })
     }
 
+    pub fn connect_local(&mut self, start_path: Option<&Path>) -> Result<SshSessionInfo> {
+        let (child, stdin, stdout, stderr) = spawn_local_shell(start_path)?;
+        let output = Arc::new(Mutex::new(Vec::new()));
+        pump_reader_into_buffer(stdout, Arc::clone(&output));
+        pump_reader_into_buffer(stderr, Arc::clone(&output));
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let info = SshSessionInfo {
+            session_id: session_id.clone(),
+            profile_id: "local".to_string(),
+            connected_at: Utc::now().timestamp(),
+            session_kind: "local".to_string(),
+        };
+
+        let local = LocalManagedSession {
+            info: info.clone(),
+            child,
+            stdin,
+            output,
+        };
+        self.local_sessions.insert(session_id, local);
+
+        Ok(info)
+    }
+
     pub fn disconnect(&mut self, session_id: &str) {
         if let Some(mut managed) = self.sessions.remove(session_id) {
             let _ = managed.shell.close();
             let _ = managed.shell.wait_close();
+            return;
+        }
+
+        if let Some(mut local) = self.local_sessions.remove(session_id) {
+            let _ = local.stdin.flush();
+            let _ = local.child.kill();
+            let _ = local.child.wait();
         }
     }
 
     pub fn run_command(&mut self, session_id: &str, command: &str) -> Result<String> {
-        let managed = self
-            .sessions
+        if let Some(managed) = self.sessions.get_mut(session_id) {
+            let payload = command.replace('\r', "\n");
+            if !payload.is_empty() {
+                managed
+                    .shell
+                    .write_all(payload.as_bytes())
+                    .context("Falha ao enviar entrada para shell SSH")?;
+                managed
+                    .shell
+                    .flush()
+                    .context("Falha ao flush da shell SSH")?;
+            }
+
+            return read_shell_output(managed, Duration::from_millis(140));
+        }
+
+        let local = self
+            .local_sessions
             .get_mut(session_id)
             .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
 
         let payload = command.replace('\r', "\n");
         if !payload.is_empty() {
-            managed
-                .shell
+            local
+                .stdin
                 .write_all(payload.as_bytes())
-                .context("Falha ao enviar entrada para shell SSH")?;
-            managed
-                .shell
+                .context("Falha ao enviar entrada para terminal local")?;
+            local
+                .stdin
                 .flush()
-                .context("Falha ao flush da shell SSH")?;
+                .context("Falha ao flush do terminal local")?;
         }
 
-        read_shell_output(managed, Duration::from_millis(140))
+        thread::sleep(Duration::from_millis(80));
+        Ok(drain_local_output(&local.output))
     }
 
     pub fn resize_pty(&mut self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-        managed
-            .shell
-            .request_pty_size(cols, rows, None, None)
-            .context("Falha ao redimensionar PTY SSH")
+        if let Some(managed) = self.sessions.get_mut(session_id) {
+            return managed
+                .shell
+                .request_pty_size(cols, rows, None, None)
+                .context("Falha ao redimensionar PTY SSH");
+        }
+        if self.local_sessions.contains_key(session_id) {
+            return Ok(());
+        }
+        Err(anyhow!("Sessao {} nao encontrada", session_id))
     }
 
     pub fn sftp_list(&mut self, session_id: &str, path: &str) -> Result<Vec<SftpEntry>> {
@@ -750,6 +816,82 @@ fn read_shell_output(managed: &mut ManagedSession, timeout: Duration) -> Result<
 
     managed.session.set_blocking(true);
     Ok(String::from_utf8_lossy(&output).to_string())
+}
+
+fn spawn_local_shell(
+    start_path: Option<&Path>,
+) -> Result<(Child, ChildStdin, ChildStdout, ChildStderr)> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = Command::new("powershell");
+        cmd.arg("-NoLogo").arg("-NoProfile");
+        cmd
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-i");
+        cmd
+    };
+
+    if let Some(path) = start_path {
+        command.current_dir(path);
+    }
+
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to start local terminal process")?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture local terminal stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture local terminal stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture local terminal stderr"))?;
+
+    Ok((child, stdin, stdout, stderr))
+}
+
+fn pump_reader_into_buffer<R>(mut reader: R, output: Arc<Mutex<Vec<u8>>>)
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => {
+                    if let Ok(mut guard) = output.lock() {
+                        guard.extend_from_slice(&buffer[..size]);
+                    } else {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn drain_local_output(output: &Arc<Mutex<Vec<u8>>>) -> String {
+    if let Ok(mut guard) = output.lock() {
+        if guard.is_empty() {
+            return String::new();
+        }
+        let bytes = guard.drain(..).collect::<Vec<_>>();
+        return String::from_utf8_lossy(&bytes).to_string();
+    }
+    String::new()
 }
 
 fn establish_handshake(profile: &ConnectionProfile) -> Result<Session> {

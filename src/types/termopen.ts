@@ -61,6 +61,7 @@ export interface SshSessionInfo {
   session_id: string;
   profile_id: string;
   connected_at: number;
+  session_kind: "ssh" | "local";
 }
 
 export interface SftpEntry {

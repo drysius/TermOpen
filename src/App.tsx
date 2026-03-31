@@ -147,7 +147,7 @@ function App() {
           onCreateWorkspaceTab={() =>
             openTab({
               id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
-              type: "sftp_workspace",
+              type: "workspace",
               title: "Workspace",
               closable: true,
             })
@@ -175,7 +175,7 @@ function App() {
         onCreateWorkspaceTab={() =>
           openTab({
             id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
-            type: "sftp_workspace",
+            type: "workspace",
             title: "Workspace",
             closable: true,
           })
@@ -198,14 +198,6 @@ function App() {
         <section className="min-h-0 flex-1 bg-zinc-950/80">
           {tabs.map((tab) => (
             <div key={tab.id} className={tab.id === activeTabId ? "h-full" : "hidden h-full"}>
-              {tab.type === "ssh" ? (
-                <SftpWorkspaceTabPage
-                  key={`ssh-workspace:${tab.id}`}
-                  tabId={tab.id}
-                  mode="ssh"
-                  defaultSessionId={tab.sessionId ?? null}
-                />
-              ) : null}
               {tab.type === "editor" ? (
                 <EditorTabPage
                   path={editorTabs[tab.id]?.path ?? ""}
@@ -221,12 +213,12 @@ function App() {
                   onOpenExternal={() => void openEditorExternal(tab.id)}
                 />
               ) : null}
-              {tab.type === "sftp_workspace" ? (
+              {tab.type === "workspace" ? (
                 <SftpWorkspaceTabPage
-                  key={`sftp-workspace:${tab.id}`}
+                  key={`workspace:${tab.id}`}
                   tabId={tab.id}
-                  mode="sftp"
-                  defaultSessionId={tab.sessionId ?? null}
+                  initialBlock={tab.initialBlock}
+                  initialSourceId={tab.initialSourceId ?? tab.sessionId ?? undefined}
                 />
               ) : null}
             </div>

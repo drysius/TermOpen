@@ -296,6 +296,12 @@ pub struct SshSessionInfo {
     pub session_id: String,
     pub profile_id: String,
     pub connected_at: i64,
+    #[serde(default = "default_session_kind")]
+    pub session_kind: String,
+}
+
+fn default_session_kind() -> String {
+    "ssh".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

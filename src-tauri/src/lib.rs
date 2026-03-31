@@ -391,6 +391,16 @@ async fn ssh_sessions(state: State<'_, AppState>) -> Result<Vec<SshSessionInfo>,
 }
 
 #[tauri::command]
+async fn local_terminal_connect(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<SshSessionInfo, String> {
+    let start_path = resolve_local_path(path.as_deref())?;
+    let mut ssh = state.ssh.lock().await;
+    ssh.connect_local(Some(&start_path)).map_err(app_error)
+}
+
+#[tauri::command]
 async fn sftp_list(
     state: State<'_, AppState>,
     session_id: String,
@@ -989,6 +999,7 @@ pub fn run() {
             ssh_resize,
             ssh_disconnect,
             ssh_sessions,
+            local_terminal_connect,
             known_hosts_list_cmd,
             known_hosts_add_cmd,
             known_hosts_remove_cmd,

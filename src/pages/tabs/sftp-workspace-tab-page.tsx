@@ -25,7 +25,7 @@ import { toast } from "sonner";
 
 import { WorkspaceBlockController, type WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
 import { Dialog } from "@/components/ui/dialog";
-import { baseName, getError, joinPath, joinRemotePath, normalizeRemotePath } from "@/functions/common";
+import { baseName, getError, joinPath, joinRemotePath, normalizeRemotePath, supportsProtocol } from "@/functions/common";
 import {
   detectEditorFileMeta,
   formatBytes,
@@ -44,8 +44,8 @@ type SortDirection = "asc" | "desc";
 
 interface SftpWorkspaceTabPageProps {
   tabId: string;
-  mode: "ssh" | "sftp";
-  defaultSessionId: string | null;
+  initialBlock?: "terminal" | "sftp";
+  initialSourceId?: string;
 }
 
 interface BaseBlock {
@@ -272,12 +272,13 @@ async function readSourceBinaryPreview(sourceId: string, path: string) {
   return api.sftpReadBinaryPreview(sourceId, path, PREVIEW_LIMIT_BYTES);
 }
 
-export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWorkspaceTabPageProps) {
+export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: SftpWorkspaceTabPageProps) {
   const sessions = useAppStore((state) => state.sessions);
   const connections = useAppStore((state) => state.connections);
   const settings = useAppStore((state) => state.settings);
   const sshWrite = useAppStore((state) => state.sshWrite);
   const ensureSessionListeners = useAppStore((state) => state.ensureSessionListeners);
+  const getOrCreateSession = useAppStore((state) => state.getOrCreateSession);
   const setWorkspaceSessions = useAppStore((state) => state.setWorkspaceSessions);
 
   const workspaceRef = useRef<HTMLDivElement | null>(null);
@@ -286,12 +287,14 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
   const initializedRef = useRef(Boolean(cached && cached.blocks.length > 0));
 
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(
-    cached?.workspaceMode ?? (mode === "ssh" ? "free" : "grid"),
+    cached?.workspaceMode ?? "free",
   );
   const [workspaceSize, setWorkspaceSize] = useState({ width: 1200, height: 740 });
   const [blocks, setBlocks] = useState<WorkspaceBlock[]>(cached?.blocks ?? []);
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [createBlockModalOpen, setCreateBlockModalOpen] = useState(false);
+  const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "editor">("terminal");
+  const [createSourceDraft, setCreateSourceDraft] = useState("local");
 
   useEffect(() => {
     blocksRef.current = blocks;
@@ -342,6 +345,10 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
   const sessionLabelById = useMemo(() => {
     const map = new Map<string, string>();
     sessions.forEach((session) => {
+      if (session.session_kind === "local") {
+        map.set(session.session_id, "Local Terminal");
+        return;
+      }
       const profile = connections.find((item) => item.id === session.profile_id);
       if (profile) {
         map.set(session.session_id, `${profile.name} (${profile.host})`);
@@ -352,13 +359,62 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
     return map;
   }, [connections, sessions]);
 
+  const sessionHostById = useMemo(() => {
+    const map = new Map<string, string>();
+    sessions.forEach((session) => {
+      if (session.session_kind === "local") {
+        map.set(session.session_id, "Local");
+        return;
+      }
+      const profile = connections.find((item) => item.id === session.profile_id);
+      map.set(session.session_id, profile?.host ?? session.session_id.slice(0, 8));
+    });
+    return map;
+  }, [connections, sessions]);
+  const localSessionIds = useMemo(
+    () => new Set(sessions.filter((item) => item.session_kind === "local").map((item) => item.session_id)),
+    [sessions],
+  );
+
+  const sshProfiles = useMemo(
+    () => connections.filter((profile) => supportsProtocol(profile, "ssh")),
+    [connections],
+  );
+  const sftpProfiles = useMemo(
+    () => connections.filter((profile) => supportsProtocol(profile, "sftp")),
+    [connections],
+  );
+  const createSourceOptions = useMemo(() => {
+    if (createBlockKind === "terminal") {
+      return [
+        { id: "local", label: "Local Terminal" },
+        ...sshProfiles.map((profile) => ({
+          id: `profile:${profile.id}`,
+          label: `${profile.host} (${profile.username})`,
+        })),
+      ];
+    }
+    if (createBlockKind === "sftp") {
+      return [
+        { id: "local", label: "Local File System" },
+        ...sftpProfiles.map((profile) => ({
+          id: `profile:${profile.id}`,
+          label: `${profile.host} (${profile.username})`,
+        })),
+      ];
+    }
+    return [];
+  }, [createBlockKind, sftpProfiles, sshProfiles]);
+
   const sourceOptions = useMemo(
     () => [
       { id: "local", label: "Local" },
-      ...sessions.map((session) => ({
-        id: session.session_id,
-        label: sessionLabelById.get(session.session_id) ?? session.session_id,
-      })),
+      ...sessions
+        .filter((session) => session.session_kind !== "local")
+        .map((session) => ({
+          id: session.session_id,
+          label: sessionLabelById.get(session.session_id) ?? session.session_id,
+        })),
     ],
     [sessionLabelById, sessions],
   );
@@ -638,14 +694,17 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
 
   const addSftpBlock = useCallback(
     (sourceId?: string) => {
-      const firstSession = sessions[0]?.session_id;
-      const resolvedSource = sourceId ?? defaultSessionId ?? firstSession ?? "local";
+      const firstSession = sessions.find((item) => item.session_kind !== "local")?.session_id ?? sessions[0]?.session_id;
+      const resolvedSource = sourceId ?? firstSession ?? "local";
+      const host = resolvedSource === "local" ? "Local" : sessionHostById.get(resolvedSource) ?? resolvedSource.slice(0, 8);
+      const baseTitle = `SFTP - ${host}`;
+      const count = blocksRef.current.filter((item) => item.kind === "sftp" && item.title.startsWith(baseTitle)).length;
       const initialPath = resolvedSource === "local" ? "" : normalizeRemotePath("/");
       const id = createId("sftp");
       const block: SftpBlock = {
         id,
         kind: "sftp",
-        title: "SFTP",
+        title: count > 0 ? `${baseTitle} (${count + 1})` : baseTitle,
         sourceId: resolvedSource,
         path: initialPath,
         entries: [],
@@ -663,21 +722,25 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
         void refreshSftpBlock(id, block.path, block.sourceId);
       }, 0);
     },
-    [defaultSessionId, refreshSftpBlock, sessions, workspaceSize.height, workspaceSize.width],
+    [refreshSftpBlock, sessions, sessionHostById, workspaceSize.height, workspaceSize.width],
   );
 
   const addTerminalBlock = useCallback(
     (sessionId?: string) => {
-      const resolved = sessionId ?? defaultSessionId ?? sessions[0]?.session_id ?? null;
+      const resolved = sessionId ?? sessions[0]?.session_id ?? null;
       if (!resolved) {
-        toast.error("Nenhuma sessao SSH ativa para abrir terminal.");
+        toast.error("Nenhuma sessao disponivel para abrir terminal.");
         return;
       }
 
+      const host = sessionHostById.get(resolved) ?? resolved.slice(0, 8);
+      const prefix = localSessionIds.has(resolved) ? "Local" : "SSH";
+      const baseTitle = `${prefix} - ${host}`;
+      const count = blocksRef.current.filter((item) => item.kind === "terminal" && item.title.startsWith(baseTitle)).length;
       const block: TerminalBlock = {
         id: createId("terminal"),
         kind: "terminal",
-        title: `SSH - ${sessionLabelById.get(resolved) ?? resolved}`,
+        title: count > 0 ? `${baseTitle} (${count + 1})` : baseTitle,
         sessionId: resolved,
         layout: workspaceDefaultLayout("terminal", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
@@ -686,7 +749,7 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
       setBlocks((current) => [...current, block]);
       void ensureSessionListeners(resolved);
     },
-    [defaultSessionId, ensureSessionListeners, sessionLabelById, sessions, workspaceSize.height, workspaceSize.width],
+    [ensureSessionListeners, localSessionIds, sessionHostById, sessions, workspaceSize.height, workspaceSize.width],
   );
 
   useEffect(() => {
@@ -694,15 +757,91 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
       return;
     }
     initializedRef.current = true;
-    if (mode === "ssh") {
-      addSftpBlock(defaultSessionId ?? sessions[0]?.session_id ?? "local");
-      addTerminalBlock(defaultSessionId ?? sessions[0]?.session_id ?? null);
+    if (initialBlock === "terminal" && initialSourceId) {
+      addTerminalBlock(initialSourceId);
       return;
     }
-    if (defaultSessionId) {
-      addSftpBlock(defaultSessionId);
+    if (initialBlock === "sftp") {
+      addSftpBlock(initialSourceId ?? "local");
     }
-  }, [addSftpBlock, addTerminalBlock, defaultSessionId, mode, sessions]);
+  }, [addSftpBlock, addTerminalBlock, initialBlock, initialSourceId]);
+
+  const connectLocalTerminal = useCallback(async (): Promise<string> => {
+    const session = await api.localTerminalConnect(null);
+    useAppStore.setState((state) => ({
+      sessions: state.sessions.some((item) => item.session_id === session.session_id)
+        ? state.sessions
+        : [...state.sessions, session],
+    }));
+    await ensureSessionListeners(session.session_id);
+    return session.session_id;
+  }, [ensureSessionListeners]);
+
+  const connectProfileSession = useCallback(
+    async (profileId: string): Promise<string> => {
+      const profile = connections.find((item) => item.id === profileId);
+      if (!profile) {
+        throw new Error("Host nao encontrado para criar sessao.");
+      }
+      const session = await getOrCreateSession(profile);
+      return session.session_id;
+    },
+    [connections, getOrCreateSession],
+  );
+
+  const createBlock = useCallback(async () => {
+    try {
+      if (createBlockKind === "editor") {
+        const selected = await open({
+          title: "Selecionar arquivo para editar",
+          multiple: false,
+          directory: false,
+        });
+        if (typeof selected === "string") {
+          await openFile("local", selected);
+        }
+        setCreateBlockModalOpen(false);
+        return;
+      }
+
+      let sourceId = createSourceDraft;
+      if (createSourceDraft === "local" && createBlockKind === "terminal") {
+        sourceId = await connectLocalTerminal();
+      } else if (createSourceDraft.startsWith("profile:")) {
+        const profileId = createSourceDraft.replace("profile:", "");
+        sourceId = await connectProfileSession(profileId);
+      }
+
+      if (createBlockKind === "terminal") {
+        addTerminalBlock(sourceId);
+      } else {
+        addSftpBlock(sourceId === "local" ? "local" : sourceId);
+      }
+      setCreateBlockModalOpen(false);
+    } catch (error) {
+      toast.error(getError(error));
+    }
+  }, [
+    addSftpBlock,
+    addTerminalBlock,
+    connectLocalTerminal,
+    connectProfileSession,
+    createBlockKind,
+    createSourceDraft,
+    openFile,
+  ]);
+
+  useEffect(() => {
+    if (!createBlockModalOpen) {
+      return;
+    }
+    if (createBlockKind === "editor") {
+      return;
+    }
+    if (!createSourceOptions.some((item) => item.id === createSourceDraft)) {
+      setCreateSourceDraft("local");
+    }
+  }, [createBlockKind, createBlockModalOpen, createSourceDraft, createSourceOptions]);
 
   const renderedBlocks = useMemo(() => {
     if (workspaceMode === "free") {
@@ -732,7 +871,11 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
         <button
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 transition hover:border-purple-400/60 hover:bg-zinc-900"
-          onClick={() => setCreateBlockModalOpen(true)}
+          onClick={() => {
+            setCreateBlockKind("terminal");
+            setCreateSourceDraft("local");
+            setCreateBlockModalOpen(true);
+          }}
         >
           <Plus className="h-4 w-4" />
         </button>
@@ -782,14 +925,22 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
                 <button
                   type="button"
                   className="flex h-8 items-center gap-2 rounded border border-white/15 px-3 text-xs text-zinc-200 hover:bg-zinc-900"
-                  onClick={() => addSftpBlock()}
+                  onClick={() => {
+                    setCreateBlockKind("sftp");
+                    setCreateSourceDraft("local");
+                    setCreateBlockModalOpen(true);
+                  }}
                 >
                   <Folder className="h-3.5 w-3.5" /> SFTP
                 </button>
                 <button
                   type="button"
                   className="flex h-8 items-center gap-2 rounded border border-white/15 px-3 text-xs text-zinc-200 hover:bg-zinc-900"
-                  onClick={() => addTerminalBlock()}
+                  onClick={() => {
+                    setCreateBlockKind("terminal");
+                    setCreateSourceDraft("local");
+                    setCreateBlockModalOpen(true);
+                  }}
                 >
                   <TerminalSquare className="h-3.5 w-3.5" /> Terminal
                 </button>
@@ -834,13 +985,15 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
                 sessionId={block.sessionId}
                 sessionOptions={terminalOptions}
                 onSessionChange={(nextSessionId) => {
+                  const nextHost = sessionHostById.get(nextSessionId) ?? nextSessionId.slice(0, 8);
+                  const nextPrefix = localSessionIds.has(nextSessionId) ? "Local" : "SSH";
                   setBlocks((current) =>
                     current.map((item) =>
                       item.id === block.id && item.kind === "terminal"
                         ? {
                             ...item,
                             sessionId: nextSessionId,
-                            title: `SSH - ${sessionLabelById.get(nextSessionId) ?? nextSessionId}`,
+                            title: `${nextPrefix} - ${nextHost}`,
                           }
                         : item,
                     ),
@@ -913,53 +1066,91 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
         title="Novo Bloco"
         description="Escolha qual bloco deseja abrir neste workspace."
         onClose={() => setCreateBlockModalOpen(false)}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="rounded border border-white/20 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-900"
+              onClick={() => setCreateBlockModalOpen(false)}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="rounded bg-purple-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-600"
+              onClick={() => void createBlock()}
+            >
+              Criar Bloco
+            </button>
+          </div>
+        }
       >
-        <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-          <button
-            type="button"
-            className="rounded border border-white/10 bg-zinc-900/60 p-3 text-left transition hover:border-purple-400/50"
-            onClick={() => {
-              addTerminalBlock();
-              setCreateBlockModalOpen(false);
-            }}
-          >
-            <TerminalSquare className="h-4 w-4 text-purple-300" />
-            <p className="mt-2 text-sm font-medium text-zinc-100">Terminal</p>
-            <p className="mt-1 text-xs text-zinc-500">Consoles SSH com stream em tempo real.</p>
-          </button>
-          <button
-            type="button"
-            className="rounded border border-white/10 bg-zinc-900/60 p-3 text-left transition hover:border-purple-400/50"
-            onClick={() => {
-              addSftpBlock();
-              setCreateBlockModalOpen(false);
-            }}
-          >
-            <Folder className="h-4 w-4 text-purple-300" />
-            <p className="mt-2 text-sm font-medium text-zinc-100">SFTP</p>
-            <p className="mt-1 text-xs text-zinc-500">Explorador remoto com drag and drop.</p>
-          </button>
-          <button
-            type="button"
-            className="rounded border border-white/10 bg-zinc-900/60 p-3 text-left transition hover:border-purple-400/50"
-            onClick={() => {
-              void open({
-                title: "Selecionar arquivo para editar",
-                multiple: false,
-                directory: false,
-              }).then((selected) => {
-                if (typeof selected !== "string") {
-                  return;
-                }
-                void openFile("local", selected);
-                setCreateBlockModalOpen(false);
-              });
-            }}
-          >
-            <FileText className="h-4 w-4 text-purple-300" />
-            <p className="mt-2 text-sm font-medium text-zinc-100">Editor</p>
-            <p className="mt-1 text-xs text-zinc-500">Abre um arquivo no editor interno.</p>
-          </button>
+        <div className="space-y-3">
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              className={cn(
+                "rounded border p-2 text-xs transition",
+                createBlockKind === "terminal"
+                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+              )}
+              onClick={() => setCreateBlockKind("terminal")}
+            >
+              <TerminalSquare className="mx-auto h-4 w-4" />
+              <p className="mt-1">Terminal</p>
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded border p-2 text-xs transition",
+                createBlockKind === "sftp"
+                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+              )}
+              onClick={() => setCreateBlockKind("sftp")}
+            >
+              <Folder className="mx-auto h-4 w-4" />
+              <p className="mt-1">SFTP</p>
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded border p-2 text-xs transition",
+                createBlockKind === "editor"
+                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+              )}
+              onClick={() => setCreateBlockKind("editor")}
+            >
+              <FileText className="mx-auto h-4 w-4" />
+              <p className="mt-1">Editor</p>
+            </button>
+          </div>
+
+          {createBlockKind !== "editor" ? (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-zinc-300">Origem</p>
+              <select
+                className="h-9 w-full rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
+                value={createSourceDraft}
+                onChange={(event) => setCreateSourceDraft(event.target.value)}
+              >
+                {createSourceOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-zinc-500">
+                {createBlockKind === "terminal"
+                  ? "Escolha terminal local ou um host remoto para criar nova sessao."
+                  : "Escolha local ou host remoto para abrir o explorador SFTP."}
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-500">O editor abre arquivo local selecionado pelo sistema.</p>
+          )}
         </div>
       </Dialog>
     </div>

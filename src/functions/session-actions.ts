@@ -29,7 +29,7 @@ export function createSessionActions(
   const scheduleReconnect = (sessionId: string) => {
     const state = get();
     const session = state.sessions.find((item) => item.session_id === sessionId);
-    if (!session || !state.settings.auto_reconnect_enabled) {
+    if (!session || session.session_kind === "local" || !state.settings.auto_reconnect_enabled) {
       return;
     }
 
@@ -172,12 +172,6 @@ export function createSessionActions(
     },
 
     getOrCreateSession: async (profile: ConnectionProfile) => {
-      const existing = get().sessions.find((item) => item.profile_id === profile.id);
-      if (existing) {
-        await get().ensureSessionListeners(existing.session_id);
-        return existing;
-      }
-
       let result = await api.sshConnectEx(profile.id, {
         acceptUnknownHost: false,
       });
@@ -227,12 +221,13 @@ export function createSessionActions(
       try {
         const session = await get().getOrCreateSession(profile);
         get().openTab({
-          id: `ssh:${session.session_id}`,
-          type: "ssh",
-          title: `SSH - ${profile.host}`,
+          id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+          type: "workspace",
+          title: `Workspace - ${profile.name}`,
           closable: true,
-          sessionId: session.session_id,
           profileId: profile.id,
+          initialBlock: "terminal",
+          initialSourceId: session.session_id,
         });
         get().appendSessionBuffer(session.session_id, `\r\nConnected to ${profile.host}\r\n`);
       } catch (error) {

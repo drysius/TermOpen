@@ -57,6 +57,8 @@ export const api = {
   sshResize: (sessionId: string, cols: number, rows: number) => invoke<void>("ssh_resize", { sessionId, cols, rows }),
   sshDisconnect: (sessionId: string) => invoke<void>("ssh_disconnect", { sessionId }),
   sshSessions: () => invoke<SshSessionInfo[]>("ssh_sessions"),
+  localTerminalConnect: (path?: string | null) =>
+    invoke<SshSessionInfo>("local_terminal_connect", { path }),
   knownHostsList: (path?: string | null) => invoke<KnownHostEntry[]>("known_hosts_list_cmd", { path }),
   knownHostsEnsure: (path?: string | null) => invoke<string>("known_hosts_ensure_cmd", { path }),
   knownHostsRemove: (lineRaw: string, path?: string | null) =>
