@@ -159,7 +159,7 @@ export function HostFormDrawer() {
           </Field>
 
           <Field label="Host/IP" description="Endereco DNS ou IP da maquina remota.">
-            <Input placeholder="Ex: 51.222.104.129" {...register("host", { required: true })} />
+            <Input placeholder="Ex: 123.123.123.123" {...register("host", { required: true })} />
           </Field>
 
           <Field label="Porta" description="Porta do servidor SSH/SFTP (normalmente 22).">
