@@ -16,8 +16,8 @@ use keyring::Entry;
 use rand::{rngs::OsRng, RngCore};
 
 use crate::models::{
-    AppSettings, ConnectionProfile, KeyMode, KeychainEntry, SyncMetadata, VaultFile,
-    VaultPayload, VaultStatus,
+    AppSettings, ConnectionProfile, KeyMode, KeychainEntry, SyncMetadata, VaultFile, VaultPayload,
+    VaultStatus,
 };
 
 const KEYRING_SERVICE: &str = "com.drysius.termopen";

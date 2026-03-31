@@ -75,12 +75,7 @@ impl SshManager {
         )?;
         ensure_known_hosts_file(&known_hosts_file)?;
 
-        match verify_known_host(
-            &session,
-            profile,
-            &known_hosts_file,
-            accept_unknown_host,
-        )? {
+        match verify_known_host(&session, profile, &known_hosts_file, accept_unknown_host)? {
             Some(challenge) => return Ok(challenge),
             None => {}
         }
@@ -345,7 +340,8 @@ pub fn known_hosts_add(
     fs::write(&path, current)
         .with_context(|| format!("Falha ao escrever known_hosts em {}", path.display()))?;
 
-    parse_known_host_line(&line, &path).ok_or_else(|| anyhow!("Falha ao montar entrada de known host"))
+    parse_known_host_line(&line, &path)
+        .ok_or_else(|| anyhow!("Falha ao montar entrada de known host"))
 }
 
 fn verify_known_host(
@@ -400,7 +396,10 @@ fn verify_known_host(
     }
 }
 
-fn authenticate_session(session: &mut Session, profile: &ConnectionProfile) -> Result<(), AuthFailure> {
+fn authenticate_session(
+    session: &mut Session,
+    profile: &ConnectionProfile,
+) -> Result<(), AuthFailure> {
     let key_data = profile
         .private_key
         .as_ref()
@@ -420,7 +419,8 @@ fn authenticate_session(session: &mut Session, profile: &ConnectionProfile) -> R
     }
 
     if let Some(private_key) = key_data {
-        let key_result = auth_with_private_key(session, &profile.username, private_key, password_data);
+        let key_result =
+            auth_with_private_key(session, &profile.username, private_key, password_data);
         if key_result.is_ok() && session.authenticated() {
             return Ok(());
         }
@@ -533,9 +533,8 @@ fn ensure_known_hosts_file(path: &Path) -> Result<()> {
         })?;
     }
     if !path.exists() {
-        fs::write(path, "").with_context(|| {
-            format!("Falha ao criar arquivo known_hosts em {}", path.display())
-        })?;
+        fs::write(path, "")
+            .with_context(|| format!("Falha ao criar arquivo known_hosts em {}", path.display()))?;
     }
     Ok(())
 }
@@ -613,7 +612,8 @@ fn read_shell_output(managed: &mut ManagedSession, timeout: Duration) -> Result<
 
 fn establish_handshake(profile: &ConnectionProfile) -> Result<Session> {
     let address = format!("{}:{}", profile.host, profile.port);
-    let tcp = TcpStream::connect(&address).with_context(|| format!("Falha ao conectar em {}", address))?;
+    let tcp = TcpStream::connect(&address)
+        .with_context(|| format!("Falha ao conectar em {}", address))?;
     tcp.set_read_timeout(Some(Duration::from_secs(15))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(15))).ok();
 

@@ -10,11 +10,12 @@ use models::{
     SshSessionInfo, SyncState, VaultStatus,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
-use sync::SyncManager;
-use tauri::{Emitter, State};
+use sync::{handle_auth_callback_deeplink, SyncManager};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 use vault::VaultManager;
 
+mod deeplink;
 mod models;
 mod ssh;
 mod sync;
@@ -392,15 +393,12 @@ async fn sftp_transfer(
 
     let content = if let Some(session_id) = from_session_id {
         let mut ssh = state.ssh.lock().await;
-        ssh.sftp_read_bytes(&session_id, &from_path).map_err(app_error)?
+        ssh.sftp_read_bytes(&session_id, &from_path)
+            .map_err(app_error)?
     } else {
         let source = resolve_local_path(Some(&from_path))?;
         fs::read(&source).map_err(|error| {
-            format!(
-                "Falha ao ler arquivo local {}: {}",
-                source.display(),
-                error
-            )
+            format!("Falha ao ler arquivo local {}: {}", source.display(), error)
         })?
     };
 
@@ -431,8 +429,13 @@ async fn sftp_transfer(
 #[tauri::command]
 async fn local_list(path: Option<String>) -> Result<Vec<SftpEntry>, String> {
     let target = resolve_local_path(path.as_deref())?;
-    let read_dir = fs::read_dir(&target)
-        .map_err(|error| format!("Falha ao listar diretorio local {}: {}", target.display(), error))?;
+    let read_dir = fs::read_dir(&target).map_err(|error| {
+        format!(
+            "Falha ao listar diretorio local {}: {}",
+            target.display(),
+            error
+        )
+    })?;
 
     let mut entries = Vec::new();
     for item in read_dir {
@@ -471,8 +474,13 @@ async fn local_write(path: String, content: String) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(app_error)?;
     }
-    fs::write(&target, content)
-        .map_err(|error| format!("Falha ao escrever arquivo local {}: {}", target.display(), error))
+    fs::write(&target, content).map_err(|error| {
+        format!(
+            "Falha ao escrever arquivo local {}: {}",
+            target.display(),
+            error
+        )
+    })
 }
 
 #[tauri::command]
@@ -612,14 +620,59 @@ fn resolve_local_path(input: Option<&str>) -> Result<PathBuf, String> {
     }
 }
 
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn handle_deeplink_input(app: &tauri::AppHandle, input: &str) {
+    let payload = input.trim().trim_matches('"');
+    if payload.is_empty() {
+        focus_main_window(app);
+        return;
+    }
+
+    match handle_auth_callback_deeplink(payload) {
+        Ok(true) => {}
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Falha ao processar deep link {}: {}", payload, error);
+        }
+    }
+
+    focus_main_window(app);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if deeplink::prepare("com.drysius.termopen.deeplink") {
+        return;
+    }
+
     let vault = VaultManager::new().expect("failed to initialize vault manager");
     tauri::Builder::default()
         .manage(AppState {
             vault: Mutex::new(vault),
             ssh: Mutex::new(SshManager::new()),
             sync: Mutex::new(SyncManager::new()),
+        })
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            let listener_handle = app_handle.clone();
+            if let Err(error) = deeplink::register("termopen", move |payload| {
+                handle_deeplink_input(&listener_handle, &payload);
+            }) {
+                eprintln!("Falha ao registrar protocolo termopen:// {}", error);
+            }
+
+            if let Some(initial_arg) = std::env::args().nth(1) {
+                handle_deeplink_input(&app_handle, &initial_arg);
+            }
+
+            Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
