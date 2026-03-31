@@ -49,7 +49,11 @@ impl SyncManager {
 
     /// Abre o browser para login via Google OAuth.
     /// Em Windows aguarda callback via deep link; nos demais usa callback local.
-    pub async fn google_login(&mut self, app: &tauri::AppHandle, server_address: &str) -> Result<SyncState> {
+    pub async fn google_login(
+        &mut self,
+        app: &tauri::AppHandle,
+        server_address: &str,
+    ) -> Result<SyncState> {
         let pending = SyncState {
             connected: false,
             status: "running".to_string(),

@@ -1,8 +1,0 @@
-[
-    {
-        "label":"TermOpen - (Cloudflare Worker Server)",
-        "clientid":"<GOOGLE_CLIENT_ID>",
-        "author":"github.com/danielgomesdev",
-        "address":"https://localhost:3000"
-    }
-]
