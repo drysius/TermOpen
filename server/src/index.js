@@ -1,24 +1,10 @@
 /**
  * TermOpen Auth Worker — Google OAuth broker
  *
- * O worker existe apenas para manter o GOOGLE_CLIENT_SECRET seguro.
- * Ele troca o authorization code por tokens e devolve tudo pro app.
- *
- * Client ID e Secret estão hardcoded abaixo (seguros — rodam apenas no worker).
- *
- * Vars:
- *   ALLOWED_ORIGINS — origens separadas por vírgula
- *
- * Fluxo:
- *   1. App abre GET /auth/google → redireciona pro Google
- *   2. Google redireciona GET /auth/google/callback → troca code por tokens
- *   3. Callback retorna HTML que envia dados pro app via postMessage/deep link
- *   4. App recebe refresh_token, access_token, perfil e fala direto com Google Drive
  */
 
-// Lidos do env (wrangler.toml [vars] ou .env / secrets)
-let GOOGLE_CLIENT_ID;
-let GOOGLE_CLIENT_SECRET;
+let GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+let GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
