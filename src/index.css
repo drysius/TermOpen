@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 240 6% 6%;
+  --foreground: 0 0% 96%;
+  --card: 240 6% 10%;
+  --card-foreground: 0 0% 97%;
+  --primary: 271 81% 56%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 240 5% 17%;
+  --secondary-foreground: 0 0% 93%;
+  --muted: 240 4% 16%;
+  --muted-foreground: 240 5% 68%;
+  --accent: 273 100% 65%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 72% 50%;
+  --destructive-foreground: 0 0% 97%;
+  --border: 240 5% 22%;
+  --input: 240 5% 22%;
+  --ring: 271 81% 56%;
+  --radius: 0.85rem;
+}
+
+* {
+  @apply border-border;
+}
+
+html,
+body,
+#root {
+  @apply h-full w-full;
+  margin: 0;
+  background: transparent;
+}
+
+body {
+  @apply text-foreground antialiased;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.app-background {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background:
+    radial-gradient(1200px 450px at 0% -30%, rgba(168, 85, 247, 0.26), transparent 70%),
+    radial-gradient(900px 450px at 100% 0%, rgba(139, 92, 246, 0.2), transparent 70%),
+    linear-gradient(152deg, rgba(10, 10, 15, 0.96), rgba(2, 2, 4, 0.99));
+}
+
+.glass-panel {
+  @apply border border-white/10 bg-black/50 backdrop-blur-xl;
+  box-shadow: 0 18px 50px rgba(2, 2, 8, 0.45);
+}
+
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 #09090b;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #09090b;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  border: 2px solid #09090b;
+  background: linear-gradient(180deg, #3f3f46, #27272a);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #7c3aed, #4c1d95);
+}
