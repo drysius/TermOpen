@@ -1,5 +1,5 @@
-import { Cloud, CloudDownload, CloudUpload, ExternalLink, Lock, Save } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { ChevronDown, Cloud, CloudDownload, CloudUpload, ExternalLink, Lock, Save } from "lucide-react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,66 @@ function SettingsRow({
   );
 }
 
+function OptionDropdown<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: ReadonlyArray<{ value: T; label: string; description: string }>;
+  onChange: (value: T) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selected = options.find((item) => item.value === value) ?? options[0];
+
+  useEffect(() => {
+    const onDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, []);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        className="flex h-10 w-full items-center justify-between rounded-md border border-white/15 bg-zinc-900 px-3 text-left text-sm text-zinc-100"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{selected?.label}</span>
+        <ChevronDown className={`h-4 w-4 text-zinc-400 transition ${open ? "rotate-180" : ""}`} />
+      </button>
+      {selected?.description ? (
+        <p className="mt-1 text-xs text-zinc-500">{selected.description}</p>
+      ) : null}
+      {open ? (
+        <div className="absolute z-20 mt-1 w-full rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`w-full rounded px-2 py-2 text-left transition ${
+                option.value === value ? "bg-purple-600/20 text-purple-100" : "text-zinc-300 hover:bg-zinc-900"
+              }`}
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              <p className="text-xs font-medium">{option.label}</p>
+              <p className="mt-0.5 text-[11px] text-zinc-500">{option.description}</p>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const settings = useAppStore((state) => state.settings);
   const syncState = useAppStore((state) => state.syncState);
@@ -51,6 +111,7 @@ export function SettingsPage() {
   const [authServers, setAuthServers] = useState<AuthServer[]>([]);
   const [loggedUser, setLoggedUser] = useState<{ name: string; email: string } | null>(null);
   const [driveTab, setDriveTab] = useState<"account" | "config">("account");
+  const [settingsTab, setSettingsTab] = useState<"general" | "sftp" | "terminal" | "sync" | "security">("general");
   const [serverPings, setServerPings] = useState<Record<string, number | null>>({});
   const [serverFilter, setServerFilter] = useState("");
   const [serverFilterStatus, setServerFilterStatus] = useState<"all" | "online" | "offline">("all");
@@ -117,6 +178,31 @@ export function SettingsPage() {
 
   const watchedNewPassword = passwordForm.watch("newPassword");
 
+  const editorOptions = useMemo(
+    () => [
+      { value: "internal", label: "Internal Monaco", description: "Built-in editor with syntax highlighting." },
+      { value: "vscode", label: "VS Code", description: "Open files in VS Code when possible." },
+      { value: "system", label: "System Default", description: "Use OS default application association." },
+    ] as const,
+    [],
+  );
+  const uploadPolicyOptions = useMemo(
+    () => [
+      { value: "auto", label: "Auto Upload", description: "Upload text file changes automatically after edits." },
+      { value: "ask", label: "Ask Every Time", description: "Prompt before uploading modified files." },
+      { value: "manual", label: "Manual Only", description: "Only upload when explicitly requested." },
+    ] as const,
+    [],
+  );
+  const serverFilterOptions = useMemo(
+    () => [
+      { value: "all", label: "All", description: "Show all servers regardless of status." },
+      { value: "online", label: "Online", description: "Show only reachable servers." },
+      { value: "offline", label: "Offline", description: "Show only unreachable servers." },
+    ] as const,
+    [],
+  );
+
   function applyUploadPolicy(policy: ModifiedUploadPolicy) {
     const next = { ...settings, modified_files_upload_policy: policy };
     settingsForm.setValue("modified_files_upload_policy", policy);
@@ -140,20 +226,47 @@ export function SettingsPage() {
           }),
         )}
       >
+        <div className="mb-4 grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-zinc-950/40 p-1 text-xs md:grid-cols-5">
+          {[
+            { id: "general", label: "General" },
+            { id: "sftp", label: "SFTP" },
+            { id: "terminal", label: "Terminal" },
+            { id: "sync", label: "Synchronization" },
+            { id: "security", label: "Security" },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`rounded px-2 py-1.5 transition ${
+                settingsTab === tab.id
+                  ? "bg-zinc-800 text-zinc-100"
+                  : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+              }`}
+              onClick={() => setSettingsTab(tab.id as typeof settingsTab)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {settingsTab === "general" ? (
         <section>
           <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Aplicacao</h3>
           <SettingsRow
             title="Editor padrao"
             description="Defina se o arquivo abre no editor interno, VS Code ou no sistema."
             control={
-              <select
-                className="h-9 w-full rounded-md border border-white/15 bg-zinc-900 px-3 text-sm text-zinc-100"
-                {...settingsForm.register("preferred_editor")}
-              >
-                <option value="internal">Interno (Monaco)</option>
-                <option value="vscode">VS Code</option>
-                <option value="system">Sistema</option>
-              </select>
+              <Controller
+                control={settingsForm.control}
+                name="preferred_editor"
+                render={({ field }) => (
+                  <OptionDropdown
+                    value={field.value}
+                    onChange={field.onChange}
+                    options={editorOptions}
+                  />
+                )}
+              />
             }
           />
           <SettingsRow
@@ -167,9 +280,11 @@ export function SettingsPage() {
             control={<Input type="number" min={1} {...settingsForm.register("inactivity_lock_minutes", { valueAsNumber: true })} />}
           />
         </section>
+        ) : null}
 
+        {settingsTab === "sync" ? (
         <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Sync e Conectividade</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Synchronization</h3>
           <SettingsRow
             title="Sync automatico"
             description="Sincroniza periodicamente quando conectado ao Google Drive."
@@ -208,6 +323,12 @@ export function SettingsPage() {
             description="Frequencia em minutos da sincronizacao automatica."
             control={<Input type="number" min={1} {...settingsForm.register("sync_interval_minutes", { valueAsNumber: true })} />}
           />
+        </section>
+        ) : null}
+
+        {settingsTab === "sftp" ? (
+        <section className="mt-5">
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">SFTP</h3>
           <SettingsRow
             title="Chunk SFTP (KB)"
             description="Tamanho do bloco usado em leituras/escritas e transferencias SFTP."
@@ -220,6 +341,12 @@ export function SettingsPage() {
               />
             }
           />
+        </section>
+        ) : null}
+
+        {settingsTab === "terminal" ? (
+        <section className="mt-5">
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Terminal</h3>
           <SettingsRow
             title="Auto reconnect SSH"
             description="Tenta reconectar sessoes SSH desconectadas automaticamente."
@@ -263,25 +390,32 @@ export function SettingsPage() {
             }
           />
         </section>
+        ) : null}
 
+        {settingsTab === "general" ? (
         <section className="mt-5">
           <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Arquivos Modificados</h3>
           <SettingsRow
             title="Upload de alteracoes"
             description="Define como arquivos alterados no editor interno devem ser enviados."
             control={
-              <select
-                className="h-9 w-full rounded-md border border-white/15 bg-zinc-900 px-3 text-sm text-zinc-100"
-                {...settingsForm.register("modified_files_upload_policy")}
-              >
-                <option value="auto">Enviar automaticamente</option>
-                <option value="ask">Perguntar sempre</option>
-                <option value="manual">Somente manual</option>
-              </select>
+              <Controller
+                control={settingsForm.control}
+                name="modified_files_upload_policy"
+                render={({ field }) => (
+                  <OptionDropdown
+                    value={field.value}
+                    onChange={field.onChange}
+                    options={uploadPolicyOptions}
+                  />
+                )}
+              />
             }
           />
         </section>
+        ) : null}
 
+        {settingsTab === "sync" ? (
         <section className="mt-5">
           <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Google Drive</h3>
           <div className="border-b border-white/10 py-3">
@@ -355,15 +489,16 @@ export function SettingsPage() {
                     value={serverFilter}
                     onChange={(e) => { setServerFilter(e.target.value); setServerPage(0); }}
                   />
-                  <select
-                    className="h-8 rounded-md border border-white/15 bg-zinc-900 px-2 text-xs text-zinc-100"
-                    value={serverFilterStatus}
-                    onChange={(e) => { setServerFilterStatus(e.target.value as "all" | "online" | "offline"); setServerPage(0); }}
-                  >
-                    <option value="all">Todos</option>
-                    <option value="online">Online</option>
-                    <option value="offline">Offline</option>
-                  </select>
+                  <div className="min-w-[180px]">
+                    <OptionDropdown
+                      value={serverFilterStatus}
+                      onChange={(value) => {
+                        setServerFilterStatus(value);
+                        setServerPage(0);
+                      }}
+                      options={serverFilterOptions}
+                    />
+                  </div>
                 </div>
 
                 {(() => {
@@ -495,7 +630,9 @@ export function SettingsPage() {
             )}
           </div>
         </section>
+        ) : null}
 
+        {settingsTab === "security" ? (
         <section className="mt-5">
           <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Senha Mestre</h3>
           <div className="grid gap-2 border-b border-white/10 py-3 md:grid-cols-3">
@@ -520,6 +657,7 @@ export function SettingsPage() {
             </div>
           </div>
         </section>
+        ) : null}
 
         <div className="flex justify-end py-4">
           <Button type="submit" disabled={busy}>
