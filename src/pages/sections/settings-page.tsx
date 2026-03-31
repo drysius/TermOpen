@@ -229,6 +229,11 @@ export function SettingsPage() {
   }
 
   async function handleDeleteServer(id: string) {
+    const target = authServers.find((server) => server.id === id);
+    if (!target || !target.id.startsWith("local:")) {
+      return;
+    }
+
     await api.authServerDelete(id);
     const next = await api.authServersList();
     setAuthServers(next);
@@ -270,6 +275,10 @@ export function SettingsPage() {
     void saveSettings(next);
     localStorage.setItem(uploadPolicyStorageKey, "1");
     setShowUploadPolicyModal(false);
+  }
+
+  function isUserManagedServer(server: AuthServer): boolean {
+    return server.id.startsWith("local:");
   }
 
   return (
@@ -676,7 +685,7 @@ export function SettingsPage() {
                                 {isSelected ? (
                                   <span className="text-xs font-medium text-emerald-400">Ativo</span>
                                 ) : null}
-                                {!server.official ? (
+                                {isUserManagedServer(server) ? (
                                   <>
                                     <Button
                                       type="button"
