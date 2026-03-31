@@ -17,6 +17,7 @@ const initialState: Omit<
   | "setEditorContent"
   | "appendSessionBuffer"
   | "setWorkspaceSessions"
+  | "setWorkspaceBlockCount"
   | "bootstrap"
   | "loadWorkspace"
   | "vaultInit"
@@ -70,6 +71,7 @@ const initialState: Omit<
   editorTabs: {},
   sessionBuffers: {},
   workspaceSessionsByTab: {},
+  workspaceBlockCountByTab: {},
   commandInput: "whoami",
   busy: false,
 };

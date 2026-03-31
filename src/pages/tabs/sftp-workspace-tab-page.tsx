@@ -280,6 +280,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const ensureSessionListeners = useAppStore((state) => state.ensureSessionListeners);
   const getOrCreateSession = useAppStore((state) => state.getOrCreateSession);
   const setWorkspaceSessions = useAppStore((state) => state.setWorkspaceSessions);
+  const setWorkspaceBlockCount = useAppStore((state) => state.setWorkspaceBlockCount);
 
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const blocksRef = useRef<WorkspaceBlock[]>([]);
@@ -322,6 +323,10 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     );
     setWorkspaceSessions(tabId, sessionIds);
   }, [blocks, setWorkspaceSessions, tabId]);
+
+  useEffect(() => {
+    setWorkspaceBlockCount(tabId, blocks.length);
+  }, [blocks.length, setWorkspaceBlockCount, tabId]);
 
   useEffect(() => {
     const container = workspaceRef.current;

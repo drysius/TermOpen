@@ -35,6 +35,7 @@ export interface AppState {
   editorTabs: Record<string, EditorBuffer>;
   sessionBuffers: Record<string, string>;
   workspaceSessionsByTab: Record<string, string[]>;
+  workspaceBlockCountByTab: Record<string, number>;
   commandInput: string;
   busy: boolean;
 }
@@ -48,6 +49,7 @@ export interface AppActions {
   setEditorContent: (tabId: string, value: string) => void;
   appendSessionBuffer: (sessionId: string, chunk: string) => void;
   setWorkspaceSessions: (tabId: string, sessionIds: string[]) => void;
+  setWorkspaceBlockCount: (tabId: string, count: number) => void;
 
   bootstrap: () => Promise<void>;
   loadWorkspace: () => Promise<void>;

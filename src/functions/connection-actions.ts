@@ -43,6 +43,7 @@ export function createConnectionActions(
   | "setPaneSelectedFile"
   | "setEditorContent"
   | "setWorkspaceSessions"
+  | "setWorkspaceBlockCount"
   | "setActiveTab"
   | "setCommandInput"
   | "setBusy"
@@ -91,6 +92,14 @@ export function createConnectionActions(
         workspaceSessionsByTab: {
           ...state.workspaceSessionsByTab,
           [tabId]: Array.from(new Set(sessionIds)),
+        },
+      })),
+
+    setWorkspaceBlockCount: (tabId, count) =>
+      set((state) => ({
+        workspaceBlockCountByTab: {
+          ...state.workspaceBlockCountByTab,
+          [tabId]: Math.max(0, count),
         },
       })),
 

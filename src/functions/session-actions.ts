@@ -128,7 +128,9 @@ export function createSessionActions(
           nextState.activeTabId === tabId ? (nextTabs.length ? nextTabs[nextTabs.length - 1].id : null) : nextState.activeTabId;
         const nextEditors = { ...nextState.editorTabs };
         const nextWorkspaceSessions = { ...nextState.workspaceSessionsByTab };
+        const nextWorkspaceBlocks = { ...nextState.workspaceBlockCountByTab };
         delete nextWorkspaceSessions[tabId];
+        delete nextWorkspaceBlocks[tabId];
         if (closing.type === "editor") {
           delete nextEditors[tabId];
         }
@@ -137,6 +139,7 @@ export function createSessionActions(
           activeTabId: nextActive,
           editorTabs: nextEditors,
           workspaceSessionsByTab: nextWorkspaceSessions,
+          workspaceBlockCountByTab: nextWorkspaceBlocks,
         };
       });
     },

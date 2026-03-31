@@ -98,6 +98,7 @@ export function createVaultActions(
           editorTabs: {},
           sessionBuffers: {},
           workspaceSessionsByTab: {},
+          workspaceBlockCountByTab: {},
           knownHosts: [],
           leftPane: DEFAULT_PANE,
           rightPane: { ...DEFAULT_PANE, path: "/" },

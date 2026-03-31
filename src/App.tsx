@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Toaster } from "sonner";
 
@@ -6,6 +6,7 @@ import { HostFormDrawer } from "@/components/drawers/host-form-drawer";
 import { KeychainFormDrawer } from "@/components/drawers/keychain-form-drawer";
 import { AppHeader } from "@/components/layout/app-header";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { ConfirmDialog } from "@/components/ui/dialog";
 import { api } from "@/lib/tauri";
 import { AboutPage } from "@/pages/sections/about-page";
 import { HomePage } from "@/pages/sections/home-page";
@@ -60,6 +61,7 @@ function App() {
   const tabs = useAppStore((state) => state.tabs);
   const activeTabId = useAppStore((state) => state.activeTabId);
   const editorTabs = useAppStore((state) => state.editorTabs);
+  const workspaceBlockCountByTab = useAppStore((state) => state.workspaceBlockCountByTab);
 
   const bootstrap = useAppStore((state) => state.bootstrap);
   const clearSessionListeners = useAppStore((state) => state.clearSessionListeners);
@@ -72,7 +74,13 @@ function App() {
   const vaultLock = useAppStore((state) => state.vaultLock);
 
   const lastActivityRef = useRef<number>(Date.now());
+  const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
+  const [closingWorkspace, setClosingWorkspace] = useState(false);
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId]);
+  const pendingCloseTab = useMemo(
+    () => tabs.find((tab) => tab.id === pendingCloseTabId) ?? null,
+    [pendingCloseTabId, tabs],
+  );
   const currentSection = activeTabId ? "home" : sectionFromPath(location.pathname);
 
   useEffect(() => {
@@ -171,7 +179,22 @@ function App() {
         tabs={tabs}
         activeTabId={activeTabId}
         onSelectTab={setActiveTab}
-        onCloseTab={(id) => void closeTab(id)}
+        onCloseTab={(id) => {
+          const tab = tabs.find((item) => item.id === id);
+          if (!tab) {
+            return;
+          }
+          if (tab.type !== "workspace") {
+            void closeTab(id);
+            return;
+          }
+          const hasBlocks = (workspaceBlockCountByTab[id] ?? 0) > 0;
+          if (!hasBlocks) {
+            void closeTab(id);
+            return;
+          }
+          setPendingCloseTabId(id);
+        }}
         onCreateWorkspaceTab={() =>
           openTab({
             id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
@@ -242,6 +265,33 @@ function App() {
 
       <HostFormDrawer />
       <KeychainFormDrawer />
+      <ConfirmDialog
+        open={pendingCloseTab !== null}
+        title="Fechar workspace"
+        message={
+          closingWorkspace
+            ? "Fechando terminais e blocos do workspace..."
+            : `Deseja realmente fechar "${pendingCloseTab?.title ?? "Workspace"}"? Isso encerrara as sessoes associadas.`
+        }
+        busy={closingWorkspace}
+        confirmLabel={closingWorkspace ? "Fechando..." : "Fechar Workspace"}
+        onCancel={() => {
+          if (!closingWorkspace) {
+            setPendingCloseTabId(null);
+          }
+        }}
+        onConfirm={() => {
+          if (!pendingCloseTabId || closingWorkspace) {
+            return;
+          }
+          setClosingWorkspace(true);
+          void closeTab(pendingCloseTabId)
+            .finally(() => {
+              setClosingWorkspace(false);
+              setPendingCloseTabId(null);
+            });
+        }}
+      />
     </main>
   );
 }
