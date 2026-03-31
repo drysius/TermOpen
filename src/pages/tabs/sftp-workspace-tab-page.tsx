@@ -20,7 +20,7 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceBlockController, type WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
@@ -107,6 +107,35 @@ interface DragPayload {
 
 const workspaceCache = new Map<string, { blocks: WorkspaceBlock[]; workspaceMode: WorkspaceMode }>();
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
+const DRAG_ENTRY_MIME = "application/x-termopen-entry";
+
+function parseDragPayload(dataTransfer: DataTransfer): DragPayload | null {
+  const raw = dataTransfer.getData(DRAG_ENTRY_MIME) || dataTransfer.getData("text/plain");
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<DragPayload>;
+    if (
+      typeof parsed.sourceBlockId === "string" &&
+      typeof parsed.sourceId === "string" &&
+      typeof parsed.path === "string" &&
+      typeof parsed.isDir === "boolean"
+    ) {
+      return parsed as DragPayload;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDragPayload(dataTransfer: DataTransfer, payload: DragPayload): void {
+  const raw = JSON.stringify(payload);
+  dataTransfer.setData(DRAG_ENTRY_MIME, raw);
+  dataTransfer.setData("text/plain", raw);
+}
 
 function createId(prefix: string): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
@@ -1169,24 +1198,40 @@ function SftpBlockView({
 
   const columnButtonClass =
     "inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-zinc-400 hover:text-zinc-100";
+  const handleEntryDragStart = useCallback(
+    (event: DragEvent<HTMLElement>, entry: SftpEntry) => {
+      if (entry.is_dir) {
+        event.preventDefault();
+        return;
+      }
+      const payload: DragPayload = {
+        sourceBlockId: block.id,
+        sourceId: block.sourceId,
+        path: entry.path,
+        isDir: false,
+      };
+      writeDragPayload(event.dataTransfer, payload);
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.dropEffect = "copy";
+      event.stopPropagation();
+    },
+    [block.id, block.sourceId],
+  );
 
   return (
     <div
       ref={containerRef}
       className="flex h-full min-h-0 flex-col"
       onMouseDown={onFocus}
-      onDragOver={(event) => event.preventDefault()}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
       onDrop={(event) => {
         event.preventDefault();
-        const raw = event.dataTransfer.getData("application/x-termopen-entry");
-        if (!raw) {
-          return;
-        }
-        try {
-          const payload = JSON.parse(raw) as DragPayload;
+        const payload = parseDragPayload(event.dataTransfer);
+        if (payload) {
           onDropTransfer(payload, block.path);
-        } catch {
-          // ignore invalid transfer payload
         }
       }}
     >
@@ -1276,7 +1321,6 @@ function SftpBlockView({
               return (
                 <tr
                   key={entry.path}
-                  draggable
                   className={cn(
                     "border-b border-white/5 text-zinc-200 transition hover:bg-zinc-900/70",
                     selected ? "bg-purple-600/10" : undefined,
@@ -1284,9 +1328,8 @@ function SftpBlockView({
                   onClick={() => onSelectEntry(entry.path)}
                   onDoubleClick={() => onOpenEntry(entry)}
                   onDragOver={(event) => {
-                    if (entry.is_dir) {
-                      event.preventDefault();
-                    }
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "copy";
                   }}
                   onDrop={(event) => {
                     if (!entry.is_dir) {
@@ -1294,30 +1337,22 @@ function SftpBlockView({
                     }
                     event.preventDefault();
                     event.stopPropagation();
-                    const raw = event.dataTransfer.getData("application/x-termopen-entry");
-                    if (!raw) {
-                      return;
-                    }
-                    try {
-                      const payload = JSON.parse(raw) as DragPayload;
+                    const payload = parseDragPayload(event.dataTransfer);
+                    if (payload) {
                       onDropTransfer(payload, entry.path);
-                    } catch {
-                      // invalid payload
                     }
-                  }}
-                  onDragStart={(event) => {
-                    const payload: DragPayload = {
-                      sourceBlockId: block.id,
-                      sourceId: block.sourceId,
-                      path: entry.path,
-                      isDir: entry.is_dir,
-                    };
-                    event.dataTransfer.setData("application/x-termopen-entry", JSON.stringify(payload));
-                    event.dataTransfer.effectAllowed = "copy";
                   }}
                 >
                   <td className="px-2 py-1.5">
-                    <span className="inline-flex items-center gap-2">
+                    <span
+                      data-entry-drag="true"
+                      draggable={!entry.is_dir}
+                      className={cn(
+                        "inline-flex items-center gap-2",
+                        entry.is_dir ? undefined : "cursor-grab active:cursor-grabbing",
+                      )}
+                      onDragStart={(event) => handleEntryDragStart(event, entry)}
+                    >
                       {entry.is_dir ? (
                         <Folder className="h-3.5 w-3.5 text-purple-300" />
                       ) : (

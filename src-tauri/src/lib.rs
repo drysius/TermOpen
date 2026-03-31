@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
     time::UNIX_EPOCH,
@@ -481,6 +481,7 @@ async fn sftp_transfer(
             }
 
             let mut reader = temp_file.reopen().map_err(app_error)?;
+            reader.seek(SeekFrom::Start(0)).map_err(app_error)?;
             let mut ssh = state.ssh.lock().await;
             ssh.sftp_upload_from_reader(to_session, &to_path, &mut reader, chunk_size, |bytes| {
                 transferred = transferred.saturating_add(bytes);
