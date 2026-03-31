@@ -26,6 +26,12 @@ import { toast } from "sonner";
 import { WorkspaceBlockController, type WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
 import { Dialog } from "@/components/ui/dialog";
 import { baseName, getError, joinPath, joinRemotePath, normalizeRemotePath } from "@/functions/common";
+import {
+  detectEditorFileMeta,
+  formatBytes,
+  type EditorViewMode,
+  toDataUrl,
+} from "@/functions/editor-file-utils";
 import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
@@ -73,6 +79,12 @@ interface EditorBlock extends BaseBlock {
   sourceId: string;
   path: string;
   content: string;
+  view: EditorViewMode;
+  language: string;
+  mimeType: string | null;
+  mediaBase64: string | null;
+  previewError: string | null;
+  sizeBytes: number | null;
   dirty: boolean;
   saving: boolean;
 }
@@ -94,6 +106,7 @@ interface DragPayload {
 }
 
 const workspaceCache = new Map<string, { blocks: WorkspaceBlock[]; workspaceMode: WorkspaceMode }>();
+const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 
 function createId(prefix: string): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
@@ -221,6 +234,13 @@ async function writeSourceFile(sourceId: string, path: string, content: string):
     return;
   }
   await api.sftpWrite(sourceId, path, content);
+}
+
+async function readSourceBinaryPreview(sourceId: string, path: string) {
+  if (sourceId === "local") {
+    return api.localReadBinaryPreview(path, PREVIEW_LIMIT_BYTES);
+  }
+  return api.sftpReadBinaryPreview(sourceId, path, PREVIEW_LIMIT_BYTES);
 }
 
 export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWorkspaceTabPageProps) {
@@ -406,7 +426,10 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
   const saveEditorBlock = useCallback(
     async (blockId: string) => {
       const target = blocksRef.current.find((block): block is EditorBlock => block.id === blockId && block.kind === "editor");
-      if (!target || !target.dirty || target.saving) {
+      if (!target || target.view !== "text" || !target.dirty || target.saving) {
+        if (target && target.view !== "text") {
+          toast.warning("Somente arquivos texto podem ser salvos no editor interno.");
+        }
         return;
       }
 
@@ -442,6 +465,26 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
     [settings.modified_files_upload_policy],
   );
 
+  const openEditorBlockExternal = useCallback(
+    async (blockId: string) => {
+      const target = blocksRef.current.find((block): block is EditorBlock => block.id === blockId && block.kind === "editor");
+      if (!target) {
+        return;
+      }
+      if (target.view !== "text") {
+        toast.warning("Preview de midia/binario nao exporta para editor externo por texto.");
+        return;
+      }
+
+      try {
+        await api.openExternalEditor(baseName(target.path), target.content, settings.external_editor_command || null);
+      } catch (error) {
+        toast.error(getError(error));
+      }
+    },
+    [settings.external_editor_command],
+  );
+
   useEffect(() => {
     if (settings.modified_files_upload_policy !== "auto") {
       return;
@@ -461,10 +504,29 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
   const openFile = useCallback(
     async (sourceId: string, path: string) => {
       try {
-        const content = await readSourceFile(sourceId, path);
-        if (settings.preferred_editor !== "internal") {
+        const meta = detectEditorFileMeta(path);
+        if (meta.view === "text" && settings.preferred_editor !== "internal") {
+          const content = await readSourceFile(sourceId, path);
           await api.openExternalEditor(baseName(path), content, settings.external_editor_command || null);
           return;
+        }
+
+        let content = "";
+        let mediaBase64: string | null = null;
+        let previewError: string | null = null;
+        let sizeBytes: number | null = null;
+
+        if (meta.view === "text") {
+          content = await readSourceFile(sourceId, path);
+        } else if (meta.view === "image" || meta.view === "video") {
+          const preview = await readSourceBinaryPreview(sourceId, path);
+          if (preview.status === "ready") {
+            mediaBase64 = preview.base64;
+            sizeBytes = preview.size;
+          } else {
+            sizeBytes = preview.size;
+            previewError = `Arquivo muito grande para preview (${formatBytes(preview.size)} > ${formatBytes(preview.limit)}).`;
+          }
         }
 
         const editorBlock: EditorBlock = {
@@ -474,6 +536,12 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
           sourceId,
           path,
           content,
+          view: meta.view,
+          language: meta.language,
+          mimeType: meta.mimeType,
+          mediaBase64,
+          previewError,
+          sizeBytes,
           dirty: false,
           saving: false,
           layout: workspaceDefaultLayout("editor", blocksRef.current.length + 1, workspaceSize.width, workspaceSize.height),
@@ -485,7 +553,7 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
         toast.error(getError(error));
       }
     },
-    [settings.preferred_editor, workspaceSize.height, workspaceSize.width],
+    [settings.external_editor_command, settings.preferred_editor, workspaceSize.height, workspaceSize.width],
   );
 
   const transferBetweenBlocks = useCallback(
@@ -797,11 +865,14 @@ export function SftpWorkspaceTabPage({ tabId, mode, defaultSessionId }: SftpWork
                 onChange={(value) =>
                   setBlocks((current) =>
                     current.map((item) =>
-                      item.id === block.id && item.kind === "editor" ? { ...item, content: value, dirty: true } : item,
+                      item.id === block.id && item.kind === "editor" && item.view === "text"
+                        ? { ...item, content: value, dirty: true }
+                        : item,
                     ),
                   )
                 }
                 onSave={() => void saveEditorBlock(block.id)}
+                onOpenExternal={() => void openEditorBlockExternal(block.id)}
               />
             ) : null}
           </WorkspaceBlockController>
@@ -1288,9 +1359,13 @@ interface EditorBlockViewProps {
   block: EditorBlock;
   onChange: (value: string) => void;
   onSave: () => void;
+  onOpenExternal: () => void;
 }
 
-function EditorBlockView({ block, onChange, onSave }: EditorBlockViewProps) {
+function EditorBlockView({ block, onChange, onSave, onOpenExternal }: EditorBlockViewProps) {
+  const canSave = block.view === "text";
+  const previewUrl = block.mimeType && block.mediaBase64 ? toDataUrl(block.mimeType, block.mediaBase64) : null;
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-9 items-center justify-between border-b border-white/10 px-2">
@@ -1299,30 +1374,71 @@ function EditorBlockView({ block, onChange, onSave }: EditorBlockViewProps) {
           <span className="truncate">{block.path}</span>
           {block.dirty ? <span className="text-purple-300">*</span> : null}
         </div>
-        <button
-          type="button"
-          className="inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-[11px] text-zinc-100 hover:border-purple-400/60 hover:bg-zinc-900"
-          onClick={onSave}
-          disabled={block.saving}
-        >
-          {block.saving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />}
-          Salvar
-        </button>
+        <div className="inline-flex items-center gap-2">
+          <button
+            type="button"
+            className="inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-[11px] text-zinc-100 hover:border-purple-400/60 hover:bg-zinc-900"
+            onClick={onSave}
+            disabled={!canSave || block.saving}
+          >
+            {block.saving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />}
+            Salvar
+          </button>
+          <button
+            type="button"
+            className="inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-[11px] text-zinc-100 hover:border-purple-400/60 hover:bg-zinc-900"
+            onClick={onOpenExternal}
+          >
+            Externo
+          </button>
+        </div>
       </div>
       <div className="min-h-0 flex-1">
-        <Editor
-          height="100%"
-          theme="vs-dark"
-          language="plaintext"
-          value={block.content}
-          onChange={(value) => onChange(value ?? "")}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 13,
-            smoothScrolling: true,
-            automaticLayout: true,
-          }}
-        />
+        {block.view === "text" ? (
+          <Editor
+            height="100%"
+            theme="vs-dark"
+            language={block.language || "plaintext"}
+            value={block.content}
+            onChange={(value) => onChange(value ?? "")}
+            options={{
+              minimap: { enabled: false },
+              fontSize: 13,
+              smoothScrolling: true,
+              automaticLayout: true,
+            }}
+          />
+        ) : null}
+        {block.view === "image" ? (
+          <div className="flex h-full items-center justify-center bg-zinc-950 p-3">
+            {previewUrl && !block.previewError ? (
+              <img src={previewUrl} alt={block.path} className="max-h-full max-w-full object-contain" />
+            ) : (
+              <p className="text-sm text-zinc-400">
+                {block.previewError ?? "Nao foi possivel carregar o preview da imagem."}
+              </p>
+            )}
+          </div>
+        ) : null}
+        {block.view === "video" ? (
+          <div className="flex h-full items-center justify-center bg-zinc-950 p-3">
+            {previewUrl && !block.previewError ? (
+              <video controls className="max-h-full max-w-full" src={previewUrl} />
+            ) : (
+              <p className="text-sm text-zinc-400">
+                {block.previewError ?? "Nao foi possivel carregar o preview do video."}
+              </p>
+            )}
+          </div>
+        ) : null}
+        {block.view === "binary" ? (
+          <div className="flex h-full items-center justify-center bg-zinc-950 p-3">
+            <p className="text-center text-sm text-zinc-400">
+              Arquivo binario sem preview interno.
+              {block.sizeBytes ? ` Tamanho: ${formatBytes(block.sizeBytes)}.` : ""}
+            </p>
+          </div>
+        ) : null}
       </div>
     </div>
   );

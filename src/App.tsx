@@ -137,10 +137,29 @@ function App() {
 
   if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
     return (
-      <>
+      <main className="flex h-full w-full flex-col bg-zinc-950 text-zinc-100">
         <Toaster richColors position="bottom-right" />
+        <AppHeader
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSelectTab={setActiveTab}
+          onCloseTab={(id) => void closeTab(id)}
+          onCreateWorkspaceTab={() =>
+            openTab({
+              id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+              type: "sftp_workspace",
+              title: "Workspace",
+              closable: true,
+            })
+          }
+          syncRunning={false}
+          onMinimize={() => void api.windowMinimize()}
+          onToggleMaximize={() => void api.windowToggleMaximize()}
+          onCloseWindow={() => void api.windowClose()}
+          compact
+        />
         <VaultGatePage />
-      </>
+      </main>
     );
   }
 
@@ -191,6 +210,12 @@ function App() {
                 <EditorTabPage
                   path={editorTabs[tab.id]?.path ?? ""}
                   content={editorTabs[tab.id]?.content ?? ""}
+                  view={editorTabs[tab.id]?.view ?? "text"}
+                  language={editorTabs[tab.id]?.language ?? "plaintext"}
+                  mimeType={editorTabs[tab.id]?.mimeType ?? null}
+                  mediaBase64={editorTabs[tab.id]?.mediaBase64 ?? null}
+                  previewError={editorTabs[tab.id]?.previewError ?? null}
+                  sizeBytes={editorTabs[tab.id]?.sizeBytes ?? null}
                   onContentChange={(value) => setEditorContent(tab.id, value)}
                   onSave={() => void saveEditor(tab.id)}
                   onOpenExternal={() => void openEditorExternal(tab.id)}

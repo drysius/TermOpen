@@ -48,6 +48,7 @@ export interface AppSettings {
   sync_on_startup: boolean;
   sync_on_settings_change: boolean;
   sync_interval_minutes: number;
+  sftp_chunk_size_kb: number;
   inactivity_lock_minutes: number;
   auto_reconnect_enabled: boolean;
   reconnect_delay_seconds: number;
@@ -70,6 +71,18 @@ export interface SftpEntry {
   permissions?: number | null;
   modified_at?: number | null;
 }
+
+export type BinaryPreviewResult =
+  | {
+      status: "ready";
+      base64: string;
+      size: number;
+    }
+  | {
+      status: "too_large";
+      size: number;
+      limit: number;
+    };
 
 export interface SyncState {
   connected: boolean;

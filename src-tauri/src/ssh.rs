@@ -210,12 +210,30 @@ impl SshManager {
         Ok(mapped)
     }
 
-    pub fn sftp_read(&mut self, session_id: &str, path: &str) -> Result<String> {
-        let bytes = self.sftp_read_bytes(session_id, path)?;
+    pub fn sftp_read(&mut self, session_id: &str, path: &str, chunk_size: usize) -> Result<String> {
+        let bytes = self.sftp_read_bytes(session_id, path, chunk_size)?;
         Ok(String::from_utf8_lossy(&bytes).to_string())
     }
 
-    pub fn sftp_read_bytes(&mut self, session_id: &str, path: &str) -> Result<Vec<u8>> {
+    pub fn sftp_read_bytes(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        chunk_size: usize,
+    ) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.sftp_download_to_writer(session_id, path, &mut bytes, chunk_size, |_| {})?;
+
+        Ok(bytes)
+    }
+
+    pub fn sftp_read_bytes_with_limit(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        chunk_size: usize,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
         let managed = self
             .sessions
             .get_mut(session_id)
@@ -232,17 +250,126 @@ impl SshManager {
             .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target.display()))?;
 
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .with_context(|| format!("Falha ao ler arquivo remoto: {}", target.display()))?;
+        let mut total = 0u64;
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+        loop {
+            let size = file
+                .read(&mut buffer)
+                .with_context(|| format!("Falha ao ler arquivo remoto: {}", target.display()))?;
+            if size == 0 {
+                break;
+            }
 
-        Ok(bytes)
+            total = total.saturating_add(size as u64);
+            if total > max_bytes {
+                return Ok(None);
+            }
+            bytes.extend_from_slice(&buffer[..size]);
+        }
+
+        Ok(Some(bytes))
     }
 
-    pub fn sftp_write(&mut self, session_id: &str, path: &str, content: &str) -> Result<()> {
-        self.sftp_write_bytes(session_id, path, content.as_bytes())
+    pub fn sftp_write(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+        chunk_size: usize,
+    ) -> Result<()> {
+        self.sftp_write_bytes(session_id, path, content.as_bytes(), chunk_size)
     }
 
-    pub fn sftp_write_bytes(&mut self, session_id: &str, path: &str, content: &[u8]) -> Result<()> {
+    pub fn sftp_write_bytes(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        content: &[u8],
+        chunk_size: usize,
+    ) -> Result<()> {
+        let mut cursor = std::io::Cursor::new(content);
+        self.sftp_upload_from_reader(session_id, path, &mut cursor, chunk_size, |_| {})?;
+        Ok(())
+    }
+
+    pub fn sftp_file_size(&mut self, session_id: &str, path: &str) -> Result<Option<u64>> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let target = normalize_remote_path(path);
+
+        match sftp.stat(&target) {
+            Ok(stat) => Ok(stat.size),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn sftp_download_to_writer<W, F>(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        writer: &mut W,
+        chunk_size: usize,
+        mut on_chunk: F,
+    ) -> Result<u64>
+    where
+        W: Write,
+        F: FnMut(u64),
+    {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let target = normalize_remote_path(path);
+
+        let mut file = sftp
+            .open(&target)
+            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target.display()))?;
+
+        let mut transferred = 0u64;
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+
+        loop {
+            let size = file
+                .read(&mut buffer)
+                .with_context(|| format!("Falha ao ler arquivo remoto: {}", target.display()))?;
+            if size == 0 {
+                break;
+            }
+
+            writer.write_all(&buffer[..size]).with_context(|| {
+                format!("Falha ao escrever chunk recebido de {}", target.display())
+            })?;
+            transferred = transferred.saturating_add(size as u64);
+            on_chunk(size as u64);
+        }
+
+        Ok(transferred)
+    }
+
+    pub fn sftp_upload_from_reader<R, F>(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        reader: &mut R,
+        chunk_size: usize,
+        mut on_chunk: F,
+    ) -> Result<u64>
+    where
+        R: Read,
+        F: FnMut(u64),
+    {
         let managed = self
             .sessions
             .get_mut(session_id)
@@ -258,10 +385,25 @@ impl SshManager {
             .create(&target)
             .with_context(|| format!("Falha ao criar arquivo remoto: {}", target.display()))?;
 
-        file.write_all(content)
-            .with_context(|| format!("Falha ao escrever arquivo remoto: {}", target.display()))?;
+        let mut transferred = 0u64;
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+        loop {
+            let size = reader.read(&mut buffer).with_context(|| {
+                format!("Falha ao ler origem para upload: {}", target.display())
+            })?;
+            if size == 0 {
+                break;
+            }
 
-        Ok(())
+            file.write_all(&buffer[..size]).with_context(|| {
+                format!("Falha ao escrever arquivo remoto: {}", target.display())
+            })?;
+
+            transferred = transferred.saturating_add(size as u64);
+            on_chunk(size as u64);
+        }
+
+        Ok(transferred)
     }
 }
 
@@ -647,4 +789,8 @@ fn normalize_remote_path(path: &str) -> PathBuf {
     } else {
         Path::new(&trimmed).to_path_buf()
     }
+}
+
+fn normalize_chunk_size(chunk_size: usize) -> usize {
+    chunk_size.max(64 * 1024).min(8 * 1024 * 1024)
 }

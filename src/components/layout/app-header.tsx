@@ -14,6 +14,7 @@ interface AppHeaderProps {
   onMinimize: () => void;
   onToggleMaximize: () => void;
   onCloseWindow: () => void;
+  compact?: boolean;
 }
 
 export function AppHeader({
@@ -26,23 +27,30 @@ export function AppHeader({
   onMinimize,
   onToggleMaximize,
   onCloseWindow,
+  compact = false,
 }: AppHeaderProps) {
   return (
     <header data-tauri-drag-region className="flex h-10 items-center border-b border-white/10 bg-zinc-950">
       <div className="px-3 text-sm font-semibold text-zinc-100">TermOpen</div>
-      <div className="min-w-0 flex-1" data-tauri-drag-region="false">
-        <WorkTabs
-          tabs={tabs}
-          activeId={activeTabId}
-          onSelect={onSelectTab}
-          onClose={onCloseTab}
-          onCreateWorkspace={onCreateWorkspaceTab}
-        />
-      </div>
-      <div className="flex items-center" data-tauri-drag-region="false">
-        <div className="mr-1 flex h-8 w-8 items-center justify-center text-zinc-400">
-          <Cloud className={syncRunning ? "h-4 w-4 animate-pulse text-purple-300" : "h-4 w-4"} />
+      {compact ? (
+        <div className="min-w-0 flex-1" />
+      ) : (
+        <div className="min-w-0 flex-1" data-tauri-drag-region="false">
+          <WorkTabs
+            tabs={tabs}
+            activeId={activeTabId}
+            onSelect={onSelectTab}
+            onClose={onCloseTab}
+            onCreateWorkspace={onCreateWorkspaceTab}
+          />
         </div>
+      )}
+      <div className="flex items-center" data-tauri-drag-region="false">
+        {!compact ? (
+          <div className="mr-1 flex h-8 w-8 items-center justify-center text-zinc-400">
+            <Cloud className={syncRunning ? "h-4 w-4 animate-pulse text-purple-300" : "h-4 w-4"} />
+          </div>
+        ) : null}
         <Button variant="ghost" size="icon" className="h-8 w-8 rounded-none" onClick={onMinimize}>
           <Minus className="h-4 w-4" />
         </Button>

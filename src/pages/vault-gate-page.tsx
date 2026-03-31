@@ -40,7 +40,7 @@ export function VaultGatePage() {
   }
 
   return (
-    <div className="flex h-full items-center justify-center bg-zinc-950">
+    <div className="flex min-h-0 flex-1 items-center justify-center bg-zinc-950">
       <Card className="w-full max-w-md border-white/10 bg-zinc-950/90">
         <CardHeader>
           <CardTitle>{isInit ? "Configurar Home" : "Desbloquear Home"}</CardTitle>

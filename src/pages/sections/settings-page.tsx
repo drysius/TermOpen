@@ -134,6 +134,7 @@ export function SettingsPage() {
             external_editor_command: values.external_editor_command?.trim() ?? "",
             known_hosts_path: values.known_hosts_path?.trim() ?? "",
             sync_interval_minutes: values.sync_interval_minutes || 5,
+            sftp_chunk_size_kb: values.sftp_chunk_size_kb || 1024,
             inactivity_lock_minutes: values.inactivity_lock_minutes || 10,
             reconnect_delay_seconds: values.reconnect_delay_seconds || 5,
           }),
@@ -206,6 +207,18 @@ export function SettingsPage() {
             title="Intervalo de sync"
             description="Frequencia em minutos da sincronizacao automatica."
             control={<Input type="number" min={1} {...settingsForm.register("sync_interval_minutes", { valueAsNumber: true })} />}
+          />
+          <SettingsRow
+            title="Chunk SFTP (KB)"
+            description="Tamanho do bloco usado em leituras/escritas e transferencias SFTP."
+            control={
+              <Input
+                type="number"
+                min={64}
+                max={8192}
+                {...settingsForm.register("sftp_chunk_size_kb", { valueAsNumber: true })}
+              />
+            }
           />
           <SettingsRow
             title="Auto reconnect SSH"

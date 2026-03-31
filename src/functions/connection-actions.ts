@@ -71,7 +71,7 @@ export function createConnectionActions(
     setEditorContent: (tabId, value) =>
       set((state) => {
         const editor = state.editorTabs[tabId];
-        if (!editor) {
+        if (!editor || editor.view !== "text") {
           return {};
         }
         return {

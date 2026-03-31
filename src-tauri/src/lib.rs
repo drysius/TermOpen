@@ -1,17 +1,20 @@
 use std::{
     fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
     time::UNIX_EPOCH,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use models::{
-    AppSettings, AuthServer, ConnectionProfile, KeychainEntry, KnownHostEntry, SftpEntry,
-    SshConnectResult, SshSessionInfo, SyncState, VaultStatus,
+    AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, KeychainEntry, KnownHostEntry,
+    SftpEntry, SshConnectResult, SshSessionInfo, SyncState, VaultStatus,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, SyncManager};
 use tauri::{Emitter, Manager, State};
+use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use vault::VaultManager;
 
@@ -27,8 +30,49 @@ struct AppState {
     sync: Mutex<SyncManager>,
 }
 
+const DEFAULT_SFTP_CHUNK_SIZE_KB: u32 = 1024;
+const MIN_SFTP_CHUNK_SIZE_KB: u32 = 64;
+const MAX_SFTP_CHUNK_SIZE_KB: u32 = 8192;
+const DEFAULT_BINARY_PREVIEW_LIMIT_BYTES: u64 = 25 * 1024 * 1024;
+
 fn app_error(error: impl ToString) -> String {
     error.to_string()
+}
+
+fn chunk_size_from_kb(kb: u32) -> usize {
+    let effective = if kb == 0 {
+        DEFAULT_SFTP_CHUNK_SIZE_KB
+    } else {
+        kb
+    };
+    let clamped = effective.clamp(MIN_SFTP_CHUNK_SIZE_KB, MAX_SFTP_CHUNK_SIZE_KB);
+    (clamped as usize).saturating_mul(1024)
+}
+
+async fn resolve_sftp_chunk_size_bytes(state: &State<'_, AppState>) -> Result<usize, String> {
+    let settings = {
+        let vault = state.vault.lock().await;
+        vault.settings_get().map_err(app_error)?
+    };
+    Ok(chunk_size_from_kb(settings.sftp_chunk_size_kb))
+}
+
+fn resolve_preview_limit(max_bytes: Option<u64>) -> u64 {
+    max_bytes
+        .unwrap_or(DEFAULT_BINARY_PREVIEW_LIMIT_BYTES)
+        .min(DEFAULT_BINARY_PREVIEW_LIMIT_BYTES)
+}
+
+fn emit_transfer_progress(
+    app: &tauri::AppHandle,
+    progress_event: &str,
+    transferred: u64,
+    total: Option<u64>,
+) {
+    if let Some(total_bytes) = total.filter(|value| *value > 0) {
+        let percent = ((transferred.saturating_mul(100)) / total_bytes).min(100) as u8;
+        let _ = app.emit(progress_event, percent);
+    }
 }
 
 #[tauri::command]
@@ -362,8 +406,10 @@ async fn sftp_read(
     session_id: String,
     path: String,
 ) -> Result<String, String> {
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_read(&session_id, &path).map_err(app_error)
+    ssh.sftp_read(&session_id, &path, chunk_size)
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -373,8 +419,9 @@ async fn sftp_write(
     path: String,
     content: String,
 ) -> Result<(), String> {
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_write(&session_id, &path, &content)
+    ssh.sftp_write(&session_id, &path, &content, chunk_size)
         .map_err(app_error)
 }
 
@@ -390,36 +437,127 @@ async fn sftp_transfer(
 ) -> Result<(), String> {
     let progress_event = format!("transfer:progress:{}", transfer_id);
     let _ = app.emit(&progress_event, 0u8);
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
 
-    let content = if let Some(session_id) = from_session_id {
+    let source_size = if let Some(session_id) = from_session_id.as_ref() {
         let mut ssh = state.ssh.lock().await;
-        ssh.sftp_read_bytes(&session_id, &from_path)
+        ssh.sftp_file_size(session_id, &from_path)
             .map_err(app_error)?
     } else {
         let source = resolve_local_path(Some(&from_path))?;
-        fs::read(&source).map_err(|error| {
-            format!("Falha ao ler arquivo local {}: {}", source.display(), error)
-        })?
-    };
-
-    let _ = app.emit(&progress_event, 60u8);
-
-    if let Some(session_id) = to_session_id {
-        let mut ssh = state.ssh.lock().await;
-        ssh.sftp_write_bytes(&session_id, &to_path, &content)
-            .map_err(app_error)?;
-    } else {
-        let target = resolve_local_path(Some(&to_path))?;
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(app_error)?;
-        }
-        fs::write(&target, &content).map_err(|error| {
+        let metadata = fs::metadata(&source).map_err(|error| {
             format!(
-                "Falha ao escrever arquivo local {}: {}",
-                target.display(),
+                "Falha ao obter metadata de arquivo local {}: {}",
+                source.display(),
                 error
             )
         })?;
+        Some(metadata.len())
+    };
+
+    let progress_total = if from_session_id.is_some() && to_session_id.is_some() {
+        source_size.map(|size| size.saturating_mul(2))
+    } else {
+        source_size
+    };
+    let mut transferred = 0u64;
+
+    match (from_session_id.as_ref(), to_session_id.as_ref()) {
+        (Some(from_session), Some(to_session)) => {
+            let mut temp_file = NamedTempFile::new().map_err(app_error)?;
+            {
+                let mut ssh = state.ssh.lock().await;
+                ssh.sftp_download_to_writer(
+                    from_session,
+                    &from_path,
+                    temp_file.as_file_mut(),
+                    chunk_size,
+                    |bytes| {
+                        transferred = transferred.saturating_add(bytes);
+                        emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+                    },
+                )
+                .map_err(app_error)?;
+            }
+
+            let mut reader = temp_file.reopen().map_err(app_error)?;
+            let mut ssh = state.ssh.lock().await;
+            ssh.sftp_upload_from_reader(to_session, &to_path, &mut reader, chunk_size, |bytes| {
+                transferred = transferred.saturating_add(bytes);
+                emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+            })
+            .map_err(app_error)?;
+        }
+        (Some(from_session), None) => {
+            let target = resolve_local_path(Some(&to_path))?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(app_error)?;
+            }
+            let mut file = fs::File::create(&target).map_err(|error| {
+                format!(
+                    "Falha ao criar arquivo local {}: {}",
+                    target.display(),
+                    error
+                )
+            })?;
+
+            let mut ssh = state.ssh.lock().await;
+            ssh.sftp_download_to_writer(from_session, &from_path, &mut file, chunk_size, |bytes| {
+                transferred = transferred.saturating_add(bytes);
+                emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+            })
+            .map_err(app_error)?;
+        }
+        (None, Some(to_session)) => {
+            let source = resolve_local_path(Some(&from_path))?;
+            let mut file = fs::File::open(&source).map_err(|error| {
+                format!(
+                    "Falha ao abrir arquivo local {}: {}",
+                    source.display(),
+                    error
+                )
+            })?;
+
+            let mut ssh = state.ssh.lock().await;
+            ssh.sftp_upload_from_reader(to_session, &to_path, &mut file, chunk_size, |bytes| {
+                transferred = transferred.saturating_add(bytes);
+                emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+            })
+            .map_err(app_error)?;
+        }
+        (None, None) => {
+            let source = resolve_local_path(Some(&from_path))?;
+            let target = resolve_local_path(Some(&to_path))?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(app_error)?;
+            }
+
+            let mut reader = fs::File::open(&source).map_err(|error| {
+                format!(
+                    "Falha ao abrir arquivo local {}: {}",
+                    source.display(),
+                    error
+                )
+            })?;
+            let mut writer = fs::File::create(&target).map_err(|error| {
+                format!(
+                    "Falha ao criar arquivo local {}: {}",
+                    target.display(),
+                    error
+                )
+            })?;
+
+            let mut buffer = vec![0u8; chunk_size];
+            loop {
+                let size = reader.read(&mut buffer).map_err(app_error)?;
+                if size == 0 {
+                    break;
+                }
+                writer.write_all(&buffer[..size]).map_err(app_error)?;
+                transferred = transferred.saturating_add(size as u64);
+                emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+            }
+        }
     }
 
     let _ = app.emit(&progress_event, 100u8);
@@ -484,6 +622,69 @@ async fn local_write(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn sftp_read_binary_preview(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<BinaryPreviewResult, String> {
+    let limit = resolve_preview_limit(max_bytes);
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
+
+    let mut ssh = state.ssh.lock().await;
+    let remote_size = ssh.sftp_file_size(&session_id, &path).map_err(app_error)?;
+    if let Some(size) = remote_size.filter(|size| *size > limit) {
+        return Ok(BinaryPreviewResult::TooLarge { size, limit });
+    }
+
+    let content = ssh
+        .sftp_read_bytes_with_limit(&session_id, &path, chunk_size, limit)
+        .map_err(app_error)?;
+
+    match content {
+        Some(bytes) => {
+            let size = bytes.len() as u64;
+            Ok(BinaryPreviewResult::Ready {
+                base64: BASE64.encode(bytes),
+                size,
+            })
+        }
+        None => Ok(BinaryPreviewResult::TooLarge {
+            size: remote_size.unwrap_or(limit.saturating_add(1)),
+            limit,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn local_read_binary_preview(
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<BinaryPreviewResult, String> {
+    let limit = resolve_preview_limit(max_bytes);
+    let target = resolve_local_path(Some(&path))?;
+    let metadata = fs::metadata(&target).map_err(|error| {
+        format!(
+            "Falha ao obter metadata de arquivo local {}: {}",
+            target.display(),
+            error
+        )
+    })?;
+    let size = metadata.len();
+    if size > limit {
+        return Ok(BinaryPreviewResult::TooLarge { size, limit });
+    }
+
+    let bytes = fs::read(&target)
+        .map_err(|error| format!("Falha ao ler arquivo local {}: {}", target.display(), error))?;
+
+    Ok(BinaryPreviewResult::Ready {
+        base64: BASE64.encode(bytes),
+        size,
+    })
+}
+
+#[tauri::command]
 async fn auth_servers_list(state: State<'_, AppState>) -> Result<Vec<AuthServer>, String> {
     let vault = state.vault.lock().await;
     vault.auth_servers_list().map_err(app_error)
@@ -521,9 +722,7 @@ async fn auth_servers_fetch_remote(state: State<'_, AppState>) -> Result<Vec<Aut
 
     // Tentar buscar do GitHub
     let remote: Vec<AuthServer> = match client.get(AUTH_SERVERS_RAW_URL).send().await {
-        Ok(response) if response.status().is_success() => {
-            response.json().await.unwrap_or_default()
-        }
+        Ok(response) if response.status().is_success() => response.json().await.unwrap_or_default(),
         _ => vec![],
     };
 
@@ -797,9 +996,11 @@ pub fn run() {
             sftp_read,
             sftp_write,
             sftp_transfer,
+            sftp_read_binary_preview,
             local_list,
             local_read,
             local_write,
+            local_read_binary_preview,
             auth_servers_list,
             auth_server_save,
             auth_server_delete,

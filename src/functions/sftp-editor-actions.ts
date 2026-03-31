@@ -1,10 +1,13 @@
 import { toast } from "sonner";
 
 import { baseName, getError, joinPath, slug } from "@/functions/common";
+import { detectEditorFileMeta, formatBytes } from "@/functions/editor-file-utils";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { api } from "@/lib/tauri";
 import type { AppActions, PaneSide } from "@/store/app-store.types";
 import type { ConnectionProfile, SftpEntry } from "@/types/termopen";
+
+const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 
 async function listEntries(sourceId: string, path: string): Promise<SftpEntry[]> {
   if (sourceId === "local") {
@@ -26,6 +29,13 @@ async function writeFile(sourceId: string, path: string, content: string): Promi
     return;
   }
   await api.sftpWrite(sourceId, path, content);
+}
+
+async function readBinaryPreview(sourceId: string, path: string) {
+  if (sourceId === "local") {
+    return api.localReadBinaryPreview(path, PREVIEW_LIMIT_BYTES);
+  }
+  return api.sftpReadBinaryPreview(sourceId, path, PREVIEW_LIMIT_BYTES);
 }
 
 export function createSftpEditorActions(
@@ -112,24 +122,52 @@ export function createSftpEditorActions(
 
     openFileFromSource: async (sourceId, path) => {
       try {
-        const content = await readFile(sourceId, path);
-        if (get().settings.preferred_editor === "internal") {
-          const tabId = `editor:${sourceId}:${slug(path)}`;
-          set((state) => ({
-            editorTabs: {
-              ...state.editorTabs,
-              [tabId]: {
-                sourceId,
-                path,
-                content,
-                dirty: false,
-              },
-            },
-          }));
-          get().openTab({ id: tabId, type: "editor", title: `Editor - ${baseName(path)}`, closable: true });
+        const meta = detectEditorFileMeta(path);
+        const preferredEditor = get().settings.preferred_editor;
+
+        if (meta.view === "text" && preferredEditor !== "internal") {
+          const content = await readFile(sourceId, path);
+          await api.openExternalEditor(baseName(path), content, get().settings.external_editor_command || null);
           return;
         }
-        await api.openExternalEditor(baseName(path), content, get().settings.external_editor_command || null);
+
+        let content = "";
+        let mediaBase64: string | null = null;
+        let previewError: string | null = null;
+        let sizeBytes: number | null = null;
+
+        if (meta.view === "text") {
+          content = await readFile(sourceId, path);
+        } else if (meta.view === "image" || meta.view === "video") {
+          const preview = await readBinaryPreview(sourceId, path);
+          if (preview.status === "ready") {
+            mediaBase64 = preview.base64;
+            sizeBytes = preview.size;
+          } else {
+            sizeBytes = preview.size;
+            previewError = `Arquivo muito grande para preview (${formatBytes(preview.size)} > ${formatBytes(preview.limit)}).`;
+          }
+        }
+
+        const tabId = `editor:${sourceId}:${slug(path)}`;
+        set((state) => ({
+          editorTabs: {
+            ...state.editorTabs,
+            [tabId]: {
+              sourceId,
+              path,
+              content,
+              view: meta.view,
+              language: meta.language,
+              mimeType: meta.mimeType,
+              mediaBase64,
+              previewError,
+              sizeBytes,
+              dirty: false,
+            },
+          },
+        }));
+        get().openTab({ id: tabId, type: "editor", title: `Editor - ${baseName(path)}`, closable: true });
       } catch (error) {
         toast.error(getError(error));
       }
@@ -162,6 +200,10 @@ export function createSftpEditorActions(
       if (!editor) {
         return;
       }
+      if (editor.view !== "text") {
+        toast.warning("Somente arquivos texto podem ser salvos no editor interno.");
+        return;
+      }
       try {
         await writeFile(editor.sourceId, editor.path, editor.content);
         set((state) => ({
@@ -179,6 +221,10 @@ export function createSftpEditorActions(
     openEditorExternal: async (tabId) => {
       const editor = get().editorTabs[tabId];
       if (!editor) {
+        return;
+      }
+      if (editor.view !== "text") {
+        toast.warning("Preview de midia/binario nao exporta para editor externo por texto.");
         return;
       }
       try {

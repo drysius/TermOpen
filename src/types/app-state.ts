@@ -10,5 +10,11 @@ export interface EditorBuffer {
   sourceId: string;
   path: string;
   content: string;
+  view: import("@/functions/editor-file-utils").EditorViewMode;
+  language: string;
+  mimeType: string | null;
+  mediaBase64: string | null;
+  previewError: string | null;
+  sizeBytes: number | null;
   dirty: boolean;
 }

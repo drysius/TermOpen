@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   AuthServer,
+  BinaryPreviewResult,
   ConnectionProfile,
   KnownHostEntry,
   KeychainEntry,
@@ -79,6 +80,8 @@ export const api = {
   sftpRead: (sessionId: string, path: string) => invoke<string>("sftp_read", { sessionId, path }),
   sftpWrite: (sessionId: string, path: string, content: string) =>
     invoke<void>("sftp_write", { sessionId, path, content }),
+  sftpReadBinaryPreview: (sessionId: string, path: string, maxBytes?: number | null) =>
+    invoke<BinaryPreviewResult>("sftp_read_binary_preview", { sessionId, path, maxBytes }),
   sftpTransfer: (
     transferId: string,
     fromSessionId: string | null,
@@ -95,6 +98,8 @@ export const api = {
     }),
   localList: (path?: string | null) => invoke<SftpEntry[]>("local_list", { path }),
   localRead: (path: string) => invoke<string>("local_read", { path }),
+  localReadBinaryPreview: (path: string, maxBytes?: number | null) =>
+    invoke<BinaryPreviewResult>("local_read_binary_preview", { path, maxBytes }),
   localWrite: (path: string, content: string) => invoke<void>("local_write", { path, content }),
 
   authServersList: () => invoke<AuthServer[]>("auth_servers_list"),

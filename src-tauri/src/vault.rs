@@ -454,6 +454,7 @@ impl VaultManager {
         settings.external_editor_command = settings.external_editor_command.trim().to_string();
         settings.known_hosts_path = settings.known_hosts_path.trim().to_string();
         settings.sync_interval_minutes = settings.sync_interval_minutes.clamp(1, 60);
+        settings.sftp_chunk_size_kb = settings.sftp_chunk_size_kb.clamp(64, 8192);
         settings.inactivity_lock_minutes = settings.inactivity_lock_minutes.clamp(1, 240);
         settings.reconnect_delay_seconds = settings.reconnect_delay_seconds.clamp(1, 120);
 
