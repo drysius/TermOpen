@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AppSettings,
+  AuthServer,
   ConnectionProfile,
   KnownHostEntry,
   KeychainEntry,
@@ -95,6 +96,11 @@ export const api = {
   localList: (path?: string | null) => invoke<SftpEntry[]>("local_list", { path }),
   localRead: (path: string) => invoke<string>("local_read", { path }),
   localWrite: (path: string, content: string) => invoke<void>("local_write", { path, content }),
+
+  authServersList: () => invoke<AuthServer[]>("auth_servers_list"),
+  authServerSave: (server: AuthServer) => invoke<AuthServer>("auth_server_save", { server }),
+  authServerDelete: (id: string) => invoke<void>("auth_server_delete", { id }),
+  authServersFetchRemote: () => invoke<AuthServer[]>("auth_servers_fetch_remote"),
 
   syncGoogleLogin: () => invoke<SyncState>("sync_google_login"),
   syncLoggedUser: () => invoke<[string, string] | null>("sync_logged_user"),

@@ -21,7 +21,6 @@ const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
 const KEYRING_USER_EMAIL: &str = "google-user-email";
 const KEYRING_USER_NAME: &str = "google-user-name";
 const DRIVE_FILE_NAME: &str = "termopen-vault.enc.json";
-const WORKER_BASE_URL: &str = "https://small-band-2a72.marcosbrendonaz.workers.dev";
 const AUTH_DEEPLINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 struct AuthCallbackQueue {
@@ -50,7 +49,7 @@ impl SyncManager {
 
     /// Abre o browser para login via Google OAuth.
     /// Em Windows aguarda callback via deep link; nos demais usa callback local.
-    pub async fn google_login(&mut self, app: &tauri::AppHandle) -> Result<SyncState> {
+    pub async fn google_login(&mut self, app: &tauri::AppHandle, server_address: &str) -> Result<SyncState> {
         let pending = SyncState {
             connected: false,
             status: "running".to_string(),
@@ -64,7 +63,7 @@ impl SyncManager {
         #[cfg(target_os = "windows")]
         {
             clear_auth_callback_queue();
-            let login_url = format!("{}/auth/google", WORKER_BASE_URL);
+            let login_url = format!("{}/auth/google", server_address);
             open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
             let result =
                 tokio::time::timeout(AUTH_DEEPLINK_TIMEOUT, wait_for_auth_callback()).await;
@@ -80,7 +79,7 @@ impl SyncManager {
             let callback_url = format!("http://localhost:{}/callback", local_port);
             let login_url = format!(
                 "{}/auth/google?local_callback={}",
-                WORKER_BASE_URL,
+                server_address,
                 urlencoding::encode(&callback_url)
             );
 
@@ -107,8 +106,11 @@ impl SyncManager {
         &mut self,
         app: &tauri::AppHandle,
         vault: &mut VaultManager,
+        server_address: &str,
+        fallback_addresses: &[String],
     ) -> Result<SyncState> {
-        let access_token = access_token_from_refresh().await?;
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
         let content = vault.encrypted_file_bytes()?;
 
@@ -142,8 +144,11 @@ impl SyncManager {
         &mut self,
         app: &tauri::AppHandle,
         vault: &mut VaultManager,
+        server_address: &str,
+        fallback_addresses: &[String],
     ) -> Result<SyncState> {
-        let access_token = access_token_from_refresh().await?;
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
 
         let Some(remote_file) = lookup_drive_file(&client, &access_token).await? else {
@@ -345,15 +350,12 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
         .context("Falha ao ler request")?;
     let request = String::from_utf8_lossy(&buf[..n]);
 
-    // Extrair a primeira linha: GET /callback?... HTTP/1.1
     let first_line = request.lines().next().unwrap_or("");
     let path = first_line.split_whitespace().nth(1).unwrap_or("");
 
-    // Parse query params
     let query = path.split('?').nth(1).unwrap_or("");
     let params = parse_auth_callback_query(query);
 
-    // Verificar erro
     if let Some(error) = params.get("error") {
         let html = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
@@ -375,7 +377,6 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
     let email = params.get("email").cloned().filter(|v| !v.is_empty());
     let name = params.get("name").cloned().filter(|v| !v.is_empty());
 
-    // Responder com HTML de sucesso
     let display_name = name.as_deref().unwrap_or("usuario");
     let html = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
@@ -422,14 +423,43 @@ fn is_conflict(metadata: &crate::models::SyncMetadata, remote_modified: Option<&
     metadata.last_local_change > last_sync
 }
 
-// ─── Google tokens via worker ───────────────────────────────────────
+// ─── Google tokens via worker (com fallback) ───────────────────────
 
-async fn access_token_from_refresh() -> Result<String> {
+/// Tenta renovar o access_token usando o servidor primário.
+/// Se falhar por erro de rede (servidor fora do ar), tenta os fallbacks.
+/// Nunca altera o servidor selecionado do usuário.
+async fn access_token_from_refresh_with_fallback(
+    primary: &str,
+    fallbacks: &[String],
+) -> Result<String> {
+    match try_refresh_token(primary).await {
+        Ok(token) => return Ok(token),
+        Err(e) => {
+            if e.to_string().contains("401") || e.to_string().contains("Execute login") {
+                return Err(e);
+            }
+            for fallback in fallbacks {
+                if fallback == primary {
+                    continue;
+                }
+                if let Ok(token) = try_refresh_token(fallback).await {
+                    return Ok(token);
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn try_refresh_token(server_address: &str) -> Result<String> {
     let refresh_token = load_refresh_token()?;
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     let response = client
-        .post(format!("{}/auth/refresh-token", WORKER_BASE_URL))
+        .post(format!("{}/auth/refresh-token", server_address))
         .json(&serde_json::json!({ "refresh_token": refresh_token }))
         .send()
         .await

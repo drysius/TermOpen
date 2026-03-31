@@ -36,6 +36,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   reconnect_delay_seconds: 5,
   modified_files_upload_policy: "ask",
   known_hosts_path: "",
+  selected_auth_server_id: null,
 };
 
 export const INITIAL_SYNC_STATE: SyncState = {

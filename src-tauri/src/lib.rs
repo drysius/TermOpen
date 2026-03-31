@@ -6,8 +6,8 @@ use std::{
 };
 
 use models::{
-    AppSettings, ConnectionProfile, KeychainEntry, KnownHostEntry, SftpEntry, SshConnectResult,
-    SshSessionInfo, SyncState, VaultStatus,
+    AppSettings, AuthServer, ConnectionProfile, KeychainEntry, KnownHostEntry, SftpEntry,
+    SshConnectResult, SshSessionInfo, SyncState, VaultStatus,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, SyncManager};
@@ -484,12 +484,81 @@ async fn local_write(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn auth_servers_list(state: State<'_, AppState>) -> Result<Vec<AuthServer>, String> {
+    let vault = state.vault.lock().await;
+    vault.auth_servers_list().map_err(app_error)
+}
+
+const AUTH_SERVERS_RAW_URL: &str =
+    "https://raw.githubusercontent.com/drysius/TermOpen/main/auth-servers.json";
+
+#[tauri::command]
+async fn auth_server_save(
+    state: State<'_, AppState>,
+    server: AuthServer,
+) -> Result<AuthServer, String> {
+    let mut vault = state.vault.lock().await;
+    vault.auth_server_save(server).map_err(app_error)
+}
+
+#[tauri::command]
+async fn auth_server_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut vault = state.vault.lock().await;
+    vault.auth_server_delete(&id).map_err(app_error)
+}
+
+const AUTH_SERVERS_LOCAL_FALLBACK: &str = include_str!("../../auth-servers.json");
+
+#[tauri::command]
+async fn auth_servers_fetch_remote(state: State<'_, AppState>) -> Result<Vec<AuthServer>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Sempre carregar local
+    let local = load_local_servers();
+
+    // Tentar buscar do GitHub
+    let remote: Vec<AuthServer> = match client.get(AUTH_SERVERS_RAW_URL).send().await {
+        Ok(response) if response.status().is_success() => {
+            response.json().await.unwrap_or_default()
+        }
+        _ => vec![],
+    };
+
+    // Merge: remote + local (remote tem prioridade, local complementa)
+    let mut merged = remote;
+    for server in local {
+        if !merged.iter().any(|s| s.id == server.id) {
+            merged.push(server);
+        }
+    }
+
+    let mut vault = state.vault.lock().await;
+    vault.merge_remote_servers(merged).ok();
+
+    Ok(vault.auth_servers_list().unwrap_or_default())
+}
+
+fn load_local_servers() -> Vec<AuthServer> {
+    serde_json::from_str(AUTH_SERVERS_LOCAL_FALLBACK)
+        .unwrap_or_else(|_| vec![models::AuthServer::default_server()])
+}
+
+#[tauri::command]
 async fn sync_google_login(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SyncState, String> {
+    let server_address = {
+        let vault = state.vault.lock().await;
+        vault.selected_auth_server().map_err(app_error)?.address
+    };
     let mut sync = state.sync.lock().await;
-    sync.google_login(&app).await.map_err(app_error)
+    sync.google_login(&app, &server_address)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -498,18 +567,42 @@ async fn sync_logged_user(state: State<'_, AppState>) -> Result<Option<(String, 
     Ok(sync.logged_user())
 }
 
+fn resolve_server_addresses(vault: &vault::VaultManager) -> Result<(String, Vec<String>), String> {
+    let primary = vault.selected_auth_server().map_err(app_error)?.address;
+    let fallbacks: Vec<String> = vault
+        .auth_servers_list()
+        .map_err(app_error)?
+        .into_iter()
+        .filter(|s| s.address != primary)
+        .map(|s| s.address)
+        .collect();
+    Ok((primary, fallbacks))
+}
+
 #[tauri::command]
 async fn sync_push(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncState, String> {
+    let (server_address, fallbacks) = {
+        let vault = state.vault.lock().await;
+        resolve_server_addresses(&vault)?
+    };
     let mut sync = state.sync.lock().await;
     let mut vault = state.vault.lock().await;
-    sync.push(&app, &mut vault).await.map_err(app_error)
+    sync.push(&app, &mut vault, &server_address, &fallbacks)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
 async fn sync_pull(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncState, String> {
+    let (server_address, fallbacks) = {
+        let vault = state.vault.lock().await;
+        resolve_server_addresses(&vault)?
+    };
     let mut sync = state.sync.lock().await;
     let mut vault = state.vault.lock().await;
-    sync.pull(&app, &mut vault).await.map_err(app_error)
+    sync.pull(&app, &mut vault, &server_address, &fallbacks)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -707,6 +800,10 @@ pub fn run() {
             local_list,
             local_read,
             local_write,
+            auth_servers_list,
+            auth_server_save,
+            auth_server_delete,
+            auth_servers_fetch_remote,
             sync_google_login,
             sync_logged_user,
             sync_push,
