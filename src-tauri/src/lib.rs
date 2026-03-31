@@ -485,6 +485,12 @@ async fn sync_google_login(
 }
 
 #[tauri::command]
+async fn sync_logged_user(state: State<'_, AppState>) -> Result<Option<(String, String)>, String> {
+    let sync = state.sync.lock().await;
+    Ok(sync.logged_user())
+}
+
+#[tauri::command]
 async fn sync_push(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncState, String> {
     let mut sync = state.sync.lock().await;
     let mut vault = state.vault.lock().await;
@@ -649,6 +655,7 @@ pub fn run() {
             local_read,
             local_write,
             sync_google_login,
+            sync_logged_user,
             sync_push,
             sync_pull,
             open_external_editor,

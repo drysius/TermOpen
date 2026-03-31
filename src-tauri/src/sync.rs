@@ -1,21 +1,20 @@
-use std::{env, time::Duration};
-
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
-use tokio::time::sleep;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 use crate::{models::SyncState, vault::VaultManager};
 
 const KEYRING_SERVICE: &str = "com.drysius.termopen";
 const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
+const KEYRING_USER_EMAIL: &str = "google-user-email";
+const KEYRING_USER_NAME: &str = "google-user-name";
 const DRIVE_FILE_NAME: &str = "termopen-vault.enc.json";
-const GOOGLE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
-const DEFAULT_GOOGLE_CLIENT_ID: &str =
-    "1084074486119-2nt60qs1kje76n9f9vkp4crqc6u7538n.apps.googleusercontent.com";
+const WORKER_BASE_URL: &str = "https://small-band-2a72.marcosbrendonaz.workers.dev";
 
 #[derive(Default)]
 pub struct SyncManager {
@@ -27,67 +26,89 @@ impl SyncManager {
         Self::default()
     }
 
+    /// Abre o browser para login via Google OAuth.
+    /// Levanta um servidor HTTP temporário em localhost para receber o callback.
     pub async fn google_login(&mut self, app: &tauri::AppHandle) -> Result<SyncState> {
-        let client_id = google_client_id()?;
-        let client = Client::new();
-
-        let device = request_device_code(&client, &client_id).await?;
-
-        let pending_state = SyncState {
+        let pending = SyncState {
             connected: false,
             status: "running".to_string(),
-            message: "Abra o link de verificacao e informe o codigo para completar o login."
-                .to_string(),
+            message: "Abrindo navegador para login com Google...".to_string(),
             last_sync_at: None,
-            pending_user_code: Some(device.user_code.clone()),
-            verification_url: Some(device.verification_url.clone()),
+            pending_user_code: None,
+            verification_url: None,
         };
-        app.emit("sync:status", &pending_state).ok();
+        app.emit("sync:status", &pending).ok();
 
-        let poll_until =
-            Utc::now() + chrono::Duration::seconds(i64::from(device.expires_in.min(600)));
-        let mut interval = u64::try_from(device.interval.max(5)).unwrap_or(5);
+        // Levantar listener em porta aleatória
+        let listener = TcpListener::bind("127.0.0.1:0").await
+            .context("Falha ao abrir porta local para callback")?;
+        let local_port = listener.local_addr()?.port();
+        let callback_url = format!("http://localhost:{}/callback", local_port);
 
-        while Utc::now() < poll_until {
-            sleep(Duration::from_secs(interval)).await;
-            match exchange_device_code(&client, &client_id, &device.device_code).await {
-                Ok(token) => {
-                    if let Some(refresh) = token.refresh_token {
-                        store_refresh_token(&refresh)?;
-                    }
+        // Abrir browser com a URL do worker + redirect local
+        let login_url = format!(
+            "{}/auth/google?local_callback={}",
+            WORKER_BASE_URL,
+            urlencoding::encode(&callback_url)
+        );
+        open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
 
-                    let state = SyncState::ok("Google Drive conectado com sucesso.", None);
-                    app.emit("sync:status", &state).ok();
-                    return Ok(state);
+        // Esperar a resposta do browser (timeout 5 min)
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            wait_for_callback(&listener),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(auth_data)) => {
+                store_refresh_token(&auth_data.refresh_token)?;
+                if let Some(ref email) = auth_data.email {
+                    store_user_field(KEYRING_USER_EMAIL, email).ok();
                 }
-                Err(AuthPollError::Pending) => {
-                    continue;
+                if let Some(ref name) = auth_data.name {
+                    store_user_field(KEYRING_USER_NAME, name).ok();
                 }
-                Err(AuthPollError::SlowDown) => {
-                    interval += 2;
-                    continue;
-                }
-                Err(AuthPollError::Fatal(message)) => {
-                    let state = SyncState::error(format!("Falha no login do Google: {}", message));
-                    app.emit("sync:status", &state).ok();
-                    return Ok(state);
-                }
+
+                let msg = if let Some(ref name) = auth_data.name {
+                    let email = auth_data.email.as_deref().unwrap_or("");
+                    format!("Conectado como {} ({}).", name, email)
+                } else {
+                    "Google Drive conectado com sucesso.".to_string()
+                };
+
+                let state = SyncState::ok(&msg, None);
+                app.emit("sync:status", &state).ok();
+                Ok(state)
+            }
+            Ok(Err(e)) => {
+                let state = SyncState::error(format!("Erro no login: {}", e));
+                app.emit("sync:status", &state).ok();
+                Ok(state)
+            }
+            Err(_) => {
+                let state = SyncState::error("Tempo de login expirado. Tente novamente.");
+                app.emit("sync:status", &state).ok();
+                Ok(state)
             }
         }
-
-        let timeout_state = SyncState {
-            connected: false,
-            status: "running".to_string(),
-            message: "Tempo de login expirado. Execute o login novamente para gerar novo codigo."
-                .to_string(),
-            last_sync_at: None,
-            pending_user_code: Some(device.user_code),
-            verification_url: Some(device.verification_url),
-        };
-        app.emit("sync:status", &timeout_state).ok();
-        Ok(timeout_state)
     }
 
+    /// Retorna dados do usuário logado (se houver).
+    pub fn logged_user(&self) -> Option<(String, String)> {
+        let email = load_user_field(KEYRING_USER_EMAIL).ok();
+        let name = load_user_field(KEYRING_USER_NAME).ok();
+        if email.is_some() || name.is_some() {
+            Some((
+                name.unwrap_or_default(),
+                email.unwrap_or_default(),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Envia o vault criptografado para o Google Drive.
     pub async fn push(
         &mut self,
         app: &tauri::AppHandle,
@@ -122,6 +143,7 @@ impl SyncManager {
         Ok(state)
     }
 
+    /// Baixa o vault do Google Drive.
     pub async fn pull(
         &mut self,
         app: &tauri::AppHandle,
@@ -174,6 +196,85 @@ impl SyncManager {
     }
 }
 
+// ─── Callback listener ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CallbackAuthData {
+    refresh_token: String,
+    email: Option<String>,
+    name: Option<String>,
+}
+
+async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
+    let (mut stream, _) = listener.accept().await.context("Falha ao aceitar conexao")?;
+
+    let mut buf = vec![0u8; 8192];
+    let n = stream.read(&mut buf).await.context("Falha ao ler request")?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Extrair a primeira linha: GET /callback?... HTTP/1.1
+    let first_line = request.lines().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+
+    // Parse query params
+    let query = path.split('?').nth(1).unwrap_or("");
+    let params: std::collections::HashMap<String, String> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next()?;
+            let value = parts.next().unwrap_or("");
+            Some((
+                urlencoding::decode(key).unwrap_or_default().to_string(),
+                urlencoding::decode(value).unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
+
+    // Verificar erro
+    if let Some(error) = params.get("error") {
+        let html = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+            <html><body><h2>Erro no login</h2><p>{}</p>\
+            <script>setTimeout(()=>window.close(),2000)</script></body></html>",
+            error
+        );
+        stream.write_all(html.as_bytes()).await.ok();
+        stream.flush().await.ok();
+        return Err(anyhow!("Login falhou: {}", error));
+    }
+
+    let refresh_token = params
+        .get("refresh_token")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .ok_or_else(|| anyhow!("refresh_token nao recebido no callback"))?;
+
+    let email = params.get("email").cloned().filter(|v| !v.is_empty());
+    let name = params.get("name").cloned().filter(|v| !v.is_empty());
+
+    // Responder com HTML de sucesso
+    let display_name = name.as_deref().unwrap_or("usuario");
+    let html = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
+        <html><body style=\"font-family:system-ui;text-align:center;padding:60px\">\
+        <h2>Conectado como {}</h2>\
+        <p>Pode fechar esta janela.</p>\
+        <script>setTimeout(()=>window.close(),2000)</script></body></html>",
+        display_name
+    );
+    stream.write_all(html.as_bytes()).await.ok();
+    stream.flush().await.ok();
+
+    Ok(CallbackAuthData {
+        refresh_token,
+        email,
+        name,
+    })
+}
+
+// ─── Conflict detection ────────────────────────────────────────────
+
 fn is_conflict(metadata: &crate::models::SyncMetadata, remote_modified: Option<&str>) -> bool {
     let Some(remote) = remote_modified else {
         return false;
@@ -199,139 +300,38 @@ fn is_conflict(metadata: &crate::models::SyncMetadata, remote_modified: Option<&
     metadata.last_local_change > last_sync
 }
 
-fn google_client_id() -> Result<String> {
-    let from_runtime = env::var("TERMOPEN_GOOGLE_CLIENT_ID")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
-    let from_compile = option_env!("TERMOPEN_GOOGLE_CLIENT_ID").map(|v| v.to_string());
-
-    Ok(from_runtime
-        .or(from_compile)
-        .unwrap_or_else(|| DEFAULT_GOOGLE_CLIENT_ID.to_string()))
-}
-
-fn google_client_secret() -> Option<String> {
-    env::var("TERMOPEN_GOOGLE_CLIENT_SECRET")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| option_env!("TERMOPEN_GOOGLE_CLIENT_SECRET").map(|v| v.to_string()))
-}
-
-async fn request_device_code(client: &Client, client_id: &str) -> Result<DeviceCodeResponse> {
-    let response = client
-        .post("https://oauth2.googleapis.com/device/code")
-        .form(&[("client_id", client_id), ("scope", GOOGLE_SCOPE)])
-        .send()
-        .await
-        .context("Falha na chamada de device code")?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        if body.contains("invalid_client") {
-            return Err(anyhow!("{}", invalid_client_help(&body)));
-        }
-        return Err(anyhow!("Device code recusado ({}): {}", status, body));
-    }
-
-    response
-        .json::<DeviceCodeResponse>()
-        .await
-        .context("Falha ao decodificar resposta de device code")
-}
-
-async fn exchange_device_code(
-    client: &Client,
-    client_id: &str,
-    device_code: &str,
-) -> Result<TokenResponse, AuthPollError> {
-    let mut form = vec![
-        ("client_id", client_id.to_string()),
-        ("device_code", device_code.to_string()),
-        (
-            "grant_type",
-            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
-        ),
-    ];
-
-    if let Some(secret) = google_client_secret() {
-        form.push(("client_secret", secret));
-    }
-
-    let response = client
-        .post("https://oauth2.googleapis.com/token")
-        .form(&form)
-        .send()
-        .await
-        .map_err(|error| AuthPollError::Fatal(format!("Erro na troca de token: {}", error)))?;
-
-    if response.status().is_success() {
-        return response.json::<TokenResponse>().await.map_err(|error| {
-            AuthPollError::Fatal(format!("Erro ao decodificar token: {}", error))
-        });
-    }
-
-    let error = response
-        .json::<OAuthErrorResponse>()
-        .await
-        .map_err(|decode_error| {
-            AuthPollError::Fatal(format!("Erro na resposta de token: {}", decode_error))
-        })?;
-
-    match error.error.as_str() {
-        "authorization_pending" => Err(AuthPollError::Pending),
-        "slow_down" => Err(AuthPollError::SlowDown),
-        "invalid_client" => Err(AuthPollError::Fatal(invalid_client_help(
-            error
-                .error_description
-                .unwrap_or_else(|| "invalid_client".to_string())
-                .as_str(),
-        ))),
-        _ => Err(AuthPollError::Fatal(
-            error.error_description.unwrap_or_else(|| error.error),
-        )),
-    }
-}
+// ─── Google tokens via worker ───────────────────────────────────────
 
 async fn access_token_from_refresh() -> Result<String> {
-    let client_id = google_client_id()?;
     let refresh_token = load_refresh_token()?;
-
-    let mut form = vec![
-        ("client_id", client_id),
-        ("refresh_token", refresh_token),
-        ("grant_type", "refresh_token".to_string()),
-    ];
-
-    if let Some(secret) = google_client_secret() {
-        form.push(("client_secret", secret));
-    }
-
     let client = Client::new();
+
     let response = client
-        .post("https://oauth2.googleapis.com/token")
-        .form(&form)
+        .post(format!("{}/auth/refresh-token", WORKER_BASE_URL))
+        .json(&serde_json::json!({ "refresh_token": refresh_token }))
         .send()
         .await
-        .context("Falha ao renovar access token")?;
+        .context("Falha ao renovar access token via worker")?;
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(anyhow!(
-            "Falha ao renovar token Google ({}). Execute login novamente. {}",
+            "Falha ao renovar token ({}). Execute login novamente. {}",
             status,
             body
         ));
     }
 
-    let token = response
-        .json::<TokenResponse>()
+    let data: RefreshTokenResponse = response
+        .json()
         .await
-        .context("Falha ao ler token renovado")?;
+        .context("Falha ao ler resposta de refresh")?;
 
-    Ok(token.access_token)
+    Ok(data.access_token)
 }
+
+// ─── Google Drive helpers ───────────────────────────────────────────
 
 async fn lookup_drive_file(
     client: &Client,
@@ -462,6 +462,8 @@ async fn download_file_bytes(
         .context("Falha ao ler bytes de download")
 }
 
+// ─── Keyring helpers ────────────────────────────────────────────────
+
 fn store_refresh_token(token: &str) -> Result<()> {
     let entry =
         Entry::new(KEYRING_SERVICE, KEYRING_REFRESH_TOKEN).context("Falha ao preparar keychain")?;
@@ -475,28 +477,26 @@ fn load_refresh_token() -> Result<String> {
         Entry::new(KEYRING_SERVICE, KEYRING_REFRESH_TOKEN).context("Falha ao preparar keychain")?;
     entry
         .get_password()
-        .context("Refresh token ausente. Rode sync_google_login primeiro.")
+        .context("Refresh token ausente. Faca login primeiro.")
 }
 
-#[derive(Debug, Deserialize)]
-struct DeviceCodeResponse {
-    device_code: String,
-    user_code: String,
-    verification_url: String,
-    expires_in: i32,
-    interval: i32,
+fn store_user_field(key: &str, value: &str) -> Result<()> {
+    let entry = Entry::new(KEYRING_SERVICE, key).context("Falha ao preparar keychain")?;
+    entry
+        .set_password(value)
+        .context("Falha ao salvar dado no keychain")
 }
 
+fn load_user_field(key: &str) -> Result<String> {
+    let entry = Entry::new(KEYRING_SERVICE, key).context("Falha ao preparar keychain")?;
+    entry.get_password().context("Campo ausente no keychain")
+}
+
+// ─── Types ──────────────────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
-struct TokenResponse {
+struct RefreshTokenResponse {
     access_token: String,
-    refresh_token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthErrorResponse {
-    error: String,
-    error_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,16 +511,4 @@ struct DriveFileMetadata {
     name: Option<String>,
     #[serde(rename = "modifiedTime")]
     modified_time: Option<String>,
-}
-
-enum AuthPollError {
-    Pending,
-    SlowDown,
-    Fatal(String),
-}
-
-fn invalid_client_help(raw_error: &str) -> String {
-    format!(
-        "Google OAuth recusou o client ({raw_error}). Configure um OAuth Client do tipo Desktop App no Google Cloud com Device Authorization, escopo drive.file e variaveis TERMOPEN_GOOGLE_CLIENT_ID (e TERMOPEN_GOOGLE_CLIENT_SECRET se exigido)."
-    )
 }
