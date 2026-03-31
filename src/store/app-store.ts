@@ -23,6 +23,7 @@ const initialState: Omit<
   | "vaultInit"
   | "vaultUnlock"
   | "vaultLock"
+  | "resolveStartupConflicts"
   | "openHostDrawer"
   | "closeHostDrawer"
   | "saveHost"
@@ -75,6 +76,8 @@ const initialState: Omit<
   workspaceBlockCountByTab: {},
   commandInput: "whoami",
   busy: false,
+  startupConflicts: [],
+  startupSyncBusy: false,
 };
 
 export const useAppStore = create<AppStore>((set, get) => {

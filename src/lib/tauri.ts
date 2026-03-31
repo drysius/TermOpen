@@ -7,7 +7,11 @@ import type {
   ConnectionProfile,
   KnownHostEntry,
   KeychainEntry,
+  RecoveryProbeResult,
+  ReleaseCheckResult,
   SftpEntry,
+  SyncConflictDecision,
+  SyncConflictPreview,
   SshConnectResult,
   SshSessionInfo,
   SyncState,
@@ -16,9 +20,12 @@ import type {
 
 export const api = {
   vaultStatus: () => invoke<VaultStatus>("vault_status"),
-  vaultInit: (password?: string | null) => invoke<VaultStatus>("vault_init", { password }),
-  vaultUnlock: (password?: string | null) => invoke<VaultStatus>("vault_unlock", { password }),
+  vaultInit: (password?: string | null) =>
+    invoke<VaultStatus>("vault_init", { password }),
+  vaultUnlock: (password?: string | null) =>
+    invoke<VaultStatus>("vault_unlock", { password }),
   vaultLock: () => invoke<VaultStatus>("vault_lock"),
+  vaultResetAll: () => invoke<VaultStatus>("vault_reset_all"),
   vaultChangeMasterPassword: (oldPassword: string | null, newPassword: string) =>
     invoke<VaultStatus>("vault_change_master_password", {
       oldPassword,
@@ -119,16 +126,28 @@ export const api = {
   authServerDelete: (id: string) => invoke<void>("auth_server_delete", { id }),
   authServersFetchRemote: () => invoke<AuthServer[]>("auth_servers_fetch_remote"),
 
-  syncGoogleLogin: () => invoke<SyncState>("sync_google_login"),
+  syncGoogleLogin: (serverAddress?: string | null) =>
+    invoke<SyncState>("sync_google_login", { serverAddress }),
   syncLoggedUser: () => invoke<[string, string] | null>("sync_logged_user"),
   syncCancel: () => invoke<SyncState>("sync_cancel"),
   syncPush: () => invoke<SyncState>("sync_push"),
   syncPull: () => invoke<SyncState>("sync_pull"),
+  syncStartupPreview: () => invoke<SyncConflictPreview>("sync_startup_preview"),
+  syncStartupResolve: (decisions: SyncConflictDecision[]) =>
+    invoke<SyncState>("sync_startup_resolve", { decisions }),
+  syncRecoveryProbe: (serverAddress?: string | null) =>
+    invoke<RecoveryProbeResult>("sync_recovery_probe", { serverAddress }),
+  syncRecoveryRestore: (password: string, serverAddress?: string | null) =>
+    invoke<VaultStatus>("sync_recovery_restore", { password, serverAddress }),
+  releaseCheckLatest: () => invoke<ReleaseCheckResult>("release_check_latest"),
 
   openExternalEditor: (filename: string, content: string, command?: string | null) =>
     invoke<void>("open_external_editor", { filename, content, command }),
 
   windowMinimize: () => invoke<void>("window_minimize"),
   windowToggleMaximize: () => invoke<boolean>("window_toggle_maximize"),
+  windowIsMaximized: () => invoke<boolean>("window_is_maximized"),
   windowClose: () => invoke<void>("window_close"),
+  windowStateSave: () => invoke<void>("window_state_save"),
+  windowStateRestore: () => invoke<void>("window_state_restore"),
 };

@@ -16,6 +16,7 @@ export interface VaultStatus {
   initialized: boolean;
   locked: boolean;
   key_mode: KeyMode | null;
+  recoverable: boolean;
 }
 
 export interface ConnectionProfile {
@@ -92,6 +93,39 @@ export interface SyncState {
   last_sync_at?: string | null;
   pending_user_code?: string | null;
   verification_url?: string | null;
+}
+
+export type SyncConflictKind = "host" | "keychain" | "profile";
+export type SyncKeepSide = "client" | "server";
+
+export interface SyncConflictItem {
+  kind: SyncConflictKind;
+  id: string;
+  label: string;
+  local_hash?: string | null;
+  remote_hash?: string | null;
+}
+
+export interface SyncConflictPreview {
+  conflicts: SyncConflictItem[];
+}
+
+export interface SyncConflictDecision {
+  kind: SyncConflictKind;
+  id: string;
+  keep: SyncKeepSide;
+}
+
+export interface RecoveryProbeResult {
+  found: boolean;
+  message: string;
+}
+
+export interface ReleaseCheckResult {
+  available: boolean;
+  latest_version?: string | null;
+  url?: string | null;
+  message: string;
 }
 
 export interface KnownHostEntry {

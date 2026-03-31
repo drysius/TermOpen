@@ -5,6 +5,8 @@ import type {
   ConnectionProfile,
   KnownHostEntry,
   KeychainEntry,
+  SyncConflictDecision,
+  SyncConflictItem,
   SftpEntry,
   SshSessionInfo,
   SyncState,
@@ -38,6 +40,8 @@ export interface AppState {
   workspaceBlockCountByTab: Record<string, number>;
   commandInput: string;
   busy: boolean;
+  startupConflicts: SyncConflictItem[];
+  startupSyncBusy: boolean;
 }
 
 export interface AppActions {
@@ -56,6 +60,7 @@ export interface AppActions {
   vaultInit: (password: string | null) => Promise<void>;
   vaultUnlock: (password: string | null) => Promise<void>;
   vaultLock: (fromInactivity?: boolean) => Promise<void>;
+  resolveStartupConflicts: (decisions: SyncConflictDecision[]) => Promise<void>;
 
   openHostDrawer: (profile?: ConnectionProfile, protocol?: ConnectionProtocol) => void;
   closeHostDrawer: () => void;

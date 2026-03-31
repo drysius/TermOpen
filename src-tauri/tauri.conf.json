@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "TermOpen",
-        "width": 1440,
-        "height": 900,
-        "minWidth": 1080,
-        "minHeight": 700,
+        "center": true,
+        "width": 380,
+        "height": 600,
+        "minWidth": 380,
+        "minHeight": 600,
         "decorations": false,
         "transparent": true,
         "shadow": false,
