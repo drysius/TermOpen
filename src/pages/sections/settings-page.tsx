@@ -105,6 +105,7 @@ export function SettingsPage() {
   const busy = useAppStore((state) => state.busy);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const runSync = useAppStore((state) => state.runSync);
+  const syncCancel = useAppStore((state) => state.syncCancel);
   const changeMasterPassword = useAppStore((state) => state.changeMasterPassword);
 
   const [showUploadPolicyModal, setShowUploadPolicyModal] = useState(false);
@@ -116,6 +117,9 @@ export function SettingsPage() {
   const [serverFilter, setServerFilter] = useState("");
   const [serverFilterStatus, setServerFilterStatus] = useState<"all" | "online" | "offline">("all");
   const [serverPage, setServerPage] = useState(0);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncAction, setSyncAction] = useState<"login" | "push" | "pull" | null>(null);
+  const [serverDraft, setServerDraft] = useState({ id: "", label: "", address: "", author: "" });
   const SERVERS_PER_PAGE = 5;
 
   const settingsForm = useForm<SettingsFormValues>({
@@ -172,8 +176,62 @@ export function SettingsPage() {
     }
   }, [authServers]);
 
-  function handleSelectServer(id: string) {
-    void saveSettings({ ...settings, selected_auth_server_id: id });
+  async function handleRunSync(action: "login" | "push" | "pull") {
+    if (syncBusy) {
+      return;
+    }
+    setSyncBusy(true);
+    setSyncAction(action);
+    try {
+      await runSync(action);
+    } finally {
+      setSyncBusy(false);
+      setSyncAction(null);
+    }
+  }
+
+  async function handleCancelSync() {
+    if (!syncBusy) {
+      return;
+    }
+    await syncCancel();
+    setSyncBusy(false);
+    setSyncAction(null);
+  }
+
+  async function handleSelectServer(id: string) {
+    if (syncBusy) {
+      await handleCancelSync();
+    }
+    await saveSettings({ ...settings, selected_auth_server_id: id });
+  }
+
+  async function handleSaveServer() {
+    const label = serverDraft.label.trim();
+    const address = serverDraft.address.trim();
+    if (!label || !address) {
+      return;
+    }
+    const payload: AuthServer = {
+      id: serverDraft.id || `local:${Date.now()}`,
+      label,
+      address,
+      author: serverDraft.author.trim() || null,
+      official: false,
+    };
+    await api.authServerSave(payload);
+    const next = await api.authServersList();
+    setAuthServers(next);
+    setServerDraft({ id: "", label: "", address: "", author: "" });
+  }
+
+  async function handleDeleteServer(id: string) {
+    await api.authServerDelete(id);
+    const next = await api.authServersList();
+    setAuthServers(next);
+    if ((settings.selected_auth_server_id || "default") === id) {
+      await saveSettings({ ...settings, selected_auth_server_id: "default" });
+    }
   }
 
   const watchedNewPassword = passwordForm.watch("newPassword");
@@ -469,19 +527,78 @@ export function SettingsPage() {
                   </p>
                 ) : null}
                 <div className="mt-2 flex flex-wrap gap-2">
-                  <Button type="button" onClick={() => void runSync("login")}>
-                    <Cloud className="mr-2 h-4 w-4" /> {loggedUser ? "Reconectar" : "Conectar"}
+                  <Button type="button" onClick={() => void handleRunSync("login")} disabled={syncBusy}>
+                    <Cloud className={`mr-2 h-4 w-4 ${syncBusy ? "animate-pulse" : ""}`} />
+                    {syncBusy && syncAction === "login"
+                      ? "Conectando..."
+                      : loggedUser
+                        ? "Reconectar"
+                        : "Conectar"}
                   </Button>
-                  <Button type="button" variant="outline" onClick={() => void runSync("push")} disabled={!loggedUser}>
-                    <CloudUpload className="mr-2 h-4 w-4" /> Push
-                  </Button>
-                  <Button type="button" variant="outline" onClick={() => void runSync("pull")} disabled={!loggedUser}>
-                    <CloudDownload className="mr-2 h-4 w-4" /> Pull
-                  </Button>
+                  {syncBusy ? (
+                    <Button type="button" variant="outline" onClick={() => void handleCancelSync()}>
+                      Cancelar
+                    </Button>
+                  ) : null}
+                  {loggedUser ? (
+                    <>
+                      <Button type="button" variant="outline" onClick={() => void handleRunSync("push")} disabled={syncBusy}>
+                        <CloudUpload className="mr-2 h-4 w-4" /> Push
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => void handleRunSync("pull")} disabled={syncBusy}>
+                        <CloudDownload className="mr-2 h-4 w-4" /> Pull
+                      </Button>
+                    </>
+                  ) : null}
                 </div>
               </div>
             ) : (
               <div>
+                <div className="mb-3 rounded-md border border-white/10 bg-zinc-900/30 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                    Local Server
+                  </p>
+                  <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                    <Input
+                      placeholder="Server label"
+                      value={serverDraft.label}
+                      onChange={(event) =>
+                        setServerDraft((current) => ({ ...current, label: event.target.value }))
+                      }
+                    />
+                    <Input
+                      placeholder="https://my-worker.example.com"
+                      value={serverDraft.address}
+                      onChange={(event) =>
+                        setServerDraft((current) => ({ ...current, address: event.target.value }))
+                      }
+                    />
+                    <Input
+                      className="md:col-span-2"
+                      placeholder="Author URL (optional)"
+                      value={serverDraft.author}
+                      onChange={(event) =>
+                        setServerDraft((current) => ({ ...current, author: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <Button type="button" size="sm" onClick={() => void handleSaveServer()}>
+                      {serverDraft.id ? "Update Server" : "Add Server"}
+                    </Button>
+                    {serverDraft.id ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setServerDraft({ id: "", label: "", address: "", author: "" })}
+                      >
+                        Cancel Edit
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+
                 <div className="mb-2 flex items-center gap-2">
                   <Input
                     placeholder="Buscar servidor..."
@@ -539,7 +656,7 @@ export function SettingsPage() {
                                   ? "border-emerald-500/50 bg-emerald-500/10"
                                   : "border-white/10 bg-zinc-900/30 hover:bg-zinc-900/60"
                               }`}
-                              onClick={() => handleSelectServer(server.id)}
+                              onClick={() => void handleSelectServer(server.id)}
                               onKeyDown={() => {}}
                               role="button"
                               tabIndex={0}
@@ -583,6 +700,39 @@ export function SettingsPage() {
                                 )}
                                 {isSelected ? (
                                   <span className="text-xs font-medium text-emerald-400">Ativo</span>
+                                ) : null}
+                                {!server.official ? (
+                                  <>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 px-2 text-[11px]"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setServerDraft({
+                                          id: server.id,
+                                          label: server.label,
+                                          address: server.address,
+                                          author: server.author || "",
+                                        });
+                                      }}
+                                    >
+                                      Edit
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 px-2 text-[11px] text-red-300 hover:text-red-200"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void handleDeleteServer(server.id);
+                                      }}
+                                    >
+                                      Delete
+                                    </Button>
+                                  </>
                                 ) : null}
                               </div>
                             </div>

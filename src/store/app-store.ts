@@ -34,6 +34,7 @@ const initialState: Omit<
   | "saveSettings"
   | "changeMasterPassword"
   | "runSync"
+  | "syncCancel"
   | "refreshKnownHosts"
   | "removeKnownHost"
   | "ensureKnownHosts"

@@ -5,6 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Mutex as StdMutex, OnceLock},
 };
 use tauri::Emitter;
@@ -29,12 +30,46 @@ struct AuthCallbackQueue {
 }
 
 static AUTH_CALLBACK_QUEUE: OnceLock<AuthCallbackQueue> = OnceLock::new();
+static SYNC_CANCELLED: AtomicBool = AtomicBool::new(false);
+static SYNC_CANCEL_NOTIFY: OnceLock<Notify> = OnceLock::new();
 
 fn auth_callback_queue() -> &'static AuthCallbackQueue {
     AUTH_CALLBACK_QUEUE.get_or_init(|| AuthCallbackQueue {
         queue: StdMutex::new(VecDeque::new()),
         notify: Notify::new(),
     })
+}
+
+fn sync_cancel_notify() -> &'static Notify {
+    SYNC_CANCEL_NOTIFY.get_or_init(Notify::new)
+}
+
+fn clear_sync_cancel() {
+    SYNC_CANCELLED.store(false, Ordering::Relaxed);
+}
+
+fn is_sync_cancelled() -> bool {
+    SYNC_CANCELLED.load(Ordering::Relaxed)
+}
+
+async fn wait_for_sync_cancel() {
+    let notify = sync_cancel_notify();
+    loop {
+        if is_sync_cancelled() {
+            return;
+        }
+        notify.notified().await;
+    }
+}
+
+fn cancelled_state() -> SyncState {
+    SyncState::idle("Sincronizacao cancelada pelo usuario.")
+}
+
+pub fn request_sync_cancel() -> SyncState {
+    SYNC_CANCELLED.store(true, Ordering::Relaxed);
+    sync_cancel_notify().notify_waiters();
+    cancelled_state()
 }
 
 #[derive(Default)]
@@ -54,6 +89,7 @@ impl SyncManager {
         app: &tauri::AppHandle,
         server_address: &str,
     ) -> Result<SyncState> {
+        clear_sync_cancel();
         let pending = SyncState {
             connected: false,
             status: "running".to_string(),
@@ -69,9 +105,17 @@ impl SyncManager {
             clear_auth_callback_queue();
             let login_url = format!("{}/auth/google", server_address);
             open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
-            let result =
-                tokio::time::timeout(AUTH_DEEPLINK_TIMEOUT, wait_for_auth_callback()).await;
-            return finalize_auth_result(app, result);
+            let result = tokio::select! {
+                result = tokio::time::timeout(AUTH_DEEPLINK_TIMEOUT, wait_for_auth_callback()) => {
+                    finalize_auth_result(app, result)?
+                }
+                _ = wait_for_sync_cancel() => {
+                    let state = cancelled_state();
+                    app.emit("sync:status", &state).ok();
+                    state
+                }
+            };
+            return Ok(result);
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -88,9 +132,17 @@ impl SyncManager {
             );
 
             open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
-            let result =
-                tokio::time::timeout(AUTH_DEEPLINK_TIMEOUT, wait_for_callback(&listener)).await;
-            return finalize_auth_result(app, result);
+            let result = tokio::select! {
+                result = tokio::time::timeout(AUTH_DEEPLINK_TIMEOUT, wait_for_callback(&listener)) => {
+                    finalize_auth_result(app, result)?
+                }
+                _ = wait_for_sync_cancel() => {
+                    let state = cancelled_state();
+                    app.emit("sync:status", &state).ok();
+                    state
+                }
+            };
+            return Ok(result);
         }
     }
 
@@ -113,8 +165,14 @@ impl SyncManager {
         server_address: &str,
         fallback_addresses: &[String],
     ) -> Result<SyncState> {
+        clear_sync_cancel();
         let access_token =
             access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
+        if is_sync_cancelled() {
+            let state = cancelled_state();
+            app.emit("sync:status", &state).ok();
+            return Ok(state);
+        }
         let client = Client::new();
         let content = vault.encrypted_file_bytes()?;
 
@@ -125,6 +183,11 @@ impl SyncManager {
             let created = create_drive_file(&client, &access_token).await?;
             upload_file_bytes(&client, &access_token, &created.id, content).await?
         };
+        if is_sync_cancelled() {
+            let state = cancelled_state();
+            app.emit("sync:status", &state).ok();
+            return Ok(state);
+        }
 
         let now = Utc::now();
         let mut metadata = vault.sync_metadata()?;
@@ -151,8 +214,14 @@ impl SyncManager {
         server_address: &str,
         fallback_addresses: &[String],
     ) -> Result<SyncState> {
+        clear_sync_cancel();
         let access_token =
             access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
+        if is_sync_cancelled() {
+            let state = cancelled_state();
+            app.emit("sync:status", &state).ok();
+            return Ok(state);
+        }
         let client = Client::new();
 
         let Some(remote_file) = lookup_drive_file(&client, &access_token).await? else {
@@ -179,6 +248,11 @@ impl SyncManager {
         }
 
         let payload = download_file_bytes(&client, &access_token, &remote_file.id).await?;
+        if is_sync_cancelled() {
+            let state = cancelled_state();
+            app.emit("sync:status", &state).ok();
+            return Ok(state);
+        }
         vault.replace_encrypted_file(&payload)?;
 
         let now = Utc::now();

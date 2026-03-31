@@ -36,6 +36,7 @@ export function createConnectionActions(
   | "saveSettings"
   | "changeMasterPassword"
   | "runSync"
+  | "syncCancel"
   | "refreshKnownHosts"
   | "removeKnownHost"
   | "ensureKnownHosts"
@@ -253,6 +254,16 @@ export function createConnectionActions(
         set((state) => ({
           syncState: { ...state.syncState, status: "error", message: getError(error) },
         }));
+      }
+    },
+
+    syncCancel: async () => {
+      try {
+        const next = await api.syncCancel();
+        set({ syncState: next });
+        toast.message(next.message);
+      } catch (error) {
+        toast.error(getError(error));
       }
     },
 

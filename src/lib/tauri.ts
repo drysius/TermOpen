@@ -111,6 +111,7 @@ export const api = {
 
   syncGoogleLogin: () => invoke<SyncState>("sync_google_login"),
   syncLoggedUser: () => invoke<[string, string] | null>("sync_logged_user"),
+  syncCancel: () => invoke<SyncState>("sync_cancel"),
   syncPush: () => invoke<SyncState>("sync_push"),
   syncPull: () => invoke<SyncState>("sync_pull"),
 

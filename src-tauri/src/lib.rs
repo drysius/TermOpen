@@ -12,7 +12,7 @@ use models::{
     SftpEntry, SshConnectResult, SshSessionInfo, SyncState, VaultStatus,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
-use sync::{handle_auth_callback_deeplink, SyncManager};
+use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
 use tauri::{Emitter, Manager, State};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
@@ -777,6 +777,13 @@ async fn sync_logged_user(state: State<'_, AppState>) -> Result<Option<(String, 
     Ok(sync.logged_user())
 }
 
+#[tauri::command]
+async fn sync_cancel(app: tauri::AppHandle) -> Result<SyncState, String> {
+    let state = request_sync_cancel();
+    let _ = app.emit("sync:status", &state);
+    Ok(state)
+}
+
 fn resolve_server_addresses(vault: &vault::VaultManager) -> Result<(String, Vec<String>), String> {
     let primary = vault.selected_auth_server().map_err(app_error)?.address;
     let fallbacks: Vec<String> = vault
@@ -1019,6 +1026,7 @@ pub fn run() {
             auth_servers_fetch_remote,
             sync_google_login,
             sync_logged_user,
+            sync_cancel,
             sync_push,
             sync_pull,
             open_external_editor,
