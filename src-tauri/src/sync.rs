@@ -3,9 +3,16 @@ use chrono::{DateTime, Utc};
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::VecDeque,
+    sync::{Mutex as StdMutex, OnceLock},
+};
 use tauri::Emitter;
+#[cfg(not(target_os = "windows"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(target_os = "windows"))]
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 
 use crate::{models::SyncState, vault::VaultManager};
 
@@ -14,6 +21,21 @@ const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
 const KEYRING_USER_EMAIL: &str = "google-user-email";
 const KEYRING_USER_NAME: &str = "google-user-name";
 const DRIVE_FILE_NAME: &str = "termopen-vault.enc.json";
+const AUTH_DEEPLINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+struct AuthCallbackQueue {
+    queue: StdMutex<VecDeque<CallbackAuthData>>,
+    notify: Notify,
+}
+
+static AUTH_CALLBACK_QUEUE: OnceLock<AuthCallbackQueue> = OnceLock::new();
+
+fn auth_callback_queue() -> &'static AuthCallbackQueue {
+    AUTH_CALLBACK_QUEUE.get_or_init(|| AuthCallbackQueue {
+        queue: StdMutex::new(VecDeque::new()),
+        notify: Notify::new(),
+    })
+}
 
 #[derive(Default)]
 pub struct SyncManager {
@@ -26,7 +48,7 @@ impl SyncManager {
     }
 
     /// Abre o browser para login via Google OAuth.
-    /// Levanta um servidor HTTP temporário em localhost para receber o callback.
+    /// Em Windows aguarda callback via deep link; nos demais usa callback local.
     pub async fn google_login(&mut self, app: &tauri::AppHandle, server_address: &str) -> Result<SyncState> {
         let pending = SyncState {
             connected: false,
@@ -38,58 +60,33 @@ impl SyncManager {
         };
         app.emit("sync:status", &pending).ok();
 
-        // Levantar listener em porta aleatória
-        let listener = TcpListener::bind("127.0.0.1:0").await
-            .context("Falha ao abrir porta local para callback")?;
-        let local_port = listener.local_addr()?.port();
-        let callback_url = format!("http://localhost:{}/callback", local_port);
+        #[cfg(target_os = "windows")]
+        {
+            clear_auth_callback_queue();
+            let login_url = format!("{}/auth/google", server_address);
+            open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
+            let result =
+                tokio::time::timeout(AUTH_DEEPLINK_TIMEOUT, wait_for_auth_callback()).await;
+            return finalize_auth_result(app, result);
+        }
 
-        // Abrir browser com a URL do worker + redirect local
-        let login_url = format!(
-            "{}/auth/google?local_callback={}",
-            server_address,
-            urlencoding::encode(&callback_url)
-        );
-        open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
+        #[cfg(not(target_os = "windows"))]
+        {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .context("Falha ao abrir porta local para callback")?;
+            let local_port = listener.local_addr()?.port();
+            let callback_url = format!("http://localhost:{}/callback", local_port);
+            let login_url = format!(
+                "{}/auth/google?local_callback={}",
+                server_address,
+                urlencoding::encode(&callback_url)
+            );
 
-        // Esperar a resposta do browser (timeout 5 min)
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            wait_for_callback(&listener),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(auth_data)) => {
-                store_refresh_token(&auth_data.refresh_token)?;
-                if let Some(ref email) = auth_data.email {
-                    store_user_field(KEYRING_USER_EMAIL, email).ok();
-                }
-                if let Some(ref name) = auth_data.name {
-                    store_user_field(KEYRING_USER_NAME, name).ok();
-                }
-
-                let msg = if let Some(ref name) = auth_data.name {
-                    let email = auth_data.email.as_deref().unwrap_or("");
-                    format!("Conectado como {} ({}).", name, email)
-                } else {
-                    "Google Drive conectado com sucesso.".to_string()
-                };
-
-                let state = SyncState::ok(&msg, None);
-                app.emit("sync:status", &state).ok();
-                Ok(state)
-            }
-            Ok(Err(e)) => {
-                let state = SyncState::error(format!("Erro no login: {}", e));
-                app.emit("sync:status", &state).ok();
-                Ok(state)
-            }
-            Err(_) => {
-                let state = SyncState::error("Tempo de login expirado. Tente novamente.");
-                app.emit("sync:status", &state).ok();
-                Ok(state)
-            }
+            open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
+            let result =
+                tokio::time::timeout(AUTH_DEEPLINK_TIMEOUT, wait_for_callback(&listener)).await;
+            return finalize_auth_result(app, result);
         }
     }
 
@@ -98,10 +95,7 @@ impl SyncManager {
         let email = load_user_field(KEYRING_USER_EMAIL).ok();
         let name = load_user_field(KEYRING_USER_NAME).ok();
         if email.is_some() || name.is_some() {
-            Some((
-                name.unwrap_or_default(),
-                email.unwrap_or_default(),
-            ))
+            Some((name.unwrap_or_default(), email.unwrap_or_default()))
         } else {
             None
         }
@@ -203,28 +197,126 @@ impl SyncManager {
 
 // ─── Callback listener ─────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-struct CallbackAuthData {
-    refresh_token: String,
-    email: Option<String>,
-    name: Option<String>,
+fn finalize_auth_result(
+    app: &tauri::AppHandle,
+    result: std::result::Result<Result<CallbackAuthData>, tokio::time::error::Elapsed>,
+) -> Result<SyncState> {
+    let state = match result {
+        Ok(Ok(auth_data)) => {
+            store_refresh_token(&auth_data.refresh_token)?;
+            if let Some(ref email) = auth_data.email {
+                store_user_field(KEYRING_USER_EMAIL, email).ok();
+            }
+            if let Some(ref name) = auth_data.name {
+                store_user_field(KEYRING_USER_NAME, name).ok();
+            }
+
+            let message = if let Some(ref name) = auth_data.name {
+                let email = auth_data.email.as_deref().unwrap_or("");
+                format!("Conectado como {} ({}).", name, email)
+            } else {
+                "Google Drive conectado com sucesso.".to_string()
+            };
+
+            SyncState::ok(&message, None)
+        }
+        Ok(Err(error)) => SyncState::error(format!("Erro no login: {}", error)),
+        Err(_) => SyncState::error("Tempo de login expirado. Tente novamente."),
+    };
+
+    app.emit("sync:status", &state).ok();
+    Ok(state)
 }
 
-async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
-    let (mut stream, _) = listener.accept().await.context("Falha ao aceitar conexao")?;
+pub fn handle_auth_callback_deeplink(raw_url: &str) -> Result<bool> {
+    let Some(auth_data) = parse_auth_callback_from_deeplink(raw_url)? else {
+        return Ok(false);
+    };
 
-    let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await.context("Falha ao ler request")?;
-    let request = String::from_utf8_lossy(&buf[..n]);
+    push_auth_callback(auth_data)?;
+    Ok(true)
+}
 
-    // Extrair a primeira linha: GET /callback?... HTTP/1.1
-    let first_line = request.lines().next().unwrap_or("");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+fn clear_auth_callback_queue() {
+    if let Ok(mut queue) = auth_callback_queue().queue.lock() {
+        queue.clear();
+    }
+}
 
-    // Parse query params
-    let query = path.split('?').nth(1).unwrap_or("");
-    let params: std::collections::HashMap<String, String> = query
+fn push_auth_callback(auth_data: CallbackAuthData) -> Result<()> {
+    let queue = auth_callback_queue();
+    let mut guard = queue
+        .queue
+        .lock()
+        .map_err(|_| anyhow!("Falha ao acessar fila de callback"))?;
+    guard.push_back(auth_data);
+    drop(guard);
+    queue.notify.notify_one();
+    Ok(())
+}
+
+fn pop_auth_callback() -> Result<Option<CallbackAuthData>> {
+    auth_callback_queue()
+        .queue
+        .lock()
+        .map(|mut guard| guard.pop_front())
+        .map_err(|_| anyhow!("Falha ao acessar fila de callback"))
+}
+
+async fn wait_for_auth_callback() -> Result<CallbackAuthData> {
+    let queue = auth_callback_queue();
+    loop {
+        let notified = queue.notify.notified();
+        if let Some(data) = pop_auth_callback()? {
+            return Ok(data);
+        }
+        notified.await;
+    }
+}
+
+fn parse_auth_callback_from_deeplink(raw_url: &str) -> Result<Option<CallbackAuthData>> {
+    let cleaned = raw_url.trim().trim_matches('"');
+    let Some(path_query) = cleaned.strip_prefix("termopen://") else {
+        return Ok(None);
+    };
+
+    let mut parts = path_query.splitn(2, '?');
+    let endpoint = parts.next().unwrap_or("").trim_matches('/');
+    if !endpoint.eq_ignore_ascii_case("auth") {
+        return Ok(None);
+    }
+
+    let params = parse_auth_callback_query(parts.next().unwrap_or(""));
+    if let Some(error) = params.get("error").filter(|value| !value.is_empty()) {
+        return Err(anyhow!("Login falhou: {}", error));
+    }
+
+    let refresh_token = params
+        .get("refresh_token")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| anyhow!("refresh_token nao recebido no deep link"))?;
+
+    let email = params
+        .get("email")
+        .cloned()
+        .filter(|value| !value.is_empty());
+    let name = params
+        .get("name")
+        .cloned()
+        .filter(|value| !value.is_empty());
+
+    Ok(Some(CallbackAuthData {
+        refresh_token,
+        email,
+        name,
+    }))
+}
+
+fn parse_auth_callback_query(query: &str) -> std::collections::HashMap<String, String> {
+    query
         .split('&')
+        .filter(|pair| !pair.is_empty())
         .filter_map(|pair| {
             let mut parts = pair.splitn(2, '=');
             let key = parts.next()?;
@@ -234,9 +326,36 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
                 urlencoding::decode(value).unwrap_or_default().to_string(),
             ))
         })
-        .collect();
+        .collect()
+}
 
-    // Verificar erro
+#[derive(Debug, Deserialize)]
+struct CallbackAuthData {
+    refresh_token: String,
+    email: Option<String>,
+    name: Option<String>,
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .context("Falha ao aceitar conexao")?;
+
+    let mut buf = vec![0u8; 8192];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .context("Falha ao ler request")?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    let first_line = request.lines().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+
+    let query = path.split('?').nth(1).unwrap_or("");
+    let params = parse_auth_callback_query(query);
+
     if let Some(error) = params.get("error") {
         let html = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
@@ -258,7 +377,6 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
     let email = params.get("email").cloned().filter(|v| !v.is_empty());
     let name = params.get("name").cloned().filter(|v| !v.is_empty());
 
-    // Responder com HTML de sucesso
     let display_name = name.as_deref().unwrap_or("usuario");
     let html = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
@@ -317,11 +435,9 @@ async fn access_token_from_refresh_with_fallback(
     match try_refresh_token(primary).await {
         Ok(token) => return Ok(token),
         Err(e) => {
-            // Se é erro de auth (401), não adianta tentar outro servidor
             if e.to_string().contains("401") || e.to_string().contains("Execute login") {
                 return Err(e);
             }
-            // Erro de rede — tentar fallbacks
             for fallback in fallbacks {
                 if fallback == primary {
                     continue;

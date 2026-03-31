@@ -39,3 +39,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["time", "net", "io-util"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+interprocess = "2"
+winreg = "0.52"
