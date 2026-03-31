@@ -82,6 +82,12 @@ export const api = {
   sftpRead: (sessionId: string, path: string) => invoke<string>("sftp_read", { sessionId, path }),
   sftpWrite: (sessionId: string, path: string, content: string) =>
     invoke<void>("sftp_write", { sessionId, path, content }),
+  sftpRename: (sessionId: string, fromPath: string, toPath: string) =>
+    invoke<void>("sftp_rename", { sessionId, fromPath, toPath }),
+  sftpDelete: (sessionId: string, path: string, isDir: boolean) =>
+    invoke<void>("sftp_delete", { sessionId, path, isDir }),
+  sftpMkdir: (sessionId: string, path: string) => invoke<void>("sftp_mkdir", { sessionId, path }),
+  sftpCreateFile: (sessionId: string, path: string) => invoke<void>("sftp_create_file", { sessionId, path }),
   sftpReadBinaryPreview: (sessionId: string, path: string, maxBytes?: number | null) =>
     invoke<BinaryPreviewResult>("sftp_read_binary_preview", { sessionId, path, maxBytes }),
   sftpTransfer: (
@@ -100,6 +106,10 @@ export const api = {
     }),
   localList: (path?: string | null) => invoke<SftpEntry[]>("local_list", { path }),
   localRead: (path: string) => invoke<string>("local_read", { path }),
+  localRename: (fromPath: string, toPath: string) => invoke<void>("local_rename", { fromPath, toPath }),
+  localDelete: (path: string, isDir: boolean) => invoke<void>("local_delete", { path, isDir }),
+  localMkdir: (path: string) => invoke<void>("local_mkdir", { path }),
+  localCreateFile: (path: string) => invoke<void>("local_create_file", { path }),
   localReadBinaryPreview: (path: string, maxBytes?: number | null) =>
     invoke<BinaryPreviewResult>("local_read_binary_preview", { path, maxBytes }),
   localWrite: (path: string, content: string) => invoke<void>("local_write", { path, content }),

@@ -346,6 +346,79 @@ impl SshManager {
         self.sftp_write_bytes(session_id, path, content.as_bytes(), chunk_size)
     }
 
+    pub fn sftp_rename(&mut self, session_id: &str, from_path: &str, to_path: &str) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let from = normalize_remote_path(from_path);
+        let to = normalize_remote_path(to_path);
+        sftp.rename(&from, &to, None).with_context(|| {
+            format!(
+                "Falha ao renomear item remoto de {} para {}",
+                from.display(),
+                to.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn sftp_delete(&mut self, session_id: &str, path: &str, is_dir: bool) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let target = normalize_remote_path(path);
+
+        if is_dir {
+            sftp.rmdir(&target)
+                .with_context(|| format!("Falha ao remover pasta remota: {}", target.display()))?;
+        } else {
+            sftp.unlink(&target)
+                .with_context(|| format!("Falha ao remover arquivo remoto: {}", target.display()))?;
+        }
+        Ok(())
+    }
+
+    pub fn sftp_mkdir(&mut self, session_id: &str, path: &str) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let target = normalize_remote_path(path);
+        sftp.mkdir(&target, 0o755)
+            .with_context(|| format!("Falha ao criar pasta remota: {}", target.display()))?;
+        Ok(())
+    }
+
+    pub fn sftp_create_file(&mut self, session_id: &str, path: &str) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let target = normalize_remote_path(path);
+        let _ = sftp
+            .create(&target)
+            .with_context(|| format!("Falha ao criar arquivo remoto: {}", target.display()))?;
+        Ok(())
+    }
+
     pub fn sftp_write_bytes(
         &mut self,
         session_id: &str,

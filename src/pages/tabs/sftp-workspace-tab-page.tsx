@@ -20,7 +20,7 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceBlockController, type WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
@@ -105,6 +105,24 @@ interface DragPayload {
   isDir: boolean;
 }
 
+type SftpContextAction =
+  | "refresh"
+  | "copy_path"
+  | "open_terminal"
+  | "rename"
+  | "delete"
+  | "move"
+  | "mkdir"
+  | "mkfile"
+  | "open_editor"
+  | "download";
+
+interface SftpContextMenuState {
+  x: number;
+  y: number;
+  entry: SftpEntry | null;
+}
+
 const workspaceCache = new Map<string, { blocks: WorkspaceBlock[]; workspaceMode: WorkspaceMode }>();
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 const DRAG_ENTRY_MIME = "application/x-termopen-entry";
@@ -170,6 +188,19 @@ function formatPermissions(value?: number | null): string {
   const triplet = (segment: number) =>
     `${segment & 4 ? "r" : "-"}${segment & 2 ? "w" : "-"}${segment & 1 ? "x" : "-"}`;
   return `${triplet((bits >> 6) & 7)}${triplet((bits >> 3) & 7)}${triplet(bits & 7)}`;
+}
+
+function parentDirectory(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  if (idx <= 0) {
+    return normalized.startsWith("/") ? "/" : "";
+  }
+  return normalized.slice(0, idx);
+}
+
+function shellQuote(path: string): string {
+  return `"${path.replace(/(["\\$])/g, "\\$1")}"`;
 }
 
 function sortSftpEntries(entries: SftpEntry[], sortKey: SortKey, sortDirection: SortDirection): SftpEntry[] {
@@ -263,6 +294,38 @@ async function writeSourceFile(sourceId: string, path: string, content: string):
     return;
   }
   await api.sftpWrite(sourceId, path, content);
+}
+
+async function renameSourceEntry(sourceId: string, fromPath: string, toPath: string): Promise<void> {
+  if (sourceId === "local") {
+    await api.localRename(fromPath, toPath);
+    return;
+  }
+  await api.sftpRename(sourceId, fromPath, toPath);
+}
+
+async function deleteSourceEntry(sourceId: string, path: string, isDir: boolean): Promise<void> {
+  if (sourceId === "local") {
+    await api.localDelete(path, isDir);
+    return;
+  }
+  await api.sftpDelete(sourceId, path, isDir);
+}
+
+async function createSourceFolder(sourceId: string, path: string): Promise<void> {
+  if (sourceId === "local") {
+    await api.localMkdir(path);
+    return;
+  }
+  await api.sftpMkdir(sourceId, path);
+}
+
+async function createSourceFile(sourceId: string, path: string): Promise<void> {
+  if (sourceId === "local") {
+    await api.localCreateFile(path);
+    return;
+  }
+  await api.sftpCreateFile(sourceId, path);
 }
 
 async function readSourceBinaryPreview(sourceId: string, path: string) {
@@ -646,6 +709,39 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     [settings.external_editor_command, settings.preferred_editor, workspaceSize.height, workspaceSize.width],
   );
 
+  const executeTransfer = useCallback(
+    async (fromSourceId: string, fromPath: string, toSourceId: string, toPath: string) => {
+      const transferId = createId("transfer");
+      setTransfers((current) => [...current, { id: transferId, from: fromPath, to: toPath, progress: 0 }]);
+
+      let unlisten: UnlistenFn | null = null;
+      try {
+        unlisten = await listen<number>(`transfer:progress:${transferId}`, (event) => {
+          const progress = Number(event.payload ?? 0);
+          setTransfers((current) =>
+            current.map((item) => (item.id === transferId ? { ...item, progress } : item)),
+          );
+        });
+
+        await api.sftpTransfer(
+          transferId,
+          fromSourceId === "local" ? null : fromSourceId,
+          fromPath,
+          toSourceId === "local" ? null : toSourceId,
+          toPath,
+        );
+        toast.success(`Transferido para ${toPath}`);
+      } catch (error) {
+        toast.error(getError(error));
+        throw error;
+      } finally {
+        unlisten?.();
+        setTransfers((current) => current.filter((item) => item.id !== transferId));
+      }
+    },
+    [],
+  );
+
   const transferBetweenBlocks = useCallback(
     async (payload: DragPayload, targetBlockId: string, targetDirectory: string) => {
       if (payload.sourceBlockId === targetBlockId) {
@@ -661,40 +757,18 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         return;
       }
 
-      const transferId = createId("transfer");
       const destination =
         target.sourceId === "local"
           ? joinPath(targetDirectory || target.path, baseName(payload.path))
           : joinRemotePath(targetDirectory || target.path, baseName(payload.path));
-      setTransfers((current) => [...current, { id: transferId, from: payload.path, to: destination, progress: 0 }]);
-
-      let unlisten: UnlistenFn | null = null;
       try {
-        unlisten = await listen<number>(`transfer:progress:${transferId}`, (event) => {
-          const progress = Number(event.payload ?? 0);
-          setTransfers((current) =>
-            current.map((item) => (item.id === transferId ? { ...item, progress } : item)),
-          );
-        });
-
-        await api.sftpTransfer(
-          transferId,
-          payload.sourceId === "local" ? null : payload.sourceId,
-          payload.path,
-          target.sourceId === "local" ? null : target.sourceId,
-          destination,
-        );
-
-        toast.success(`Transferido para ${destination}`);
+        await executeTransfer(payload.sourceId, payload.path, target.sourceId, destination);
         await refreshSftpBlock(targetBlockId, target.path, target.sourceId);
       } catch (error) {
-        toast.error(getError(error));
-      } finally {
-        unlisten?.();
-        setTransfers((current) => current.filter((item) => item.id !== transferId));
+        // handled by executeTransfer
       }
     },
-    [refreshSftpBlock],
+    [executeTransfer, refreshSftpBlock],
   );
 
   const addSftpBlock = useCallback(
@@ -792,6 +866,146 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       return session.session_id;
     },
     [connections, getOrCreateSession],
+  );
+
+  const openPathInTerminal = useCallback(
+    async (sourceId: string, path: string) => {
+      const targetPath = path || (sourceId === "local" ? "." : "/");
+      let sessionId: string;
+
+      if (sourceId === "local") {
+        const existing = blocksRef.current.find(
+          (item): item is TerminalBlock =>
+            item.kind === "terminal" && localSessionIds.has(item.sessionId),
+        );
+        if (existing) {
+          sessionId = existing.sessionId;
+        } else {
+          sessionId = await connectLocalTerminal();
+          addTerminalBlock(sessionId);
+        }
+      } else {
+        const existing = blocksRef.current.find(
+          (item): item is TerminalBlock =>
+            item.kind === "terminal" && item.sessionId === sourceId,
+        );
+        sessionId = existing?.sessionId ?? sourceId;
+        if (!existing) {
+          addTerminalBlock(sourceId);
+        }
+      }
+
+      await ensureSessionListeners(sessionId);
+      await sshWrite(sessionId, `cd ${shellQuote(targetPath)}\n`);
+    },
+    [addTerminalBlock, connectLocalTerminal, ensureSessionListeners, localSessionIds, sshWrite],
+  );
+
+  const handleSftpContextAction = useCallback(
+    async (block: SftpBlock, action: SftpContextAction, entry: SftpEntry | null) => {
+      try {
+        if (action === "refresh") {
+          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          return;
+        }
+        if (action === "copy_path") {
+          const text = entry?.path ?? block.path;
+          await navigator.clipboard.writeText(text);
+          toast.success("Caminho copiado.");
+          return;
+        }
+        if (action === "open_terminal") {
+          const terminalPath = entry ? (entry.is_dir ? entry.path : parentDirectory(entry.path)) : block.path;
+          await openPathInTerminal(block.sourceId, terminalPath);
+          return;
+        }
+        if (action === "open_editor") {
+          if (!entry || entry.is_dir) {
+            return;
+          }
+          await openFile(block.sourceId, entry.path);
+          return;
+        }
+        if (action === "download") {
+          if (!entry || entry.is_dir || block.sourceId === "local") {
+            return;
+          }
+          const selected = await open({
+            title: "Selecionar pasta de destino",
+            multiple: false,
+            directory: true,
+          });
+          if (typeof selected !== "string") {
+            return;
+          }
+          const destination = joinPath(selected, baseName(entry.path));
+          await executeTransfer(block.sourceId, entry.path, "local", destination);
+          return;
+        }
+        if (action === "mkdir") {
+          const folderName = window.prompt("Nome da pasta:", "");
+          if (!folderName?.trim()) {
+            return;
+          }
+          const target =
+            block.sourceId === "local"
+              ? joinPath(block.path, folderName.trim())
+              : joinRemotePath(block.path, folderName.trim());
+          await createSourceFolder(block.sourceId, target);
+          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          return;
+        }
+        if (action === "mkfile") {
+          const fileName = window.prompt("Nome do arquivo:", "");
+          if (!fileName?.trim()) {
+            return;
+          }
+          const target =
+            block.sourceId === "local"
+              ? joinPath(block.path, fileName.trim())
+              : joinRemotePath(block.path, fileName.trim());
+          await createSourceFile(block.sourceId, target);
+          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          return;
+        }
+        if (!entry) {
+          return;
+        }
+        if (action === "rename") {
+          const nextPath = window.prompt("Novo caminho:", entry.path);
+          if (!nextPath || nextPath.trim() === entry.path) {
+            return;
+          }
+          await renameSourceEntry(block.sourceId, entry.path, nextPath.trim());
+          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          return;
+        }
+        if (action === "move") {
+          const suggested =
+            block.sourceId === "local"
+              ? joinPath(block.path, baseName(entry.path))
+              : joinRemotePath(block.path, baseName(entry.path));
+          const nextPath = window.prompt("Mover para:", suggested);
+          if (!nextPath || nextPath.trim() === entry.path) {
+            return;
+          }
+          await renameSourceEntry(block.sourceId, entry.path, nextPath.trim());
+          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          return;
+        }
+        if (action === "delete") {
+          const confirmed = window.confirm(`Remover ${entry.name}?`);
+          if (!confirmed) {
+            return;
+          }
+          await deleteSourceEntry(block.sourceId, entry.path, entry.is_dir);
+          await refreshSftpBlock(block.id, block.path, block.sourceId);
+        }
+      } catch (error) {
+        toast.error(getError(error));
+      }
+    },
+    [executeTransfer, openFile, openPathInTerminal, refreshSftpBlock],
   );
 
   const createBlock = useCallback(async () => {
@@ -1043,6 +1257,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                   void openFile(block.sourceId, entry.path);
                 }}
                 onDropTransfer={(payload, targetPath) => void transferBetweenBlocks(payload, block.id, targetPath)}
+                onContextAction={(action, entry) => void handleSftpContextAction(block, action, entry)}
               />
             ) : null}
 
@@ -1349,6 +1564,7 @@ interface SftpBlockViewProps {
   onSelectEntry: (path: string) => void;
   onOpenEntry: (entry: SftpEntry) => void;
   onDropTransfer: (payload: DragPayload, targetPath: string) => void;
+  onContextAction: (action: SftpContextAction, entry: SftpEntry | null) => void;
 }
 
 function SftpBlockView({
@@ -1360,9 +1576,12 @@ function SftpBlockView({
   onSelectEntry,
   onOpenEntry,
   onDropTransfer,
+  onContextAction,
 }: SftpBlockViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(1200);
+  const [contextMenu, setContextMenu] = useState<SftpContextMenuState | null>(null);
   const sortedEntries = useMemo(
     () => sortSftpEntries(block.entries, block.sortKey, block.sortDirection),
     [block.entries, block.sortDirection, block.sortKey],
@@ -1376,6 +1595,30 @@ function SftpBlockView({
   useEffect(() => {
     setPathDraft(block.path);
   }, [block.path]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const handlePointerDown = (event: globalThis.MouseEvent) => {
+      if (!contextMenuRef.current?.contains(event.target as Node)) {
+        setContextMenu(null);
+      }
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -1414,11 +1657,56 @@ function SftpBlockView({
     [block.id, block.sourceId],
   );
 
+  const openContextMenu = useCallback(
+    (event: MouseEvent<HTMLElement>, entry: SftpEntry | null) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (entry) {
+        onSelectEntry(entry.path);
+      }
+      const width = 224;
+      const x = Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8));
+      const y = Math.max(8, Math.min(event.clientY, window.innerHeight - 320));
+      setContextMenu({ x, y, entry });
+    },
+    [onSelectEntry],
+  );
+
+  const menuItems = useMemo(() => {
+    const entry = contextMenu?.entry ?? null;
+    return [
+      { action: "refresh" as const, label: "Atualizar", disabled: false },
+      { action: "copy_path" as const, label: "Copiar caminho", disabled: false },
+      { action: "open_terminal" as const, label: "Abrir no terminal", disabled: false },
+      { action: "open_editor" as const, label: "Abrir no editor", disabled: !entry || entry.is_dir },
+      { action: "rename" as const, label: "Renomear", disabled: !entry },
+      { action: "move" as const, label: "Mover", disabled: !entry },
+      { action: "delete" as const, label: "Deletar", disabled: !entry },
+      { action: "mkdir" as const, label: "Nova pasta", disabled: false },
+      { action: "mkfile" as const, label: "Novo arquivo", disabled: false },
+      {
+        action: "download" as const,
+        label: "Baixar",
+        disabled: !entry || entry.is_dir || block.sourceId === "local",
+      },
+    ];
+  }, [block.sourceId, contextMenu?.entry]);
+
+  const runContextAction = useCallback(
+    (action: SftpContextAction) => {
+      const entry = contextMenu?.entry ?? null;
+      setContextMenu(null);
+      void onContextAction(action, entry);
+    },
+    [contextMenu?.entry, onContextAction],
+  );
+
   return (
     <div
       ref={containerRef}
       className="flex h-full min-h-0 flex-col"
       onMouseDown={onFocus}
+      onContextMenu={(event) => openContextMenu(event, null)}
       onDragOver={(event) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
@@ -1473,7 +1761,7 @@ function SftpBlockView({
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full border-collapse text-xs">
+        <table className="w-full select-none border-collapse text-xs">
           <thead className="sticky top-0 z-10 bg-zinc-950/95">
             <tr className="border-b border-white/10">
               <th className="px-2 py-1.5 text-left">
@@ -1519,10 +1807,14 @@ function SftpBlockView({
                   key={entry.path}
                   className={cn(
                     "border-b border-white/5 text-zinc-200 transition hover:bg-zinc-900/70",
+                    entry.is_dir ? "cursor-default" : "cursor-grab active:cursor-grabbing",
                     selected ? "bg-purple-600/10" : undefined,
                   )}
+                  draggable={!entry.is_dir}
                   onClick={() => onSelectEntry(entry.path)}
                   onDoubleClick={() => onOpenEntry(entry)}
+                  onContextMenu={(event) => openContextMenu(event, entry)}
+                  onDragStart={(event) => handleEntryDragStart(event, entry)}
                   onDragOver={(event) => {
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "copy";
@@ -1542,12 +1834,7 @@ function SftpBlockView({
                   <td className="px-2 py-1.5">
                     <span
                       data-entry-drag="true"
-                      draggable={!entry.is_dir}
-                      className={cn(
-                        "inline-flex items-center gap-2",
-                        entry.is_dir ? undefined : "cursor-grab active:cursor-grabbing",
-                      )}
-                      onDragStart={(event) => handleEntryDragStart(event, entry)}
+                      className="inline-flex items-center gap-2"
                     >
                       {entry.is_dir ? (
                         <Folder className="h-3.5 w-3.5 text-purple-300" />
@@ -1582,6 +1869,35 @@ function SftpBlockView({
           </tbody>
         </table>
       </div>
+      {contextMenu ? (
+        <div
+          className="fixed inset-0 z-50"
+          onMouseDown={() => setContextMenu(null)}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div
+            ref={contextMenuRef}
+            className="absolute z-50 w-56 rounded border border-white/15 bg-zinc-950/95 p-1 shadow-2xl shadow-black/40 backdrop-blur"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            {menuItems.map((item) => (
+              <button
+                key={item.action}
+                type="button"
+                className={cn(
+                  "flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-zinc-100 transition",
+                  item.disabled ? "cursor-not-allowed opacity-40" : "hover:bg-zinc-800",
+                )}
+                disabled={item.disabled}
+                onClick={() => runContextAction(item.action)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

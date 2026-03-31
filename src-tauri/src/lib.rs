@@ -436,6 +436,49 @@ async fn sftp_write(
 }
 
 #[tauri::command]
+async fn sftp_rename(
+    state: State<'_, AppState>,
+    session_id: String,
+    from_path: String,
+    to_path: String,
+) -> Result<(), String> {
+    let mut ssh = state.ssh.lock().await;
+    ssh.sftp_rename(&session_id, &from_path, &to_path)
+        .map_err(app_error)
+}
+
+#[tauri::command]
+async fn sftp_delete(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+    is_dir: bool,
+) -> Result<(), String> {
+    let mut ssh = state.ssh.lock().await;
+    ssh.sftp_delete(&session_id, &path, is_dir).map_err(app_error)
+}
+
+#[tauri::command]
+async fn sftp_mkdir(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let mut ssh = state.ssh.lock().await;
+    ssh.sftp_mkdir(&session_id, &path).map_err(app_error)
+}
+
+#[tauri::command]
+async fn sftp_create_file(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let mut ssh = state.ssh.lock().await;
+    ssh.sftp_create_file(&session_id, &path).map_err(app_error)
+}
+
+#[tauri::command]
 async fn sftp_transfer(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -630,6 +673,53 @@ async fn local_write(path: String, content: String) -> Result<(), String> {
             error
         )
     })
+}
+
+#[tauri::command]
+async fn local_rename(from_path: String, to_path: String) -> Result<(), String> {
+    let from = resolve_local_path(Some(&from_path))?;
+    let to = resolve_local_path(Some(&to_path))?;
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(app_error)?;
+    }
+    fs::rename(&from, &to).map_err(|error| {
+        format!(
+            "Falha ao renomear item local de {} para {}: {}",
+            from.display(),
+            to.display(),
+            error
+        )
+    })
+}
+
+#[tauri::command]
+async fn local_delete(path: String, is_dir: bool) -> Result<(), String> {
+    let target = resolve_local_path(Some(&path))?;
+    if is_dir {
+        fs::remove_dir_all(&target)
+            .map_err(|error| format!("Falha ao remover pasta local {}: {}", target.display(), error))
+    } else {
+        fs::remove_file(&target)
+            .map_err(|error| format!("Falha ao remover arquivo local {}: {}", target.display(), error))
+    }
+}
+
+#[tauri::command]
+async fn local_mkdir(path: String) -> Result<(), String> {
+    let target = resolve_local_path(Some(&path))?;
+    fs::create_dir_all(&target)
+        .map_err(|error| format!("Falha ao criar pasta local {}: {}", target.display(), error))
+}
+
+#[tauri::command]
+async fn local_create_file(path: String) -> Result<(), String> {
+    let target = resolve_local_path(Some(&path))?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(app_error)?;
+    }
+    fs::File::create(&target)
+        .map_err(|error| format!("Falha ao criar arquivo local {}: {}", target.display(), error))
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -1014,11 +1104,19 @@ pub fn run() {
             sftp_list,
             sftp_read,
             sftp_write,
+            sftp_rename,
+            sftp_delete,
+            sftp_mkdir,
+            sftp_create_file,
             sftp_transfer,
             sftp_read_binary_preview,
             local_list,
             local_read,
             local_write,
+            local_rename,
+            local_delete,
+            local_mkdir,
+            local_create_file,
             local_read_binary_preview,
             auth_servers_list,
             auth_server_save,
