@@ -146,6 +146,8 @@ pub struct AppSettings {
     pub modified_files_upload_policy: ModifiedUploadPolicy,
     #[serde(default = "default_known_hosts_path")]
     pub known_hosts_path: String,
+    #[serde(default)]
+    pub selected_auth_server_id: Option<String>,
 }
 
 fn default_external_editor_command() -> String {
@@ -198,6 +200,29 @@ impl Default for AppSettings {
             reconnect_delay_seconds: default_reconnect_delay_seconds(),
             modified_files_upload_policy: ModifiedUploadPolicy::Ask,
             known_hosts_path: default_known_hosts_path(),
+            selected_auth_server_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthServer {
+    pub id: String,
+    pub label: String,
+    pub address: String,
+    pub author: Option<String>,
+    #[serde(default)]
+    pub official: bool,
+}
+
+impl AuthServer {
+    pub fn default_server() -> Self {
+        Self {
+            id: "default".to_string(),
+            label: "TermOpen Official (Cloudflare Worker)".to_string(),
+            address: "https://small-band-2a72.marcosbrendonaz.workers.dev".to_string(),
+            author: Some("https://github.com/MarcosBrendonDePaula".to_string()),
+            official: true,
         }
     }
 }
@@ -230,6 +255,8 @@ pub struct VaultPayload {
     pub settings: AppSettings,
     #[serde(default)]
     pub sync: SyncMetadata,
+    #[serde(default)]
+    pub auth_servers: Vec<AuthServer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -16,7 +16,7 @@ use keyring::Entry;
 use rand::{rngs::OsRng, RngCore};
 
 use crate::models::{
-    AppSettings, ConnectionProfile, KeyMode, KeychainEntry, SyncMetadata, VaultFile,
+    AppSettings, AuthServer, ConnectionProfile, KeyMode, KeychainEntry, SyncMetadata, VaultFile,
     VaultPayload, VaultStatus,
 };
 
@@ -361,6 +361,88 @@ impl VaultManager {
         payload.keychain.retain(|item| item.id != id);
         touch_local_change(payload);
         self.persist()
+    }
+
+    pub fn auth_servers_list(&self) -> Result<Vec<AuthServer>> {
+        let payload = self.payload()?;
+        let mut servers = payload.auth_servers.clone();
+        // Garantir que o default sempre existe
+        if !servers.iter().any(|s| s.id == "default") {
+            servers.insert(0, AuthServer::default_server());
+        }
+        servers.sort_by(|a, b| a.label.cmp(&b.label));
+        Ok(servers)
+    }
+
+    pub fn merge_remote_servers(&mut self, remote: Vec<AuthServer>) -> Result<()> {
+        self.assert_unlocked()?;
+        let payload = self.payload_mut()?;
+        for server in remote {
+            if !payload.auth_servers.iter().any(|s| s.id == server.id) {
+                payload.auth_servers.push(server);
+            }
+        }
+        self.persist()
+    }
+
+    pub fn auth_server_save(&mut self, mut server: AuthServer) -> Result<AuthServer> {
+        self.assert_unlocked()?;
+
+        if server.id.trim().is_empty() {
+            server.id = uuid::Uuid::new_v4().to_string();
+        }
+
+        server.label = server.label.trim().to_string();
+        server.address = server.address.trim().trim_end_matches('/').to_string();
+
+        if server.label.is_empty() {
+            return Err(anyhow!("Label e obrigatorio"));
+        }
+        if server.address.is_empty() {
+            return Err(anyhow!("Endereco e obrigatorio"));
+        }
+        if !server.address.starts_with("http://") && !server.address.starts_with("https://") {
+            return Err(anyhow!("Endereco deve comecar com http:// ou https://"));
+        }
+
+        let payload = self.payload_mut()?;
+        payload.auth_servers.retain(|s| s.id != server.id);
+        payload.auth_servers.push(server.clone());
+        payload.auth_servers.sort_by(|a, b| a.label.cmp(&b.label));
+        touch_local_change(payload);
+        self.persist()?;
+
+        Ok(server)
+    }
+
+    pub fn auth_server_delete(&mut self, id: &str) -> Result<()> {
+        self.assert_unlocked()?;
+        if id == "default" {
+            return Err(anyhow!("Nao e possivel remover o servidor padrao"));
+        }
+        let payload = self.payload_mut()?;
+        payload.auth_servers.retain(|s| s.id != id);
+        if payload.settings.selected_auth_server_id.as_deref() == Some(id) {
+            payload.settings.selected_auth_server_id = None;
+        }
+        touch_local_change(payload);
+        self.persist()
+    }
+
+    pub fn selected_auth_server(&self) -> Result<AuthServer> {
+        let payload = self.payload()?;
+        let selected_id = payload
+            .settings
+            .selected_auth_server_id
+            .as_deref()
+            .unwrap_or("default");
+        payload
+            .auth_servers
+            .iter()
+            .find(|s| s.id == selected_id)
+            .cloned()
+            .or_else(|| Some(AuthServer::default_server()))
+            .ok_or_else(|| anyhow!("Servidor de auth nao encontrado"))
     }
 
     pub fn settings_get(&self) -> Result<AppSettings> {

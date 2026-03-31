@@ -1,0 +1,16 @@
+[
+  {
+    "id": "default",
+    "label": "TermOpen Official (Cloudflare Worker)",
+    "address": "https://small-band-2a72.marcosbrendonaz.workers.dev",
+    "author": "https://github.com/MarcosBrendonDePaula",
+    "official": true
+  },
+  {
+    "id": "dead-server",
+    "label": "Servidor Inativo (Exemplo)",
+    "address": "https://termopen-dead.example.workers.dev",
+    "author": "https://github.com/nobody",
+    "official": false
+  }
+]

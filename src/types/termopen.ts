@@ -4,6 +4,14 @@ export type ConnectionProtocol = "ssh" | "sftp";
 export type EditorPreference = "internal" | "vscode" | "system";
 export type ModifiedUploadPolicy = "auto" | "ask" | "manual";
 
+export interface AuthServer {
+  id: string;
+  label: string;
+  address: string;
+  author?: string | null;
+  official: boolean;
+}
+
 export interface VaultStatus {
   initialized: boolean;
   locked: boolean;
@@ -45,6 +53,7 @@ export interface AppSettings {
   reconnect_delay_seconds: number;
   modified_files_upload_policy: ModifiedUploadPolicy;
   known_hosts_path: string;
+  selected_auth_server_id?: string | null;
 }
 
 export interface SshSessionInfo {

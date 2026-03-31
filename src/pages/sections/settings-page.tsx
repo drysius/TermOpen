@@ -1,13 +1,13 @@
-import { Cloud, CloudDownload, CloudUpload, Lock, Save } from "lucide-react";
+import { Cloud, CloudDownload, CloudUpload, ExternalLink, Lock, Save } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { open } from "@tauri-apps/plugin-dialog";
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useAppStore } from "@/store/app-store";
-import type { AppSettings, ModifiedUploadPolicy } from "@/types/termopen";
+import { api } from "@/lib/tauri";
+import type { AppSettings, AuthServer, ModifiedUploadPolicy } from "@/types/termopen";
 
 interface SettingsFormValues extends AppSettings {}
 
@@ -48,6 +48,14 @@ export function SettingsPage() {
   const changeMasterPassword = useAppStore((state) => state.changeMasterPassword);
 
   const [showUploadPolicyModal, setShowUploadPolicyModal] = useState(false);
+  const [authServers, setAuthServers] = useState<AuthServer[]>([]);
+  const [loggedUser, setLoggedUser] = useState<{ name: string; email: string } | null>(null);
+  const [driveTab, setDriveTab] = useState<"account" | "config">("account");
+  const [serverPings, setServerPings] = useState<Record<string, number | null>>({});
+  const [serverFilter, setServerFilter] = useState("");
+  const [serverFilterStatus, setServerFilterStatus] = useState<"all" | "online" | "offline">("all");
+  const [serverPage, setServerPage] = useState(0);
+  const SERVERS_PER_PAGE = 5;
 
   const settingsForm = useForm<SettingsFormValues>({
     defaultValues: settings,
@@ -70,6 +78,42 @@ export function SettingsPage() {
       setShowUploadPolicyModal(true);
     }
   }, []);
+
+  useEffect(() => {
+    void api.authServersList().then(setAuthServers);
+    void api.syncLoggedUser().then((data) => {
+      if (data) setLoggedUser({ name: data[0], email: data[1] });
+    });
+  }, [syncState]);
+
+  useEffect(() => {
+    if (driveTab !== "config") return;
+
+    // Buscar lista atualizada do GitHub, fallback pra lista local
+    void api.authServersFetchRemote()
+      .then(setAuthServers)
+      .catch(() => void api.authServersList().then(setAuthServers).catch(() => setAuthServers([])));
+  }, [driveTab]);
+
+  useEffect(() => {
+    if (driveTab !== "config" || authServers.length === 0) return;
+
+    setServerPings({});
+    for (const server of authServers) {
+      const start = performance.now();
+      fetch(server.address, { mode: "cors" })
+        .then(() => {
+          setServerPings((prev) => ({ ...prev, [server.id]: Math.round(performance.now() - start) }));
+        })
+        .catch(() => {
+          setServerPings((prev) => ({ ...prev, [server.id]: null }));
+        });
+    }
+  }, [authServers]);
+
+  function handleSelectServer(id: string) {
+    void saveSettings({ ...settings, selected_auth_server_id: id });
+  }
 
   const watchedNewPassword = passwordForm.watch("newPassword");
 
@@ -228,28 +272,214 @@ export function SettingsPage() {
         <section className="mt-5">
           <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Google Drive</h3>
           <div className="border-b border-white/10 py-3">
-            <p className="text-sm text-zinc-300">{syncState.message}</p>
-            <p className="mt-1 text-xs text-zinc-500">
-              Escopo usado: <code>drive.file</code>. Configure OAuth Client do tipo Desktop App no Google Cloud e
-              exporte <code>TERMOPEN_GOOGLE_CLIENT_ID</code>.
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button type="button" onClick={() => void runSync("login")}>
-                <Cloud className="mr-2 h-4 w-4" /> Conectar
-              </Button>
-              <Button type="button" variant="outline" onClick={() => void runSync("push")}>
-                <CloudUpload className="mr-2 h-4 w-4" /> Push
-              </Button>
-              <Button type="button" variant="outline" onClick={() => void runSync("pull")}>
-                <CloudDownload className="mr-2 h-4 w-4" /> Pull
-              </Button>
+            <div className="mb-3 flex gap-1 rounded-md bg-zinc-900/50 p-0.5">
+              <button
+                type="button"
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                  driveTab === "account"
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+                onClick={() => setDriveTab("account")}
+              >
+                Conta
+              </button>
+              <button
+                type="button"
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                  driveTab === "config"
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+                onClick={() => setDriveTab("config")}
+              >
+                Servidor
+              </button>
             </div>
-            <div className="mt-3 space-y-1 text-xs text-zinc-500">
-              <p>Como configurar:</p>
-              <p>1. Crie OAuth Client (Desktop App) no Google Cloud.</p>
-              <p>2. Ative Google Drive API.</p>
-              <p>3. Defina TERMOPEN_GOOGLE_CLIENT_ID (e secret se seu projeto exigir).</p>
-            </div>
+
+            {driveTab === "account" ? (
+              <div>
+                {loggedUser ? (
+                  <div className="mb-2 flex items-center gap-2">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20 text-sm font-semibold text-emerald-400">
+                      {loggedUser.name?.[0]?.toUpperCase() || loggedUser.email?.[0]?.toUpperCase() || "?"}
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-zinc-100">{loggedUser.name || "Usuario"}</p>
+                      <p className="text-xs text-zinc-500">{loggedUser.email}</p>
+                    </div>
+                    <span className="ml-auto rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-400">
+                      Conectado
+                    </span>
+                  </div>
+                ) : null}
+                <p className={`text-sm ${syncState.status === "error" ? "text-red-400" : syncState.status === "ok" ? "text-emerald-400" : "text-zinc-300"}`}>
+                  {syncState.message}
+                </p>
+                {syncState.last_sync_at ? (
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Ultimo sync: {new Date(syncState.last_sync_at).toLocaleString("pt-BR")}
+                  </p>
+                ) : null}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button type="button" onClick={() => void runSync("login")}>
+                    <Cloud className="mr-2 h-4 w-4" /> {loggedUser ? "Reconectar" : "Conectar"}
+                  </Button>
+                  <Button type="button" variant="outline" onClick={() => void runSync("push")} disabled={!loggedUser}>
+                    <CloudUpload className="mr-2 h-4 w-4" /> Push
+                  </Button>
+                  <Button type="button" variant="outline" onClick={() => void runSync("pull")} disabled={!loggedUser}>
+                    <CloudDownload className="mr-2 h-4 w-4" /> Pull
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div className="mb-2 flex items-center gap-2">
+                  <Input
+                    placeholder="Buscar servidor..."
+                    className="h-8 flex-1 text-xs"
+                    value={serverFilter}
+                    onChange={(e) => { setServerFilter(e.target.value); setServerPage(0); }}
+                  />
+                  <select
+                    className="h-8 rounded-md border border-white/15 bg-zinc-900 px-2 text-xs text-zinc-100"
+                    value={serverFilterStatus}
+                    onChange={(e) => { setServerFilterStatus(e.target.value as "all" | "online" | "offline"); setServerPage(0); }}
+                  >
+                    <option value="all">Todos</option>
+                    <option value="online">Online</option>
+                    <option value="offline">Offline</option>
+                  </select>
+                </div>
+
+                {(() => {
+                  const q = serverFilter.toLowerCase();
+                  const filtered = authServers
+                    .filter((s) => {
+                      const matchesText = !q || s.label.toLowerCase().includes(q) || s.address.toLowerCase().includes(q) || (s.author?.toLowerCase().includes(q) ?? false);
+                      if (!matchesText) return false;
+                      if (serverFilterStatus === "all") return true;
+                      const ping = serverPings[s.id];
+                      if (serverFilterStatus === "online") return ping !== undefined && ping !== null;
+                      return ping === null;
+                    })
+                    .sort((a, b) => {
+                      const pa = serverPings[a.id];
+                      const pb = serverPings[b.id];
+                      const aOnline = pa !== undefined && pa !== null ? 0 : pa === null ? 2 : 1;
+                      const bOnline = pb !== undefined && pb !== null ? 0 : pb === null ? 2 : 1;
+                      if (aOnline !== bOnline) return aOnline - bOnline;
+                      if (aOnline === 0 && bOnline === 0) return pa! - pb!;
+                      return 0;
+                    });
+                  const totalPages = Math.max(1, Math.ceil(filtered.length / SERVERS_PER_PAGE));
+                  const page = Math.min(serverPage, totalPages - 1);
+                  const paged = filtered.slice(page * SERVERS_PER_PAGE, (page + 1) * SERVERS_PER_PAGE);
+
+                  return (
+                    <>
+                      <div className="space-y-1">
+                        {paged.map((server) => {
+                          const isSelected = (settings.selected_auth_server_id || "default") === server.id;
+                          const ping = serverPings[server.id];
+                          return (
+                            <div
+                              key={server.id}
+                              className={`flex items-center justify-between rounded-md border px-3 py-2 transition-colors cursor-pointer ${
+                                isSelected
+                                  ? "border-emerald-500/50 bg-emerald-500/10"
+                                  : "border-white/10 bg-zinc-900/30 hover:bg-zinc-900/60"
+                              }`}
+                              onClick={() => handleSelectServer(server.id)}
+                              onKeyDown={() => {}}
+                              role="button"
+                              tabIndex={0}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-zinc-100">
+                                  {server.label}
+                                  {server.official ? (
+                                    <span className="ml-1.5 inline-block rounded bg-blue-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold text-blue-400">
+                                      Oficial
+                                    </span>
+                                  ) : null}
+                                </p>
+                                <p className="truncate text-xs text-zinc-500">{server.address}</p>
+                                {server.author ? (
+                                  <a
+                                    href={server.author}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="mt-0.5 inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <ExternalLink className="h-3 w-3" /> {server.author}
+                                  </a>
+                                ) : null}
+                              </div>
+                              <div className="ml-2 flex items-center gap-2">
+                                {server.id in serverPings ? (
+                                  ping !== null ? (
+                                    <span className={`text-xs font-mono ${
+                                      ping! < 200 ? "text-emerald-400" :
+                                      ping! < 500 ? "text-yellow-400" : "text-orange-400"
+                                    }`}>
+                                      {ping}ms
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs font-mono text-red-400">offline</span>
+                                  )
+                                ) : (
+                                  <span className="text-xs text-zinc-600">...</span>
+                                )}
+                                {isSelected ? (
+                                  <span className="text-xs font-medium text-emerald-400">Ativo</span>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {paged.length === 0 ? (
+                          <p className="py-4 text-center text-xs text-zinc-500">Nenhum servidor encontrado.</p>
+                        ) : null}
+                      </div>
+
+                      {totalPages > 1 ? (
+                        <div className="mt-2 flex items-center justify-between">
+                          <p className="text-xs text-zinc-500">{filtered.length} servidor{filtered.length !== 1 ? "es" : ""}</p>
+                          <div className="flex gap-1">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-6 px-2 text-xs"
+                              disabled={page === 0}
+                              onClick={() => setServerPage(page - 1)}
+                            >
+                              Anterior
+                            </Button>
+                            <span className="flex items-center px-2 text-xs text-zinc-500">
+                              {page + 1}/{totalPages}
+                            </span>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-6 px-2 text-xs"
+                              disabled={page >= totalPages - 1}
+                              onClick={() => setServerPage(page + 1)}
+                            >
+                              Proximo
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  );
+                })()}
+              </div>
+            )}
           </div>
         </section>
 

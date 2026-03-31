@@ -14,7 +14,6 @@ const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
 const KEYRING_USER_EMAIL: &str = "google-user-email";
 const KEYRING_USER_NAME: &str = "google-user-name";
 const DRIVE_FILE_NAME: &str = "termopen-vault.enc.json";
-const WORKER_BASE_URL: &str = "https://small-band-2a72.marcosbrendonaz.workers.dev";
 
 #[derive(Default)]
 pub struct SyncManager {
@@ -28,7 +27,7 @@ impl SyncManager {
 
     /// Abre o browser para login via Google OAuth.
     /// Levanta um servidor HTTP temporário em localhost para receber o callback.
-    pub async fn google_login(&mut self, app: &tauri::AppHandle) -> Result<SyncState> {
+    pub async fn google_login(&mut self, app: &tauri::AppHandle, server_address: &str) -> Result<SyncState> {
         let pending = SyncState {
             connected: false,
             status: "running".to_string(),
@@ -48,7 +47,7 @@ impl SyncManager {
         // Abrir browser com a URL do worker + redirect local
         let login_url = format!(
             "{}/auth/google?local_callback={}",
-            WORKER_BASE_URL,
+            server_address,
             urlencoding::encode(&callback_url)
         );
         open::that_detached(&login_url).context("Falha ao abrir navegador para login")?;
@@ -113,8 +112,11 @@ impl SyncManager {
         &mut self,
         app: &tauri::AppHandle,
         vault: &mut VaultManager,
+        server_address: &str,
+        fallback_addresses: &[String],
     ) -> Result<SyncState> {
-        let access_token = access_token_from_refresh().await?;
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
         let content = vault.encrypted_file_bytes()?;
 
@@ -148,8 +150,11 @@ impl SyncManager {
         &mut self,
         app: &tauri::AppHandle,
         vault: &mut VaultManager,
+        server_address: &str,
+        fallback_addresses: &[String],
     ) -> Result<SyncState> {
-        let access_token = access_token_from_refresh().await?;
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
 
         let Some(remote_file) = lookup_drive_file(&client, &access_token).await? else {
@@ -300,14 +305,45 @@ fn is_conflict(metadata: &crate::models::SyncMetadata, remote_modified: Option<&
     metadata.last_local_change > last_sync
 }
 
-// ─── Google tokens via worker ───────────────────────────────────────
+// ─── Google tokens via worker (com fallback) ───────────────────────
 
-async fn access_token_from_refresh() -> Result<String> {
+/// Tenta renovar o access_token usando o servidor primário.
+/// Se falhar por erro de rede (servidor fora do ar), tenta os fallbacks.
+/// Nunca altera o servidor selecionado do usuário.
+async fn access_token_from_refresh_with_fallback(
+    primary: &str,
+    fallbacks: &[String],
+) -> Result<String> {
+    match try_refresh_token(primary).await {
+        Ok(token) => return Ok(token),
+        Err(e) => {
+            // Se é erro de auth (401), não adianta tentar outro servidor
+            if e.to_string().contains("401") || e.to_string().contains("Execute login") {
+                return Err(e);
+            }
+            // Erro de rede — tentar fallbacks
+            for fallback in fallbacks {
+                if fallback == primary {
+                    continue;
+                }
+                if let Ok(token) = try_refresh_token(fallback).await {
+                    return Ok(token);
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn try_refresh_token(server_address: &str) -> Result<String> {
     let refresh_token = load_refresh_token()?;
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     let response = client
-        .post(format!("{}/auth/refresh-token", WORKER_BASE_URL))
+        .post(format!("{}/auth/refresh-token", server_address))
         .json(&serde_json::json!({ "refresh_token": refresh_token }))
         .send()
         .await
