@@ -1,8 +1,9 @@
-import { ChevronDown, Cloud, CloudDownload, CloudUpload, ExternalLink, Lock, Save } from "lucide-react";
+import { ChevronDown, Cloud, CloudDownload, CloudUpload, ExternalLink, Lock, Save, Server } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
+import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useAppStore } from "@/store/app-store";
@@ -120,6 +121,7 @@ export function SettingsPage() {
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncAction, setSyncAction] = useState<"login" | "push" | "pull" | null>(null);
   const [serverDraft, setServerDraft] = useState({ id: "", label: "", address: "", author: "" });
+  const [showLocalServerModal, setShowLocalServerModal] = useState(false);
   const SERVERS_PER_PAGE = 5;
 
   const settingsForm = useForm<SettingsFormValues>({
@@ -223,6 +225,7 @@ export function SettingsPage() {
     const next = await api.authServersList();
     setAuthServers(next);
     setServerDraft({ id: "", label: "", address: "", author: "" });
+    setShowLocalServerModal(false);
   }
 
   async function handleDeleteServer(id: string) {
@@ -554,49 +557,21 @@ export function SettingsPage() {
               </div>
             ) : (
               <div>
-                <div className="mb-3 rounded-md border border-white/10 bg-zinc-900/30 p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                    Local Server
-                  </p>
-                  <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                    <Input
-                      placeholder="Server label"
-                      value={serverDraft.label}
-                      onChange={(event) =>
-                        setServerDraft((current) => ({ ...current, label: event.target.value }))
-                      }
-                    />
-                    <Input
-                      placeholder="https://my-worker.example.com"
-                      value={serverDraft.address}
-                      onChange={(event) =>
-                        setServerDraft((current) => ({ ...current, address: event.target.value }))
-                      }
-                    />
-                    <Input
-                      className="md:col-span-2"
-                      placeholder="Author URL (optional)"
-                      value={serverDraft.author}
-                      onChange={(event) =>
-                        setServerDraft((current) => ({ ...current, author: event.target.value }))
-                      }
-                    />
+                <div className="mb-3 flex items-center justify-between rounded-md border border-white/10 bg-zinc-900/30 px-3 py-2">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Local Server</p>
+                    <p className="text-xs text-zinc-500">Adicione ou edite servidores locais em uma modal dedicada.</p>
                   </div>
-                  <div className="mt-2 flex gap-2">
-                    <Button type="button" size="sm" onClick={() => void handleSaveServer()}>
-                      {serverDraft.id ? "Update Server" : "Add Server"}
-                    </Button>
-                    {serverDraft.id ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setServerDraft({ id: "", label: "", address: "", author: "" })}
-                      >
-                        Cancel Edit
-                      </Button>
-                    ) : null}
-                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      setServerDraft({ id: "", label: "", address: "", author: "" });
+                      setShowLocalServerModal(true);
+                    }}
+                  >
+                    <Server className="mr-2 h-4 w-4" /> Novo Local Server
+                  </Button>
                 </div>
 
                 <div className="mb-2 flex items-center gap-2">
@@ -716,6 +691,7 @@ export function SettingsPage() {
                                           address: server.address,
                                           author: server.author || "",
                                         });
+                                        setShowLocalServerModal(true);
                                       }}
                                     >
                                       Edit
@@ -815,6 +791,62 @@ export function SettingsPage() {
           </Button>
         </div>
       </form>
+
+      <Dialog
+        open={showLocalServerModal}
+        title={serverDraft.id ? "Editar Local Server" : "Novo Local Server"}
+        description="Configure label, endereco e autor para o servidor local."
+        onClose={() => {
+          setShowLocalServerModal(false);
+          setServerDraft({ id: "", label: "", address: "", author: "" });
+        }}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setShowLocalServerModal(false);
+                setServerDraft({ id: "", label: "", address: "", author: "" });
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleSaveServer()}
+              disabled={!serverDraft.label.trim() || !serverDraft.address.trim()}
+            >
+              {serverDraft.id ? "Salvar alteracoes" : "Adicionar servidor"}
+            </Button>
+          </div>
+        }
+      >
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <Input
+            placeholder="Server label"
+            value={serverDraft.label}
+            onChange={(event) =>
+              setServerDraft((current) => ({ ...current, label: event.target.value }))
+            }
+          />
+          <Input
+            placeholder="https://my-worker.example.com"
+            value={serverDraft.address}
+            onChange={(event) =>
+              setServerDraft((current) => ({ ...current, address: event.target.value }))
+            }
+          />
+          <Input
+            className="md:col-span-2"
+            placeholder="Author URL (optional)"
+            value={serverDraft.author}
+            onChange={(event) =>
+              setServerDraft((current) => ({ ...current, author: event.target.value }))
+            }
+          />
+        </div>
+      </Dialog>
 
       {showUploadPolicyModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
