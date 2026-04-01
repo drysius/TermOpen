@@ -313,15 +313,16 @@ export interface AppDictionary {
     title: string;
     description: string;
     projectSection: string;
+    projectVisionSection: string;
+    projectVisionP1: string;
+    projectVisionP2: string;
+    projectVisionP3: string;
     repoLabel: string;
     versionLabel: string;
     updatesInfo: string;
     stackSection: string;
     newPackagesSection: string;
     newPackagesDescription: string;
-    syncSection: string;
-    syncDescription: string;
-    syncConfig: string;
   };
   hostDrawer: {
     titleEdit: string;

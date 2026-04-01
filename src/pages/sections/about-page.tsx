@@ -66,12 +66,15 @@ export function AboutPage() {
             ))}
           </ul>
         </article>
+      </section>
 
-        <article className="rounded-xl border border-white/10 bg-zinc-950/70 p-4 xl:col-span-1">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.syncSection}</h3>
-          <p className="mt-2 text-sm text-zinc-300">{t.about.syncDescription}</p>
-          <p className="mt-2 text-sm text-zinc-400">{t.about.syncConfig}</p>
-        </article>
+      <section className="mt-4 rounded-xl border border-white/10 bg-zinc-950/70 p-4">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.projectVisionSection}</h3>
+        <div className="mt-2 space-y-2 text-sm text-zinc-300">
+          <p>{t.about.projectVisionP1}</p>
+          <p>{t.about.projectVisionP2}</p>
+          <p>{t.about.projectVisionP3}</p>
+        </div>
       </section>
 
       <section className="mt-4 rounded-xl border border-white/10 bg-zinc-950/70 p-4">
