@@ -42,19 +42,21 @@ export const home: AppDictionary["home"] = {
   },
   connections: {
     title: "Connections",
-    subtitle: "Manage SSH/SFTP endpoints in one panel. Current total: {count}.",
+    subtitle: "Manage SSH/SFTP/RDP endpoints in one panel. Current total: {count}.",
     zeroLabel: "Zero connections",
     newConnection: "New Connection",
     createFirst: "Create first connection",
     emptyTitle: "No connections registered",
     emptyDescription:
-      "Add a connection to open SSH terminals, browse SFTP files and start protocol-aware workspaces.",
+      "Add a connection to open SSH terminals, browse SFTP files, access RDP and start protocol-aware workspaces.",
     openSsh: "Open SSH",
     openSftp: "Open SFTP",
+    openRdp: "Open RDP",
     quickActions: "Quick actions",
     cardHint: "Click the card to open its primary protocol.",
     protocolSsh: "SSH",
     protocolSftp: "SFTP",
+    protocolRdp: "RDP",
     protocolBoth: "SSH + SFTP",
   },
 };

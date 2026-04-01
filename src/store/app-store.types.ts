@@ -92,6 +92,7 @@ export interface AppActions {
   clearSessionListeners: (sessionId?: string) => void;
   getOrCreateSession: (profile: ConnectionProfile) => Promise<SshSessionInfo>;
   openSsh: (profile: ConnectionProfile) => Promise<void>;
+  openRdp: (profile: ConnectionProfile) => Promise<void>;
   sshWrite: (sessionId: string, data: string) => Promise<void>;
   disconnectSession: (sessionId: string) => Promise<void>;
 

@@ -144,10 +144,12 @@ export interface AppDictionary {
       emptyDescription: string;
       openSsh: string;
       openSftp: string;
+      openRdp: string;
       quickActions: string;
       cardHint: string;
       protocolSsh: string;
       protocolSftp: string;
+      protocolRdp: string;
       protocolBoth: string;
     };
   };
@@ -348,6 +350,7 @@ export interface AppDictionary {
       placeholder: string;
       sshDescription: string;
       sftpDescription: string;
+      rdpDescription: string;
     };
     password: { label: string; description: string; placeholder: string };
     keychainField: { label: string; description: string; none: string };
@@ -376,6 +379,25 @@ export interface AppDictionary {
     closeMessage: string;
     closing: string;
     closeConfirm: string;
+    rdp: {
+      title: string;
+      description: string;
+      noProfiles: string;
+      selectProfile: string;
+      profileLabel: string;
+      connecting: string;
+      ready: string;
+      authRequired: string;
+      error: string;
+      captureNow: string;
+      retry: string;
+      lastFrame: string;
+      resolution: string;
+      autoRefresh: string;
+      waitingFrame: string;
+      passwordPlaceholder: string;
+      applyPassword: string;
+    };
   };
   editor: {
     save: string;

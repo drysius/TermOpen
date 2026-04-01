@@ -42,19 +42,21 @@ export const home: AppDictionary["home"] = {
   },
   connections: {
     title: "Connections",
-    subtitle: "Gerencie conexoes SSH/SFTP em um unico painel. Total atual: {count}.",
+    subtitle: "Gerencie conexoes SSH/SFTP/RDP em um unico painel. Total atual: {count}.",
     zeroLabel: "Zero conexoes",
     newConnection: "Nova Connection",
     createFirst: "Criar primeira connection",
     emptyTitle: "Nenhuma connection cadastrada",
     emptyDescription:
-      "Adicione uma connection para abrir terminal SSH, explorar arquivos SFTP e criar workspaces por protocolo.",
+      "Adicione uma connection para abrir terminal SSH, explorar arquivos SFTP, acessar RDP e criar workspaces por protocolo.",
     openSsh: "Abrir SSH",
     openSftp: "Abrir SFTP",
+    openRdp: "Abrir RDP",
     quickActions: "Acoes rapidas",
     cardHint: "Clique no card para abrir o protocolo principal.",
     protocolSsh: "SSH",
     protocolSftp: "SFTP",
+    protocolRdp: "RDP",
     protocolBoth: "SSH + SFTP",
   },
 };

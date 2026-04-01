@@ -9,6 +9,7 @@ import type {
   KeychainEntry,
   RecoveryProbeResult,
   ReleaseCheckResult,
+  RdpCaptureResult,
   SftpEntry,
   SyncLoggedUser,
   SyncConflictDecision,
@@ -58,6 +59,24 @@ export const api = {
     invoke<SshConnectResult>("ssh_connect_ex", {
       profileId,
       acceptUnknownHost: options?.acceptUnknownHost,
+      passwordOverride: options?.passwordOverride,
+      keychainIdOverride: options?.keychainIdOverride,
+      saveAuthChoice: options?.saveAuthChoice,
+    }),
+  rdpCapture: (
+    profileId: string,
+    options?: {
+      width?: number;
+      height?: number;
+      passwordOverride?: string | null;
+      keychainIdOverride?: string | null;
+      saveAuthChoice?: boolean;
+    },
+  ) =>
+    invoke<RdpCaptureResult>("rdp_capture", {
+      profileId,
+      width: options?.width,
+      height: options?.height,
       passwordOverride: options?.passwordOverride,
       keychainIdOverride: options?.keychainIdOverride,
       saveAuthChoice: options?.saveAuthChoice,

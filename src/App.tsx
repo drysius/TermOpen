@@ -19,6 +19,7 @@ import { KeychainPage } from "@/pages/sections/keychain-page";
 import { KnownHostsPage } from "@/pages/sections/known-hosts-page";
 import { SettingsPage } from "@/pages/sections/settings-page";
 import { EditorTabPage } from "@/pages/tabs/editor-tab-page";
+import { RdpWorkspaceTabPage } from "@/pages/tabs/rdp-workspace-tab-page";
 import { SftpWorkspaceTabPage } from "@/pages/tabs/sftp-workspace-tab-page";
 import { VaultGatePage } from "@/pages/vault-gate-page";
 import { useAppStore } from "@/store/app-store";
@@ -75,7 +76,7 @@ function formatSettingValue(value: unknown): string {
   return String(value);
 }
 
-type DeepLinkProtocol = "ssh" | "sftp";
+type DeepLinkProtocol = "ssh" | "sftp" | "rdp";
 
 interface ParsedConnectionDeepLink {
   protocol: DeepLinkProtocol;
@@ -97,7 +98,7 @@ function normalizeDeepLinkInput(raw: string): string {
 
 function parseDirectConnectionUrl(url: URL): ParsedConnectionDeepLink | null {
   const protocol = url.protocol.replace(":", "").toLowerCase();
-  if (protocol !== "ssh" && protocol !== "sftp") {
+  if (protocol !== "ssh" && protocol !== "sftp" && protocol !== "rdp") {
     return null;
   }
 
@@ -106,7 +107,7 @@ function parseDirectConnectionUrl(url: URL): ParsedConnectionDeepLink | null {
     return null;
   }
 
-  const parsedPort = url.port ? Number(url.port) : 22;
+  const parsedPort = url.port ? Number(url.port) : protocol === "rdp" ? 3389 : 22;
   if (!Number.isFinite(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
     return null;
   }
@@ -157,7 +158,7 @@ function parseConnectionDeepLink(raw: string): ParsedConnectionDeepLink | null {
   }
 
   const hostBasedProtocol = parsed.hostname.toLowerCase();
-  if (hostBasedProtocol === "ssh" || hostBasedProtocol === "sftp") {
+  if (hostBasedProtocol === "ssh" || hostBasedProtocol === "sftp" || hostBasedProtocol === "rdp") {
     const rebuilt = `${hostBasedProtocol}://${parsed.pathname.replace(/^\/+/, "")}${parsed.search}`;
     return parseConnectionDeepLink(rebuilt);
   }
@@ -209,6 +210,7 @@ function App() {
   const settingsUnsavedDraft = useAppStore((state) => state.settingsUnsavedDraft);
   const openSsh = useAppStore((state) => state.openSsh);
   const openSftpWorkspace = useAppStore((state) => state.openSftpWorkspace);
+  const openRdp = useAppStore((state) => state.openRdp);
   const openHostDrawer = useAppStore((state) => state.openHostDrawer);
 
   const bootstrap = useAppStore((state) => state.bootstrap);
@@ -412,7 +414,12 @@ function App() {
       return false;
     }
 
-    const protocolList = parsed.protocol === "ssh" ? (["ssh"] as const) : (["sftp"] as const);
+    const protocolList =
+      parsed.protocol === "ssh"
+        ? (["ssh"] as const)
+        : parsed.protocol === "sftp"
+          ? (["sftp"] as const)
+          : (["rdp"] as const);
     const fallbackName = `${parsed.protocol.toUpperCase()} ${parsed.host}`;
 
     if (!parsed.username) {
@@ -428,7 +435,7 @@ function App() {
           keychain_id: null,
           remote_path: parsed.remotePath,
           protocols: [...protocolList],
-          kind: parsed.protocol === "ssh" ? "host" : "sftp",
+          kind: parsed.protocol === "ssh" ? "host" : parsed.protocol === "sftp" ? "sftp" : "rdp",
         },
         parsed.protocol,
       );
@@ -463,7 +470,7 @@ function App() {
         keychain_id: null,
         remote_path: parsed.remotePath,
         protocols: [...protocolList],
-        kind: parsed.protocol === "ssh" ? "host" : "sftp",
+        kind: parsed.protocol === "ssh" ? "host" : parsed.protocol === "sftp" ? "sftp" : "rdp",
       });
       profile = created;
       useAppStore.setState((current) => ({
@@ -475,8 +482,10 @@ function App() {
 
     if (parsed.protocol === "ssh") {
       await openSsh(profile);
-    } else {
+    } else if (parsed.protocol === "sftp") {
       await openSftpWorkspace(profile);
+    } else {
+      await openRdp(profile);
     }
     return true;
   }
@@ -671,7 +680,7 @@ function App() {
         setPendingDeepLinks((current) => current.slice(1));
         deepLinkProcessingRef.current = false;
       });
-  }, [openHostDrawer, openSftpWorkspace, openSsh, pendingDeepLinks, vaultStatus]);
+  }, [openHostDrawer, openRdp, openSftpWorkspace, openSsh, pendingDeepLinks, vaultStatus]);
 
   async function handleResolveStartupConflicts() {
     const decisions: SyncConflictDecision[] = startupConflicts.map((item) => ({
@@ -843,12 +852,20 @@ function App() {
                 />
               ) : null}
               {tab.type === "workspace" ? (
-                <SftpWorkspaceTabPage
-                  key={`workspace:${tab.id}`}
-                  tabId={tab.id}
-                  initialBlock={tab.initialBlock}
-                  initialSourceId={tab.initialSourceId ?? tab.sessionId ?? undefined}
-                />
+                tab.initialBlock === "rdp" ? (
+                  <RdpWorkspaceTabPage
+                    key={`rdp-workspace:${tab.id}`}
+                    tabId={tab.id}
+                    initialSourceId={tab.initialSourceId ?? tab.profileId ?? undefined}
+                  />
+                ) : (
+                  <SftpWorkspaceTabPage
+                    key={`workspace:${tab.id}`}
+                    tabId={tab.id}
+                    initialBlock={tab.initialBlock}
+                    initialSourceId={tab.initialSourceId ?? tab.sessionId ?? undefined}
+                  />
+                )
               ) : null}
             </div>
           ))}

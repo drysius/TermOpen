@@ -135,7 +135,8 @@ export function createConnectionActions(
           }
         : {
             ...BLANK_PROFILE,
-            protocols: protocol === "ssh" ? ["ssh"] : ["sftp"],
+            protocols: protocol === "ssh" ? ["ssh"] : protocol === "sftp" ? ["sftp"] : ["rdp"],
+            port: protocol === "rdp" ? 3389 : BLANK_PROFILE.port,
             remote_path: protocol === "sftp" ? "/" : BLANK_PROFILE.remote_path,
           };
       set({

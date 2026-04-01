@@ -1,4 +1,4 @@
-import { FolderOpen, MoreVertical, Plus, Server, TerminalSquare } from "lucide-react";
+import { FolderOpen, Monitor, MoreVertical, Plus, Server, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -10,19 +10,40 @@ import { useAppStore } from "@/store/app-store";
 import type { ConnectionProfile } from "@/types/termopen";
 
 function protocolLabel(profile: ConnectionProfile, t: ReturnType<typeof useT>): string {
-  const supportsSsh = supportsProtocol(profile, "ssh");
-  const supportsSftp = supportsProtocol(profile, "sftp");
-  if (supportsSsh && supportsSftp) {
-    return t.home.connections.protocolBoth;
+  const labels: string[] = [];
+  if (supportsProtocol(profile, "ssh")) {
+    labels.push(t.home.connections.protocolSsh);
   }
-  if (supportsSsh) {
+  if (supportsProtocol(profile, "sftp")) {
+    labels.push(t.home.connections.protocolSftp);
+  }
+  if (supportsProtocol(profile, "rdp")) {
+    labels.push(t.home.connections.protocolRdp);
+  }
+
+  if (labels.length === 0) {
     return t.home.connections.protocolSsh;
   }
-  return t.home.connections.protocolSftp;
+  if (labels.length === 2 && labels.includes(t.home.connections.protocolSsh) && labels.includes(t.home.connections.protocolSftp)) {
+    return t.home.connections.protocolBoth;
+  }
+
+  return labels.join(" + ");
 }
 
-function isPrimarySftp(profile: ConnectionProfile): boolean {
-  return supportsProtocol(profile, "sftp") && !supportsProtocol(profile, "ssh");
+function resolvePrimaryProtocol(profile: ConnectionProfile): "ssh" | "sftp" | "rdp" {
+  for (const protocol of profile.protocols ?? []) {
+    if (protocol === "ssh" || protocol === "sftp" || protocol === "rdp") {
+      return protocol;
+    }
+  }
+  if (supportsProtocol(profile, "ssh")) {
+    return "ssh";
+  }
+  if (supportsProtocol(profile, "sftp")) {
+    return "sftp";
+  }
+  return "rdp";
 }
 
 export function HomePage() {
@@ -33,6 +54,7 @@ export function HomePage() {
   const deleteHost = useAppStore((state) => state.deleteHost);
   const openSsh = useAppStore((state) => state.openSsh);
   const openSftpWorkspace = useAppStore((state) => state.openSftpWorkspace);
+  const openRdp = useAppStore((state) => state.openRdp);
 
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const menuRootRef = useRef<HTMLDivElement | null>(null);
@@ -95,28 +117,42 @@ export function HomePage() {
             {connections.map((profile) => {
               const hasSsh = supportsProtocol(profile, "ssh");
               const hasSftp = supportsProtocol(profile, "sftp");
+              const hasRdp = supportsProtocol(profile, "rdp");
+              const primaryProtocol = resolvePrimaryProtocol(profile);
               const isMenuOpen = menuOpenId === profile.id;
               return (
                 <Card
                   key={profile.id}
                   className="group cursor-pointer rounded-xl border-white/10 bg-zinc-950/70 transition hover:border-cyan-400/40"
                   onClick={() => {
-                    if (isPrimarySftp(profile)) {
+                    if (primaryProtocol === "ssh" && hasSsh) {
+                      void openSsh(profile);
+                      return;
+                    }
+                    if (primaryProtocol === "sftp" && hasSftp) {
                       void openSftpWorkspace(profile);
+                      return;
+                    }
+                    if (primaryProtocol === "rdp" && hasRdp) {
+                      void openRdp(profile);
                       return;
                     }
                     if (hasSsh) {
                       void openSsh(profile);
                     } else if (hasSftp) {
                       void openSftpWorkspace(profile);
+                    } else if (hasRdp) {
+                      void openRdp(profile);
                     }
                   }}
                 >
                   <CardHeader className="pb-2">
                     <CardTitle className="flex items-start justify-between gap-2 text-sm">
                       <span className="inline-flex min-w-0 items-center gap-2">
-                        {isPrimarySftp(profile) ? (
+                        {primaryProtocol === "sftp" && !hasSsh ? (
                           <FolderOpen className="h-4 w-4 shrink-0 text-cyan-300" />
+                        ) : primaryProtocol === "rdp" && !hasSsh && !hasSftp ? (
+                          <Monitor className="h-4 w-4 shrink-0 text-cyan-300" />
                         ) : (
                           <TerminalSquare className="h-4 w-4 shrink-0 text-cyan-300" />
                         )}
@@ -140,7 +176,13 @@ export function HomePage() {
                               className="w-full rounded px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-900"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                openHostDrawer(profile, hasSftp ? "sftp" : "ssh");
+                                if (hasSftp) {
+                                  openHostDrawer(profile, "sftp");
+                                } else if (hasSsh) {
+                                  openHostDrawer(profile, "ssh");
+                                } else {
+                                  openHostDrawer(profile, "rdp");
+                                }
                                 setMenuOpenId(null);
                               }}
                             >
@@ -196,6 +238,18 @@ export function HomePage() {
                             }}
                           >
                             {t.home.connections.openSftp}
+                          </button>
+                        ) : null}
+                        {hasRdp ? (
+                          <button
+                            type="button"
+                            className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void openRdp(profile);
+                            }}
+                          >
+                            {t.home.connections.openRdp}
                           </button>
                         ) : null}
                       </div>

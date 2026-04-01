@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { open } from "@tauri-apps/plugin-dialog";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
@@ -27,7 +26,13 @@ interface HostFormValues {
 }
 
 function protocolLabel(protocol: ConnectionProtocol): string {
-  return protocol === "ssh" ? "SSH" : "SFTP";
+  if (protocol === "ssh") {
+    return "SSH";
+  }
+  if (protocol === "sftp") {
+    return "SFTP";
+  }
+  return "RDP";
 }
 
 function normalizeProtocols(profile: ConnectionProfile): ConnectionProtocol[] {
@@ -39,6 +44,9 @@ function normalizeProtocols(profile: ConnectionProfile): ConnectionProtocol[] {
   }
   if (profile.kind === "sftp") {
     return ["sftp"];
+  }
+  if (profile.kind === "rdp") {
+    return ["rdp"];
   }
   return ["ssh", "sftp"];
 }
@@ -172,17 +180,6 @@ export function HostFormDrawer() {
       widthClassName="w-[640px]"
     >
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
-        <div className="rounded-lg border border-white/10 bg-zinc-950/60 p-3">
-          <p className="text-[11px] uppercase tracking-wide text-zinc-500">{t.hostDrawer.protocols.label}</p>
-          <div className="mt-2 flex flex-wrap gap-1">
-            {watchedProtocols.map((protocol) => (
-              <Badge key={protocol} variant="outline">
-                {protocolLabel(protocol)}
-              </Badge>
-            ))}
-          </div>
-        </div>
-
         <div className="grid grid-cols-2 gap-3">
           <Field label={t.hostDrawer.name.label} description={t.hostDrawer.name.description}>
             <Input placeholder={t.hostDrawer.name.placeholder} {...register("name")} />
@@ -225,7 +222,7 @@ export function HostFormDrawer() {
                 </button>
                 {protocolMenuOpen ? (
                   <div className="absolute z-[240] mt-1 w-full rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
-                    {(["ssh", "sftp"] as ConnectionProtocol[]).map((protocol) => {
+                    {(["ssh", "sftp", "rdp"] as ConnectionProtocol[]).map((protocol) => {
                       const active = field.value.includes(protocol);
                       return (
                         <button
@@ -245,7 +242,11 @@ export function HostFormDrawer() {
                           <span>
                             <span className="block text-xs font-medium text-zinc-200">{protocolLabel(protocol)}</span>
                             <span className="block text-[11px] text-zinc-500">
-                              {protocol === "ssh" ? t.hostDrawer.protocols.sshDescription : t.hostDrawer.protocols.sftpDescription}
+                              {protocol === "ssh"
+                                ? t.hostDrawer.protocols.sshDescription
+                                : protocol === "sftp"
+                                  ? t.hostDrawer.protocols.sftpDescription
+                                  : t.hostDrawer.protocols.rdpDescription}
                             </span>
                           </span>
                         </button>

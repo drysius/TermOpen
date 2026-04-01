@@ -49,6 +49,8 @@ export function supportsProtocol(profile: ConnectionProfile, protocol: Connectio
       ? ["ssh"]
       : profile.kind === "sftp"
         ? ["sftp"]
+        : profile.kind === "rdp"
+          ? ["rdp"]
         : ["ssh", "sftp"];
   return protocols.includes(protocol);
 }

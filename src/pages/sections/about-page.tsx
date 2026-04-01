@@ -11,6 +11,7 @@ const coreDependencies = [
   { name: "xterm.js", url: "https://github.com/xtermjs/xterm.js" },
   { name: "Monaco Editor", url: "https://github.com/microsoft/monaco-editor" },
   { name: "ssh2 (Rust)", url: "https://github.com/alexcrichton/ssh2-rs" },
+  { name: "IronRDP (Rust)", url: "https://github.com/Devolutions/IronRDP" },
 ];
 
 const recentPackages = [

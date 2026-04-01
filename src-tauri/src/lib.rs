@@ -10,9 +10,10 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use models::{
     AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, KeychainEntry, KnownHostEntry,
-    RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult, SshSessionInfo,
+    RdpCaptureResult, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult, SshSessionInfo,
     SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState, VaultStatus, WindowState,
 };
+use rdp::{capture_png_once, RdpCaptureOptions};
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
 use tauri::{Emitter, Manager, State};
@@ -22,6 +23,7 @@ use tokio::sync::Mutex;
 use vault::VaultManager;
 
 mod models;
+mod rdp;
 mod ssh;
 mod sync;
 #[cfg(test)]
@@ -38,6 +40,11 @@ struct AppState {
 const DEFAULT_SFTP_CHUNK_SIZE_KB: u32 = 1024;
 const MIN_SFTP_CHUNK_SIZE_KB: u32 = 64;
 const MAX_SFTP_CHUNK_SIZE_KB: u32 = 8192;
+const DEFAULT_RDP_PORT: u16 = 3389;
+const DEFAULT_RDP_WIDTH: u16 = 1280;
+const DEFAULT_RDP_HEIGHT: u16 = 720;
+const MIN_RDP_DIMENSION: u16 = 320;
+const MAX_RDP_DIMENSION: u16 = 3840;
 const DEFAULT_BINARY_PREVIEW_LIMIT_BYTES: u64 = 25 * 1024 * 1024;
 const RELEASES_LATEST_URL: &str =
     "https://api.github.com/repos/MarcosBrendonDePaula/TermOpen/releases/latest";
@@ -56,6 +63,43 @@ struct TextReadChunkPayload {
 
 fn app_error(error: impl ToString) -> String {
     error.to_string()
+}
+
+fn normalize_optional_input(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn split_domain_username(username: &str) -> (Option<String>, String) {
+    let trimmed = username.trim();
+    if let Some((domain, user)) = trimmed.split_once('\\') {
+        let normalized_user = user.trim().to_string();
+        if normalized_user.is_empty() {
+            return (None, trimmed.to_string());
+        }
+
+        let normalized_domain = domain.trim().to_string();
+        let domain_value = if normalized_domain.is_empty() {
+            None
+        } else {
+            Some(normalized_domain)
+        };
+
+        return (domain_value, normalized_user);
+    }
+
+    (None, trimmed.to_string())
+}
+
+fn looks_like_rdp_auth_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("logon")
+        || lower.contains("authentication")
+        || lower.contains("credssp")
+        || lower.contains("access denied")
+        || lower.contains("password")
+        || lower.contains("account restriction")
 }
 
 fn is_legacy_compact_window_state(snapshot: &WindowState) -> bool {
@@ -302,6 +346,116 @@ async fn ssh_connect_ex(
         accept_unknown_host.unwrap_or(false),
     )
     .map_err(app_error)
+}
+
+#[tauri::command]
+async fn rdp_capture(
+    state: State<'_, AppState>,
+    profile_id: String,
+    width: Option<u16>,
+    height: Option<u16>,
+    password_override: Option<String>,
+    keychain_id_override: Option<String>,
+    save_auth_choice: Option<bool>,
+) -> Result<RdpCaptureResult, String> {
+    let profile = {
+        let mut vault = state.vault.lock().await;
+        let mut profile = vault.profile_by_id(&profile_id).map_err(app_error)?;
+
+        let selected_keychain = normalize_optional_input(keychain_id_override.clone())
+            .or_else(|| profile.keychain_id.clone());
+
+        if let Some(keychain_id) = selected_keychain.clone() {
+            let key = vault.keychain_by_id(&keychain_id).map_err(app_error)?;
+            if profile.password.is_none() {
+                profile.password = key.password.or(key.passphrase);
+            }
+            profile.keychain_id = Some(keychain_id);
+        }
+
+        if let Some(password) = normalize_optional_input(password_override.clone()) {
+            profile.password = Some(password.clone());
+            if save_auth_choice.unwrap_or(false) {
+                let mut profile_to_save = profile.clone();
+                profile_to_save.password = Some(password);
+                let _ = vault.connection_save(profile_to_save);
+            }
+        }
+
+        if save_auth_choice.unwrap_or(false)
+            && keychain_id_override
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            let mut profile_to_save = profile.clone();
+            profile_to_save.keychain_id = normalize_optional_input(keychain_id_override.clone());
+            let _ = vault.connection_save(profile_to_save);
+        }
+
+        profile
+    };
+
+    let host = profile.host.trim().to_string();
+    if host.is_empty() {
+        return Ok(RdpCaptureResult::Error {
+            message: "Host RDP invalido.".to_string(),
+        });
+    }
+
+    let (domain_from_user, username) = split_domain_username(profile.username.as_str());
+    if username.trim().is_empty() {
+        return Ok(RdpCaptureResult::AuthRequired {
+            message: "Usuario RDP nao informado.".to_string(),
+        });
+    }
+
+    let Some(password) = normalize_optional_input(profile.password.clone()) else {
+        return Ok(RdpCaptureResult::AuthRequired {
+            message: "Senha RDP necessaria para conectar.".to_string(),
+        });
+    };
+
+    let target_width = width
+        .unwrap_or(DEFAULT_RDP_WIDTH)
+        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
+    let target_height = height
+        .unwrap_or(DEFAULT_RDP_HEIGHT)
+        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
+
+    let options = RdpCaptureOptions {
+        host,
+        port: if profile.port == 0 {
+            DEFAULT_RDP_PORT
+        } else {
+            profile.port
+        },
+        username,
+        password,
+        domain: domain_from_user,
+        width: target_width,
+        height: target_height,
+        timeout_seconds: 8,
+    };
+
+    let captured = tokio::task::spawn_blocking(move || capture_png_once(options))
+        .await
+        .map_err(|error| error.to_string())?;
+
+    match captured {
+        Ok(frame) => Ok(RdpCaptureResult::Ready {
+            image_base64: BASE64.encode(frame.png_bytes),
+            width: frame.width,
+            height: frame.height,
+            captured_at: chrono::Utc::now().timestamp(),
+        }),
+        Err(error) => {
+            let message = error.to_string();
+            if looks_like_rdp_auth_error(&message) {
+                return Ok(RdpCaptureResult::AuthRequired { message });
+            }
+            Ok(RdpCaptureResult::Error { message })
+        }
+    }
 }
 
 #[tauri::command]
@@ -1407,7 +1561,7 @@ fn is_supported_deep_link(payload: &str) -> bool {
     };
     matches!(
         scheme.to_ascii_lowercase().as_str(),
-        "termopen" | "openterm" | "ssh" | "sftp"
+        "termopen" | "openterm" | "ssh" | "sftp" | "rdp"
     )
 }
 
@@ -1519,6 +1673,7 @@ pub fn run() {
             settings_update,
             ssh_connect,
             ssh_connect_ex,
+            rdp_capture,
             ssh_write,
             ssh_resize,
             ssh_disconnect,

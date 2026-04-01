@@ -23,6 +23,7 @@ export function createSessionActions(
   | "clearSessionListeners"
   | "getOrCreateSession"
   | "openSsh"
+  | "openRdp"
   | "sshWrite"
   | "disconnectSession"
 > {
@@ -243,6 +244,18 @@ export function createSessionActions(
         closable: true,
         profileId: profile.id,
         initialBlock: "terminal",
+        initialSourceId: `profile:${profile.id}`,
+      });
+    },
+
+    openRdp: async (profile: ConnectionProfile) => {
+      get().openTab({
+        id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+        type: "workspace",
+        title: `Workspace - ${profile.name}`,
+        closable: true,
+        profileId: profile.id,
+        initialBlock: "rdp",
         initialSourceId: `profile:${profile.id}`,
       });
     },
