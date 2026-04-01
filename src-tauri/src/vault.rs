@@ -1224,7 +1224,28 @@ fn normalize_option(input: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ConnectionProtocol;
+    use std::path::Path;
+    use crate::models::{ConnectionKind, ConnectionProtocol};
+    use tempfile::tempdir;
+
+    fn test_vault_manager(storage_root: &Path) -> VaultManager {
+        fs::create_dir_all(storage_root).expect("test storage should be created");
+        VaultManager {
+            storage_root: storage_root.to_path_buf(),
+            term_open_path: storage_root.join(TERM_OPEN_FILE_NAME),
+            profile_path: storage_root.join(PROFILE_FILE_NAME),
+            manifest_path: storage_root.join(MANIFEST_FILE_NAME),
+            runtime: VaultRuntime::default(),
+        }
+    }
+
+    fn snapshot_files(vault: &VaultManager) -> HashMap<String, Vec<u8>> {
+        vault
+            .list_local_bin_files()
+            .expect("snapshot should list files")
+            .into_iter()
+            .collect()
+    }
 
     #[test]
     fn should_encrypt_and_decrypt_record() {
@@ -1239,7 +1260,7 @@ mod tests {
             keychain_id: None,
             remote_path: Some("/".to_string()),
             protocols: vec![ConnectionProtocol::Ssh, ConnectionProtocol::Sftp],
-            kind: None,
+            kind: Some(ConnectionKind::Both),
         };
 
         let salt = [7u8; 16];
@@ -1267,5 +1288,68 @@ mod tests {
         let wrong_key = derive_key("wrong", &salt).expect("kdf should work");
         let decrypted = decrypt_bin_payload::<ManifestBinPayload>(&encrypted, &wrong_key, "decrypt");
         assert!(decrypted.is_err());
+    }
+
+    #[test]
+    fn should_keep_password_valid_for_snapshot_x_even_after_snapshot_y_changes() {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let storage_root = temp_dir.path().join("vault-test");
+        let mut vault = test_vault_manager(&storage_root);
+        let password = "senha-super-segura";
+
+        vault
+            .init(Some(password.to_string()))
+            .expect("vault should initialize");
+
+        // Versao X: estado inicial sincronizado.
+        let snapshot_x = snapshot_files(&vault);
+        let profile_hash_x = hash_bytes_hex(
+            snapshot_x
+                .get(PROFILE_FILE_NAME)
+                .expect("version X should include profile.bin"),
+        );
+        let term_open_x = snapshot_x
+            .get(TERM_OPEN_FILE_NAME)
+            .expect("version X should include term-open.bin")
+            .clone();
+
+        // Versao Y: cliente altera settings/profile e persiste.
+        let mut settings = vault.settings_get().expect("settings should load");
+        settings.sync_interval_minutes = 7;
+        settings.sync_on_settings_change = true;
+        vault
+            .settings_update(settings)
+            .expect("settings should be updated");
+
+        let snapshot_y = snapshot_files(&vault);
+        let profile_hash_y = hash_bytes_hex(
+            snapshot_y
+                .get(PROFILE_FILE_NAME)
+                .expect("version Y should include profile.bin"),
+        );
+
+        // Simula conflito client/server: hashes divergentes entre X (server) e Y (client).
+        assert_ne!(
+            profile_hash_x, profile_hash_y,
+            "profile hash should diverge between snapshot X and Y"
+        );
+
+        // Mesmo com Y local, a senha atual continua valida para o term-open de X.
+        assert!(
+            vault
+                .validate_password_for_term_open_bytes(&term_open_x, password)
+                .expect("password validation should run"),
+            "same password should validate against version X metadata"
+        );
+
+        // Restaurando X com a mesma senha deve continuar descriptografando normalmente.
+        vault
+            .replace_local_files(&snapshot_x)
+            .expect("replacing with snapshot X should succeed");
+        vault.lock();
+        let status = vault
+            .unlock(Some(password.to_string()))
+            .expect("unlock with same password should succeed for snapshot X");
+        assert!(!status.locked, "vault should be unlocked after restoring X");
     }
 }
