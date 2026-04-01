@@ -51,6 +51,7 @@ export interface AppSettings {
   sync_on_settings_change: boolean;
   sync_interval_minutes: number;
   sftp_chunk_size_kb: number;
+  sftp_reconnect_delay_seconds: number;
   inactivity_lock_minutes: number;
   auto_reconnect_enabled: boolean;
   reconnect_delay_seconds: number;

@@ -10,6 +10,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
@@ -382,8 +385,9 @@ impl SshManager {
             sftp.rmdir(&target)
                 .with_context(|| format!("Falha ao remover pasta remota: {}", target.display()))?;
         } else {
-            sftp.unlink(&target)
-                .with_context(|| format!("Falha ao remover arquivo remoto: {}", target.display()))?;
+            sftp.unlink(&target).with_context(|| {
+                format!("Falha ao remover arquivo remoto: {}", target.display())
+            })?;
         }
         Ok(())
     }
@@ -895,9 +899,13 @@ fn spawn_local_shell(
     start_path: Option<&Path>,
 ) -> Result<(Child, ChildStdin, ChildStdout, ChildStderr)> {
     #[cfg(target_os = "windows")]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    #[cfg(target_os = "windows")]
     let mut command = {
         let mut cmd = Command::new("powershell");
         cmd.arg("-NoLogo").arg("-NoProfile");
+        cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     };
     #[cfg(not(target_os = "windows"))]

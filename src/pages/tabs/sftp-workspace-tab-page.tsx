@@ -57,7 +57,7 @@ interface BaseBlock {
   maximized: boolean;
 }
 
-type TerminalConnectStage = "ready" | "connecting" | "verifying_fingerprint" | "awaiting_password" | "error";
+type ConnectStage = "ready" | "connecting" | "verifying_fingerprint" | "awaiting_password" | "error";
 
 interface PendingHostChallenge {
   host: string;
@@ -71,13 +71,15 @@ interface TerminalBlock extends BaseBlock {
   kind: "terminal";
   sessionId: string | null;
   pendingProfileId: string | null;
-  connectStage: TerminalConnectStage;
+  connectStage: ConnectStage;
   connectMessage: string;
   connectError: string | null;
   hostChallenge: PendingHostChallenge | null;
   passwordDraft: string;
   savePasswordChoice: boolean;
   acceptUnknownHost: boolean;
+  retryAttempt: number;
+  retryInSeconds: number | null;
 }
 
 interface SftpBlock extends BaseBlock {
@@ -90,6 +92,16 @@ interface SftpBlock extends BaseBlock {
   sortKey: SortKey;
   sortDirection: SortDirection;
   pathHistory: string[];
+  pendingProfileId: string | null;
+  connectStage: ConnectStage;
+  connectMessage: string;
+  connectError: string | null;
+  hostChallenge: PendingHostChallenge | null;
+  passwordDraft: string;
+  savePasswordChoice: boolean;
+  acceptUnknownHost: boolean;
+  retryAttempt: number;
+  retryInSeconds: number | null;
 }
 
 interface EditorBlock extends BaseBlock {
@@ -177,6 +189,18 @@ const workspaceCache = new Map<
 >();
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 const DRAG_ENTRY_MIME = "application/x-termopen-entry";
+const MAX_CONNECT_RETRY_ATTEMPTS = 3;
+
+function isTimeoutErrorMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("timeout") ||
+    normalized.includes("timed out") ||
+    normalized.includes("time out") ||
+    normalized.includes("etimedout") ||
+    normalized.includes("tempo esgotado")
+  );
+}
 
 function parseDragPayload(dataTransfer: DataTransfer): DragPayload | null {
   const raw = dataTransfer.getData(DRAG_ENTRY_MIME) || dataTransfer.getData("text/plain");
@@ -426,7 +450,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const settings = useAppStore((state) => state.settings);
   const sshWrite = useAppStore((state) => state.sshWrite);
   const ensureSessionListeners = useAppStore((state) => state.ensureSessionListeners);
-  const getOrCreateSession = useAppStore((state) => state.getOrCreateSession);
+  const disconnectSession = useAppStore((state) => state.disconnectSession);
   const setWorkspaceSessions = useAppStore((state) => state.setWorkspaceSessions);
   const setWorkspaceBlockCount = useAppStore((state) => state.setWorkspaceBlockCount);
 
@@ -445,6 +469,92 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const [createBlockModalOpen, setCreateBlockModalOpen] = useState(false);
   const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "editor" | "logs">("terminal");
   const [createSourceDraft, setCreateSourceDraft] = useState("local");
+  const connectRetryTimersRef = useRef<Record<string, { retryTimer: number; countdownTimer: number }>>({});
+
+  const clearBlockRetryTimers = useCallback((blockId: string) => {
+    const active = connectRetryTimersRef.current[blockId];
+    if (active) {
+      window.clearTimeout(active.retryTimer);
+      window.clearInterval(active.countdownTimer);
+      delete connectRetryTimersRef.current[blockId];
+    }
+  }, []);
+
+  const scheduleBlockAutoRetry = useCallback(
+    (params: {
+      blockId: string;
+      kind: "terminal" | "sftp";
+      delaySeconds: number;
+      attempt: number;
+      onRetry: () => void;
+    }) => {
+      clearBlockRetryTimers(params.blockId);
+      let remaining = Math.max(1, params.delaySeconds);
+
+      setBlocks((current) =>
+        current.map((item) => {
+          if (item.id !== params.blockId || item.kind !== params.kind) {
+            return item;
+          }
+          return {
+            ...item,
+            retryAttempt: params.attempt,
+            retryInSeconds: remaining,
+          };
+        }),
+      );
+
+      const countdownTimer = window.setInterval(() => {
+        remaining -= 1;
+        setBlocks((current) =>
+          current.map((item) => {
+            if (item.id !== params.blockId || item.kind !== params.kind) {
+              return item;
+            }
+            return {
+              ...item,
+              retryInSeconds: Math.max(0, remaining),
+            };
+          }),
+        );
+        if (remaining <= 0) {
+          const active = connectRetryTimersRef.current[params.blockId];
+          if (active) {
+            window.clearInterval(active.countdownTimer);
+          }
+        }
+      }, 1000);
+
+      const retryTimer = window.setTimeout(() => {
+        clearBlockRetryTimers(params.blockId);
+        setBlocks((current) =>
+          current.map((item) => {
+            if (item.id !== params.blockId || item.kind !== params.kind) {
+              return item;
+            }
+            return {
+              ...item,
+              retryInSeconds: null,
+            };
+          }),
+        );
+        params.onRetry();
+      }, remaining * 1000);
+
+      connectRetryTimersRef.current[params.blockId] = {
+        retryTimer,
+        countdownTimer,
+      };
+    },
+    [clearBlockRetryTimers],
+  );
+
+  useEffect(
+    () => () => {
+      Object.keys(connectRetryTimersRef.current).forEach((blockId) => clearBlockRetryTimers(blockId));
+    },
+    [clearBlockRetryTimers],
+  );
 
   useEffect(() => {
     blocksRef.current = blocks;
@@ -624,9 +734,13 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     });
   }, []);
 
-  const closeBlock = useCallback((id: string) => {
-    setBlocks((current) => current.filter((block) => block.id !== id));
-  }, []);
+  const closeBlock = useCallback(
+    (id: string) => {
+      clearBlockRetryTimers(id);
+      setBlocks((current) => current.filter((block) => block.id !== id));
+    },
+    [clearBlockRetryTimers],
+  );
 
   const toggleMaximize = useCallback((id: string) => {
     setBlocks((current) =>
@@ -1112,6 +1226,16 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         sortKey: "name",
         sortDirection: "asc",
         pathHistory: [initialPath],
+        pendingProfileId: null,
+        connectStage: "ready",
+        connectMessage: "Logado",
+        connectError: null,
+        hostChallenge: null,
+        passwordDraft: "",
+        savePasswordChoice: false,
+        acceptUnknownHost: false,
+        retryAttempt: 0,
+        retryInSeconds: null,
         layout: workspaceDefaultLayout("sftp", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
         maximized: false,
@@ -1151,6 +1275,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         acceptUnknownHost?: boolean;
         passwordOverride?: string | null;
         saveAuthChoice?: boolean;
+        retryAttempt?: number;
       },
     ) => {
       const target = blocksRef.current.find(
@@ -1180,11 +1305,13 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       const acceptUnknownHost = options?.acceptUnknownHost ?? target.acceptUnknownHost;
       const passwordOverride = options?.passwordOverride ?? null;
       const saveAuthChoice = options?.saveAuthChoice ?? false;
+      const currentAttempt = Math.max(0, options?.retryAttempt ?? target.retryAttempt);
       const connectingMessage = passwordOverride
         ? "Logando..."
         : acceptUnknownHost
           ? "Verificando fingerprint..."
           : "Conectando...";
+      clearBlockRetryTimers(blockId);
       appendWorkspaceLog(
         "info",
         "Conexao SSH em andamento",
@@ -1200,6 +1327,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 connectMessage: connectingMessage,
                 connectError: null,
                 hostChallenge: null,
+                retryAttempt: currentAttempt,
+                retryInSeconds: null,
               }
             : block,
         ),
@@ -1237,6 +1366,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                     connectError: null,
                     hostChallenge: null,
                     acceptUnknownHost: false,
+                    retryAttempt: 0,
+                    retryInSeconds: null,
                   }
                 : block,
             ),
@@ -1265,6 +1396,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                       fingerprint: result.fingerprint,
                       message: result.message,
                     },
+                    retryAttempt: 0,
+                    retryInSeconds: null,
                   }
                 : block,
             ),
@@ -1287,6 +1420,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                     connectMessage: "Login pendente.",
                     connectError: result.message,
                     hostChallenge: null,
+                    retryAttempt: 0,
+                    retryInSeconds: null,
                   }
                 : block,
             ),
@@ -1299,6 +1434,56 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           return;
         }
 
+        const timeoutDetected = isTimeoutErrorMessage(result.message);
+        if (timeoutDetected) {
+          const nextAttempt = currentAttempt + 1;
+          const delaySeconds = Math.max(1, settings.reconnect_delay_seconds);
+          const canRetry =
+            settings.auto_reconnect_enabled && nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS;
+          const retryLabel = canRetry
+            ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
+            : `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`;
+
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "terminal"
+                ? {
+                    ...block,
+                    connectStage: "error",
+                    connectMessage: "Timeout na conexao SSH.",
+                    connectError: `${result.message} ${retryLabel}`.trim(),
+                    hostChallenge: null,
+                    retryAttempt: nextAttempt,
+                    retryInSeconds: canRetry ? delaySeconds : null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog(
+            "warn",
+            "Timeout ao conectar sessao SSH",
+            `${profile.username}@${profile.host}:${profile.port} | ${retryLabel}`,
+          );
+
+          if (canRetry) {
+            scheduleBlockAutoRetry({
+              blockId,
+              kind: "terminal",
+              delaySeconds,
+              attempt: nextAttempt,
+              onRetry: () => {
+                void resolvePendingTerminalConnection(blockId, {
+                  acceptUnknownHost,
+                  passwordOverride,
+                  saveAuthChoice,
+                  retryAttempt: nextAttempt,
+                });
+              },
+            });
+          }
+          return;
+        }
+
         setBlocks((current) =>
           current.map((block) =>
             block.id === blockId && block.kind === "terminal"
@@ -1307,6 +1492,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                   connectStage: "error",
                   connectMessage: "Falha ao conectar.",
                   connectError: result.message,
+                  retryAttempt: 0,
+                  retryInSeconds: null,
                 }
               : block,
           ),
@@ -1314,6 +1501,56 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         appendWorkspaceLog("error", "Falha ao conectar sessao SSH", result.message);
       } catch (error) {
         const message = getError(error);
+        const timeoutDetected = isTimeoutErrorMessage(message);
+        if (timeoutDetected) {
+          const nextAttempt = currentAttempt + 1;
+          const delaySeconds = Math.max(1, settings.reconnect_delay_seconds);
+          const canRetry =
+            settings.auto_reconnect_enabled && nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS;
+          const retryLabel = canRetry
+            ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
+            : `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`;
+
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "terminal"
+                ? {
+                    ...block,
+                    connectStage: "error",
+                    connectMessage: "Timeout na conexao SSH.",
+                    connectError: `${message} ${retryLabel}`.trim(),
+                    hostChallenge: null,
+                    retryAttempt: nextAttempt,
+                    retryInSeconds: canRetry ? delaySeconds : null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog(
+            "warn",
+            "Timeout ao conectar sessao SSH",
+            `${profile.username}@${profile.host}:${profile.port} | ${retryLabel}`,
+          );
+
+          if (canRetry) {
+            scheduleBlockAutoRetry({
+              blockId,
+              kind: "terminal",
+              delaySeconds,
+              attempt: nextAttempt,
+              onRetry: () => {
+                void resolvePendingTerminalConnection(blockId, {
+                  acceptUnknownHost,
+                  passwordOverride,
+                  saveAuthChoice,
+                  retryAttempt: nextAttempt,
+                });
+              },
+            });
+          }
+          return;
+        }
+
         setBlocks((current) =>
           current.map((block) =>
             block.id === blockId && block.kind === "terminal"
@@ -1323,6 +1560,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                   connectMessage: "Falha ao conectar.",
                   connectError: message,
                   hostChallenge: null,
+                  retryAttempt: 0,
+                  retryInSeconds: null,
                 }
               : block,
           ),
@@ -1330,7 +1569,16 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         appendWorkspaceLog("error", "Erro ao conectar sessao SSH", message);
       }
     },
-    [appendWorkspaceLog, connections, ensureSessionListeners, sshWrite],
+    [
+      appendWorkspaceLog,
+      clearBlockRetryTimers,
+      connections,
+      ensureSessionListeners,
+      scheduleBlockAutoRetry,
+      settings.auto_reconnect_enabled,
+      settings.reconnect_delay_seconds,
+      sshWrite,
+    ],
   );
 
   const addTerminalBlock = useCallback(
@@ -1358,6 +1606,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         passwordDraft: "",
         savePasswordChoice: false,
         acceptUnknownHost: false,
+        retryAttempt: 0,
+        retryInSeconds: null,
         layout: workspaceDefaultLayout("terminal", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
         maximized: false,
@@ -1374,6 +1624,418 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       sessions,
       workspaceSize.height,
       workspaceSize.width,
+    ],
+  );
+
+  const resolvePendingSftpConnection = useCallback(
+    async (
+      blockId: string,
+      options?: {
+        acceptUnknownHost?: boolean;
+        passwordOverride?: string | null;
+        saveAuthChoice?: boolean;
+        retryAttempt?: number;
+      },
+    ) => {
+      const target = blocksRef.current.find(
+        (item): item is SftpBlock => item.id === blockId && item.kind === "sftp",
+      );
+      if (!target || !target.pendingProfileId) {
+        return;
+      }
+
+      const profile = connections.find((item) => item.id === target.pendingProfileId);
+      if (!profile) {
+        setBlocks((current) =>
+          current.map((block) =>
+            block.id === blockId && block.kind === "sftp"
+              ? {
+                  ...block,
+                  connectStage: "error",
+                  connectMessage: "Host nao encontrado.",
+                  connectError: "Host nao encontrado para concluir conexao SFTP.",
+                  loading: false,
+                  retryAttempt: 0,
+                  retryInSeconds: null,
+                }
+              : block,
+          ),
+        );
+        return;
+      }
+
+      const acceptUnknownHost = options?.acceptUnknownHost ?? target.acceptUnknownHost;
+      const passwordOverride = options?.passwordOverride ?? null;
+      const saveAuthChoice = options?.saveAuthChoice ?? false;
+      const currentAttempt = Math.max(0, options?.retryAttempt ?? target.retryAttempt);
+      const connectingMessage = passwordOverride
+        ? "Logando..."
+        : acceptUnknownHost
+          ? "Verificando fingerprint..."
+          : "Conectando...";
+
+      clearBlockRetryTimers(blockId);
+      appendWorkspaceLog(
+        "info",
+        "Conexao SFTP em andamento",
+        `${profile.username}@${profile.host}:${profile.port}`,
+      );
+
+      setBlocks((current) =>
+        current.map((block) =>
+          block.id === blockId && block.kind === "sftp"
+            ? {
+                ...block,
+                connectStage: "connecting",
+                connectMessage: connectingMessage,
+                connectError: null,
+                hostChallenge: null,
+                loading: true,
+                retryAttempt: currentAttempt,
+                retryInSeconds: null,
+              }
+            : block,
+        ),
+      );
+
+      try {
+        const result = await api.sshConnectEx(profile.id, {
+          acceptUnknownHost,
+          passwordOverride,
+          saveAuthChoice,
+        });
+
+        if (result.status === "connected") {
+          const session = result.session;
+          useAppStore.setState((state) => ({
+            sessions: state.sessions.some((item) => item.session_id === session.session_id)
+              ? state.sessions
+              : [...state.sessions, session],
+          }));
+
+          const preferredPath = profile.remote_path?.trim()
+            ? normalizeRemotePath(profile.remote_path)
+            : normalizeRemotePath(target.path || "/");
+
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "sftp"
+                ? {
+                    ...block,
+                    sourceId: session.session_id,
+                    path: preferredPath,
+                    loading: true,
+                    connectStage: "connecting",
+                    connectMessage: "Carregando diretorio inicial...",
+                    connectError: null,
+                    hostChallenge: null,
+                    retryAttempt: currentAttempt,
+                    retryInSeconds: null,
+                  }
+                : block,
+            ),
+          );
+
+          try {
+            const entries = await listSourceEntries(session.session_id, preferredPath);
+            setBlocks((current) =>
+              current.map((block) => {
+                if (block.id !== blockId || block.kind !== "sftp") {
+                  return block;
+                }
+                const history = [preferredPath, ...block.pathHistory.filter((item) => item !== preferredPath)].slice(0, 20);
+                return {
+                  ...block,
+                  sourceId: session.session_id,
+                  path: preferredPath,
+                  entries,
+                  loading: false,
+                  pathHistory: history,
+                  pendingProfileId: null,
+                  connectStage: "ready",
+                  connectMessage: "Logado",
+                  connectError: null,
+                  hostChallenge: null,
+                  acceptUnknownHost: false,
+                  retryAttempt: 0,
+                  retryInSeconds: null,
+                };
+              }),
+            );
+            appendWorkspaceLog(
+              "success",
+              "Sessao SFTP conectada",
+              `${profile.username}@${profile.host}:${profile.port}`,
+            );
+            return;
+          } catch (error) {
+            const message = getError(error);
+            await disconnectSession(session.session_id).catch(() => undefined);
+            const timeoutDetected = isTimeoutErrorMessage(message);
+            const nextAttempt = currentAttempt + 1;
+            const delaySeconds = Math.max(1, settings.sftp_reconnect_delay_seconds);
+            const canRetry =
+              timeoutDetected &&
+              settings.auto_reconnect_enabled &&
+              nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS;
+            const retryLabel = canRetry
+              ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
+              : timeoutDetected
+                ? `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`
+                : "Falha ao carregar diretorio inicial.";
+
+            setBlocks((current) =>
+              current.map((block) =>
+                block.id === blockId && block.kind === "sftp"
+                  ? {
+                      ...block,
+                      sourceId: "local",
+                      entries: [],
+                      loading: false,
+                      pendingProfileId: profile.id,
+                      connectStage: "error",
+                      connectMessage: timeoutDetected
+                        ? "Timeout na listagem inicial SFTP."
+                        : "Falha ao carregar diretorio inicial.",
+                      connectError: `${message} ${retryLabel}`.trim(),
+                      hostChallenge: null,
+                      retryAttempt: timeoutDetected ? nextAttempt : 0,
+                      retryInSeconds: canRetry ? delaySeconds : null,
+                    }
+                  : block,
+              ),
+            );
+
+            appendWorkspaceLog(
+              timeoutDetected ? "warn" : "error",
+              "Falha na listagem inicial SFTP",
+              `${profile.username}@${profile.host}:${profile.port} | ${retryLabel}`,
+            );
+
+            if (canRetry) {
+              scheduleBlockAutoRetry({
+                blockId,
+                kind: "sftp",
+                delaySeconds,
+                attempt: nextAttempt,
+                onRetry: () => {
+                  void resolvePendingSftpConnection(blockId, {
+                    acceptUnknownHost,
+                    passwordOverride,
+                    saveAuthChoice,
+                    retryAttempt: nextAttempt,
+                  });
+                },
+              });
+            }
+            return;
+          }
+        }
+
+        if (result.status === "unknown_host_challenge") {
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "sftp"
+                ? {
+                    ...block,
+                    connectStage: "verifying_fingerprint",
+                    connectMessage: "Fingerprint do host precisa ser confirmada.",
+                    connectError: null,
+                    hostChallenge: {
+                      host: result.host,
+                      port: result.port,
+                      keyType: result.key_type,
+                      fingerprint: result.fingerprint,
+                      message: result.message,
+                    },
+                    loading: false,
+                    retryAttempt: 0,
+                    retryInSeconds: null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog(
+            "warn",
+            "Fingerprint SFTP requer confirmacao",
+            `${result.host}:${result.port} ${result.fingerprint}`,
+          );
+          return;
+        }
+
+        if (result.status === "auth_required") {
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "sftp"
+                ? {
+                    ...block,
+                    connectStage: "awaiting_password",
+                    connectMessage: "Login pendente.",
+                    connectError: result.message,
+                    hostChallenge: null,
+                    loading: false,
+                    retryAttempt: 0,
+                    retryInSeconds: null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog(
+            "warn",
+            "Autenticacao SFTP pendente",
+            `${profile.username}@${profile.host}:${profile.port}`,
+          );
+          return;
+        }
+
+        const timeoutDetected = isTimeoutErrorMessage(result.message);
+        if (timeoutDetected) {
+          const nextAttempt = currentAttempt + 1;
+          const delaySeconds = Math.max(1, settings.sftp_reconnect_delay_seconds);
+          const canRetry =
+            settings.auto_reconnect_enabled && nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS;
+          const retryLabel = canRetry
+            ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
+            : `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`;
+
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "sftp"
+                ? {
+                    ...block,
+                    connectStage: "error",
+                    connectMessage: "Timeout na conexao SFTP.",
+                    connectError: `${result.message} ${retryLabel}`.trim(),
+                    hostChallenge: null,
+                    loading: false,
+                    retryAttempt: nextAttempt,
+                    retryInSeconds: canRetry ? delaySeconds : null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog(
+            "warn",
+            "Timeout ao conectar SFTP",
+            `${profile.username}@${profile.host}:${profile.port} | ${retryLabel}`,
+          );
+
+          if (canRetry) {
+            scheduleBlockAutoRetry({
+              blockId,
+              kind: "sftp",
+              delaySeconds,
+              attempt: nextAttempt,
+              onRetry: () => {
+                void resolvePendingSftpConnection(blockId, {
+                  acceptUnknownHost,
+                  passwordOverride,
+                  saveAuthChoice,
+                  retryAttempt: nextAttempt,
+                });
+              },
+            });
+          }
+          return;
+        }
+
+        setBlocks((current) =>
+          current.map((block) =>
+            block.id === blockId && block.kind === "sftp"
+              ? {
+                  ...block,
+                  connectStage: "error",
+                  connectMessage: "Falha ao conectar SFTP.",
+                  connectError: result.message,
+                  hostChallenge: null,
+                  loading: false,
+                  retryAttempt: 0,
+                  retryInSeconds: null,
+                }
+              : block,
+          ),
+        );
+        appendWorkspaceLog("error", "Falha ao conectar SFTP", result.message);
+      } catch (error) {
+        const message = getError(error);
+        const timeoutDetected = isTimeoutErrorMessage(message);
+        if (timeoutDetected) {
+          const nextAttempt = currentAttempt + 1;
+          const delaySeconds = Math.max(1, settings.sftp_reconnect_delay_seconds);
+          const canRetry =
+            settings.auto_reconnect_enabled && nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS;
+          const retryLabel = canRetry
+            ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
+            : `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`;
+
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "sftp"
+                ? {
+                    ...block,
+                    connectStage: "error",
+                    connectMessage: "Timeout na conexao SFTP.",
+                    connectError: `${message} ${retryLabel}`.trim(),
+                    hostChallenge: null,
+                    loading: false,
+                    retryAttempt: nextAttempt,
+                    retryInSeconds: canRetry ? delaySeconds : null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog(
+            "warn",
+            "Timeout ao conectar SFTP",
+            `${profile.username}@${profile.host}:${profile.port} | ${retryLabel}`,
+          );
+
+          if (canRetry) {
+            scheduleBlockAutoRetry({
+              blockId,
+              kind: "sftp",
+              delaySeconds,
+              attempt: nextAttempt,
+              onRetry: () => {
+                void resolvePendingSftpConnection(blockId, {
+                  acceptUnknownHost,
+                  passwordOverride,
+                  saveAuthChoice,
+                  retryAttempt: nextAttempt,
+                });
+              },
+            });
+          }
+          return;
+        }
+
+        setBlocks((current) =>
+          current.map((block) =>
+            block.id === blockId && block.kind === "sftp"
+              ? {
+                  ...block,
+                  connectStage: "error",
+                  connectMessage: "Falha ao conectar SFTP.",
+                  connectError: message,
+                  hostChallenge: null,
+                  loading: false,
+                  retryAttempt: 0,
+                  retryInSeconds: null,
+                }
+              : block,
+          ),
+        );
+        appendWorkspaceLog("error", "Erro ao conectar SFTP", message);
+      }
+    },
+    [
+      appendWorkspaceLog,
+      clearBlockRetryTimers,
+      connections,
+      disconnectSession,
+      scheduleBlockAutoRetry,
+      settings.auto_reconnect_enabled,
+      settings.sftp_reconnect_delay_seconds,
     ],
   );
 
@@ -1402,6 +2064,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         passwordDraft: "",
         savePasswordChoice: false,
         acceptUnknownHost: false,
+        retryAttempt: 0,
+        retryInSeconds: null,
         layout: workspaceDefaultLayout("terminal", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
         maximized: false,
@@ -1413,6 +2077,57 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       }, 0);
     },
     [appendWorkspaceLog, connections, resolvePendingTerminalConnection, workspaceSize.height, workspaceSize.width],
+  );
+
+  const addPendingSftpBlock = useCallback(
+    (profileId: string) => {
+      const profile = connections.find((item) => item.id === profileId);
+      if (!profile) {
+        toast.error("Host nao encontrado para abrir o SFTP.");
+        return;
+      }
+
+      const host = profile.host || profileId.slice(0, 8);
+      const baseTitle = `SFTP - ${host}`;
+      const count = blocksRef.current.filter((item) => item.kind === "sftp" && item.title.startsWith(baseTitle)).length;
+      const blockId = createId("sftp");
+      const initialPath = profile.remote_path?.trim()
+        ? normalizeRemotePath(profile.remote_path)
+        : normalizeRemotePath("/");
+
+      const block: SftpBlock = {
+        id: blockId,
+        kind: "sftp",
+        title: count > 0 ? `${baseTitle} (${count + 1})` : baseTitle,
+        sourceId: "local",
+        path: initialPath,
+        entries: [],
+        loading: false,
+        selectedPath: null,
+        sortKey: "name",
+        sortDirection: "asc",
+        pathHistory: [initialPath],
+        pendingProfileId: profileId,
+        connectStage: "connecting",
+        connectMessage: "Conectando...",
+        connectError: null,
+        hostChallenge: null,
+        passwordDraft: "",
+        savePasswordChoice: false,
+        acceptUnknownHost: false,
+        retryAttempt: 0,
+        retryInSeconds: null,
+        layout: workspaceDefaultLayout("sftp", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
+        zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+        maximized: false,
+      };
+      setBlocks((current) => [...current, block]);
+      appendWorkspaceLog("info", "Conexao SFTP solicitada", `${profile.username}@${profile.host}:${profile.port}`);
+      window.setTimeout(() => {
+        void resolvePendingSftpConnection(blockId);
+      }, 0);
+    },
+    [appendWorkspaceLog, connections, resolvePendingSftpConnection, workspaceSize.height, workspaceSize.width],
   );
 
   useEffect(() => {
@@ -1430,9 +2145,14 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       return;
     }
     if (initialBlock === "sftp") {
+      const profileId = parseProfileSourceId(initialSourceId);
+      if (profileId) {
+        addPendingSftpBlock(profileId);
+        return;
+      }
       addSftpBlock(initialSourceId ?? "local");
     }
-  }, [addPendingTerminalBlock, addSftpBlock, addTerminalBlock, initialBlock, initialSourceId]);
+  }, [addPendingSftpBlock, addPendingTerminalBlock, addSftpBlock, addTerminalBlock, initialBlock, initialSourceId]);
 
   const connectLocalTerminal = useCallback(async (): Promise<string> => {
     const session = await api.localTerminalConnect(null);
@@ -1444,18 +2164,6 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     await ensureSessionListeners(session.session_id);
     return session.session_id;
   }, [ensureSessionListeners]);
-
-  const connectProfileSession = useCallback(
-    async (profileId: string): Promise<string> => {
-      const profile = connections.find((item) => item.id === profileId);
-      if (!profile) {
-        throw new Error("Host nao encontrado para criar sessao.");
-      }
-      const session = await getOrCreateSession(profile);
-      return session.session_id;
-    },
-    [connections, getOrCreateSession],
-  );
 
   const openPathInTerminal = useCallback(
     async (sourceId: string, path: string) => {
@@ -1632,9 +2340,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         addPendingTerminalBlock(profileId);
         setCreateBlockModalOpen(false);
         return;
-      } else if (createSourceDraft.startsWith("profile:")) {
+      } else if (createSourceDraft.startsWith("profile:") && createBlockKind === "sftp") {
         const profileId = createSourceDraft.replace("profile:", "");
-        sourceId = await connectProfileSession(profileId);
+        addPendingSftpBlock(profileId);
+        setCreateBlockModalOpen(false);
+        return;
       }
 
       if (createBlockKind === "terminal") {
@@ -1648,11 +2358,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     }
   }, [
     addLogsBlock,
+    addPendingSftpBlock,
     addPendingTerminalBlock,
     addSftpBlock,
     addTerminalBlock,
     connectLocalTerminal,
-    connectProfileSession,
     createBlockKind,
     createSourceDraft,
     openFile,
@@ -1864,6 +2574,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                             connectError: null,
                             hostChallenge: null,
                             acceptUnknownHost: false,
+                            retryAttempt: 0,
+                            retryInSeconds: null,
                           }
                         : item,
                     ),
@@ -1873,21 +2585,31 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 ensureSessionListeners={ensureSessionListeners}
                 sshWrite={sshWrite}
                 onTrustHost={() => {
+                  clearBlockRetryTimers(block.id);
                   setBlocks((current) =>
                     current.map((item) =>
                       item.id === block.id && item.kind === "terminal"
-                        ? { ...item, acceptUnknownHost: true }
+                        ? { ...item, acceptUnknownHost: true, retryAttempt: 0, retryInSeconds: null }
                         : item,
                     ),
                   );
-                  void resolvePendingTerminalConnection(block.id, { acceptUnknownHost: true });
+                  void resolvePendingTerminalConnection(block.id, { acceptUnknownHost: true, retryAttempt: 0 });
                 }}
                 onRetry={() => {
                   if (!block.pendingProfileId) {
                     return;
                   }
+                  clearBlockRetryTimers(block.id);
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "terminal"
+                        ? { ...item, retryAttempt: 0, retryInSeconds: null }
+                        : item,
+                    ),
+                  );
                   void resolvePendingTerminalConnection(block.id, {
                     acceptUnknownHost: block.acceptUnknownHost,
+                    retryAttempt: 0,
                   });
                 }}
                 onPasswordDraftChange={(value) => {
@@ -1924,6 +2646,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                     acceptUnknownHost: block.acceptUnknownHost,
                     passwordOverride: password,
                     saveAuthChoice: block.savePasswordChoice,
+                    retryAttempt: 0,
                   });
                 }}
               />
@@ -1935,7 +2658,21 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 sourceOptions={sourceOptions}
                 transferItems={transferItemsByBlock.get(block.id) ?? []}
                 onFocus={() => focusBlock(block.id)}
-                onRefresh={(path, sourceId) => void refreshSftpBlock(block.id, path, sourceId)}
+                onRefresh={(path, sourceId) => {
+                  if (block.pendingProfileId) {
+                    clearBlockRetryTimers(block.id);
+                    setBlocks((current) =>
+                      current.map((item) =>
+                        item.id === block.id && item.kind === "sftp"
+                          ? { ...item, retryAttempt: 0, retryInSeconds: null, path }
+                          : item,
+                      ),
+                    );
+                    void resolvePendingSftpConnection(block.id, { retryAttempt: 0 });
+                    return;
+                  }
+                  void refreshSftpBlock(block.id, path, sourceId);
+                }}
                 onSelectSort={(sortKey) =>
                   setBlocks((current) =>
                     current.map((item) => {
@@ -1964,6 +2701,72 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 }}
                 onDropTransfer={(payload, targetPath) => void transferBetweenBlocks(payload, block.id, targetPath)}
                 onContextAction={(action, entry) => void handleSftpContextAction(block, action, entry)}
+                onTrustHost={() => {
+                  clearBlockRetryTimers(block.id);
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "sftp"
+                        ? { ...item, acceptUnknownHost: true, retryAttempt: 0, retryInSeconds: null }
+                        : item,
+                    ),
+                  );
+                  void resolvePendingSftpConnection(block.id, { acceptUnknownHost: true, retryAttempt: 0 });
+                }}
+                onRetry={() => {
+                  if (!block.pendingProfileId) {
+                    return;
+                  }
+                  clearBlockRetryTimers(block.id);
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "sftp"
+                        ? { ...item, retryAttempt: 0, retryInSeconds: null }
+                        : item,
+                    ),
+                  );
+                  void resolvePendingSftpConnection(block.id, {
+                    acceptUnknownHost: block.acceptUnknownHost,
+                    retryAttempt: 0,
+                  });
+                }}
+                onPasswordDraftChange={(value) => {
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "sftp"
+                        ? { ...item, passwordDraft: value }
+                        : item,
+                    ),
+                  );
+                }}
+                onSavePasswordChange={(checked) => {
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "sftp"
+                        ? { ...item, savePasswordChoice: checked }
+                        : item,
+                    ),
+                  );
+                }}
+                onSubmitPassword={() => {
+                  const password = block.passwordDraft.trim();
+                  if (!password) {
+                    setBlocks((current) =>
+                      current.map((item) =>
+                        item.id === block.id && item.kind === "sftp"
+                          ? { ...item, connectError: "Informe a senha para continuar." }
+                          : item,
+                      ),
+                    );
+                    return;
+                  }
+                  clearBlockRetryTimers(block.id);
+                  void resolvePendingSftpConnection(block.id, {
+                    acceptUnknownHost: block.acceptUnknownHost,
+                    passwordOverride: password,
+                    saveAuthChoice: block.savePasswordChoice,
+                    retryAttempt: 0,
+                  });
+                }}
               />
             ) : null}
 
@@ -2446,6 +3249,10 @@ function TerminalBlockView({
                   </div>
                 ) : null}
 
+                {block.retryInSeconds !== null ? (
+                  <p className="mt-3 text-xs text-amber-300">Timeout detectado. Nova tentativa em {block.retryInSeconds}s...</p>
+                ) : null}
+
                 {block.connectError ? (
                   <p className="mt-3 text-xs text-red-300">{block.connectError}</p>
                 ) : null}
@@ -2469,6 +3276,11 @@ interface SftpBlockViewProps {
   onOpenEntry: (entry: SftpEntry) => void;
   onDropTransfer: (payload: DragPayload, targetPath: string) => void;
   onContextAction: (action: SftpContextAction, entry: SftpEntry | null) => void;
+  onTrustHost: () => void;
+  onRetry: () => void;
+  onPasswordDraftChange: (value: string) => void;
+  onSavePasswordChange: (checked: boolean) => void;
+  onSubmitPassword: () => void;
 }
 
 function SftpBlockView({
@@ -2482,6 +3294,11 @@ function SftpBlockView({
   onOpenEntry,
   onDropTransfer,
   onContextAction,
+  onTrustHost,
+  onRetry,
+  onPasswordDraftChange,
+  onSavePasswordChange,
+  onSubmitPassword,
 }: SftpBlockViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
@@ -2626,6 +3443,7 @@ function SftpBlockView({
     () => transferItems.filter((item) => item.transfer.status === "running").length,
     [transferItems],
   );
+  const isConnected = block.connectStage === "ready" && !block.pendingProfileId;
 
   const runContextAction = useCallback(
     (action: SftpContextAction) => {
@@ -2639,7 +3457,7 @@ function SftpBlockView({
   return (
     <div
       ref={containerRef}
-      className="flex h-full min-h-0 flex-col"
+      className="relative flex h-full min-h-0 flex-col"
       onMouseDown={onFocus}
       onContextMenu={(event) => openContextMenu(event, null)}
       onDragOver={(event) => {
@@ -2659,6 +3477,7 @@ function SftpBlockView({
           className="h-8 rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
           value={block.sourceId}
           onChange={(event) => onRefresh(block.path, event.target.value)}
+          disabled={!isConnected}
         >
           {sourceOptions.map((option) => (
             <option key={option.id} value={option.id}>
@@ -2678,6 +3497,7 @@ function SftpBlockView({
                 onRefresh(pathDraft, block.sourceId);
               }
             }}
+            disabled={!isConnected}
           />
           <datalist id={pathListId}>
             {block.pathHistory.map((path) => (
@@ -2691,6 +3511,7 @@ function SftpBlockView({
             type="button"
             className="inline-flex h-8 w-8 items-center justify-center rounded border border-white/10 text-zinc-300 hover:border-purple-400/60 hover:bg-zinc-900"
             onClick={() => onRefresh(pathDraft, block.sourceId)}
+            disabled={!isConnected}
           >
             <RefreshCw className={cn("h-3.5 w-3.5", block.loading ? "animate-spin" : undefined)} />
           </button>
@@ -2705,6 +3526,7 @@ function SftpBlockView({
             )}
             onClick={() => setTransferMenuOpen((current) => !current)}
             title="Transferencias deste bloco"
+            disabled={!isConnected}
           >
             <MonitorUp className={cn("h-3.5 w-3.5", runningTransfers > 0 ? "animate-pulse" : undefined)} />
             {runningTransfers > 0 ? (
@@ -2779,7 +3601,7 @@ function SftpBlockView({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className={cn("min-h-0 flex-1 overflow-auto", !isConnected ? "opacity-40" : undefined)}>
         <table className="w-full select-none border-collapse text-xs">
           <thead className="sticky top-0 z-10 bg-zinc-950/95">
             <tr className="border-b border-white/10">
@@ -2888,6 +3710,113 @@ function SftpBlockView({
           </tbody>
         </table>
       </div>
+      {!isConnected ? (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-zinc-950/80 p-3">
+          <div className="w-full max-w-md rounded-lg border border-white/15 bg-zinc-950/95 p-4 shadow-2xl shadow-black/50">
+            <div className="inline-flex items-center gap-2 text-sm text-zinc-100">
+              {block.connectStage === "connecting" ? (
+                <RefreshCw className="h-4 w-4 animate-spin text-cyan-300" />
+              ) : (
+                <Folder className="h-4 w-4 text-cyan-300" />
+              )}
+              <span>{block.connectMessage}</span>
+            </div>
+            <div className="mt-3 space-y-1 text-xs text-zinc-400">
+              <p className={cn(block.connectStage === "connecting" ? "text-cyan-300" : undefined)}>1. Conectando...</p>
+              <p className={cn(block.connectStage === "verifying_fingerprint" ? "text-cyan-300" : undefined)}>
+                2. Verificando fingerprint...
+              </p>
+              <p
+                className={cn(
+                  block.connectStage === "awaiting_password" || block.connectStage === "error"
+                    ? "text-cyan-300"
+                    : undefined,
+                )}
+              >
+                3. Logando...
+              </p>
+            </div>
+
+            {block.connectStage === "verifying_fingerprint" && block.hostChallenge ? (
+              <div className="mt-3 rounded border border-white/10 bg-zinc-900/70 p-3 text-xs text-zinc-300">
+                <p className="font-medium text-zinc-100">{block.hostChallenge.message}</p>
+                <p className="mt-1">
+                  {block.hostChallenge.host}:{block.hostChallenge.port}
+                </p>
+                <p className="mt-1 break-all text-zinc-400">
+                  {block.hostChallenge.keyType} {block.hostChallenge.fingerprint}
+                </p>
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                    onClick={onTrustHost}
+                  >
+                    Confiar e continuar
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                    onClick={onRetry}
+                  >
+                    Tentar novamente
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {(block.connectStage === "awaiting_password" || block.connectStage === "error") &&
+            block.pendingProfileId ? (
+              <div className="mt-3 space-y-2">
+                <input
+                  type="password"
+                  value={block.passwordDraft}
+                  className="h-9 w-full rounded border border-white/15 bg-zinc-900 px-2 text-sm text-zinc-100 outline-none focus:border-cyan-400/60"
+                  placeholder="Senha SSH/SFTP"
+                  onChange={(event) => onPasswordDraftChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      onSubmitPassword();
+                    }
+                  }}
+                />
+                <label className="inline-flex items-center gap-2 text-xs text-zinc-400">
+                  <input
+                    type="checkbox"
+                    checked={block.savePasswordChoice}
+                    onChange={(event) => onSavePasswordChange(event.target.checked)}
+                  />
+                  Salvar senha no perfil
+                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                    onClick={onSubmitPassword}
+                  >
+                    Logar
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                    onClick={onRetry}
+                  >
+                    Repetir conexao
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {block.retryInSeconds !== null ? (
+              <p className="mt-3 text-xs text-amber-300">Timeout detectado. Nova tentativa em {block.retryInSeconds}s...</p>
+            ) : null}
+
+            {block.connectError ? (
+              <p className="mt-3 text-xs text-red-300">{block.connectError}</p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       {contextMenu ? (
         <div
           className="fixed inset-0 z-50"

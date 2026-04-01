@@ -77,7 +77,6 @@ export function createSftpEditorActions(
 
     openSftpWorkspace: async (profile: ConnectionProfile) => {
       try {
-        const session = await get().getOrCreateSession(profile);
         get().openTab({
           id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
           type: "workspace",
@@ -85,7 +84,7 @@ export function createSftpEditorActions(
           closable: true,
           profileId: profile.id,
           initialBlock: "sftp",
-          initialSourceId: session.session_id,
+          initialSourceId: `profile:${profile.id}`,
         });
       } catch (error) {
         toast.error(getError(error));

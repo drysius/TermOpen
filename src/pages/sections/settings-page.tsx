@@ -291,6 +291,7 @@ export function SettingsPage() {
             known_hosts_path: values.known_hosts_path?.trim() ?? "",
             sync_interval_minutes: values.sync_interval_minutes || 5,
             sftp_chunk_size_kb: values.sftp_chunk_size_kb || 1024,
+            sftp_reconnect_delay_seconds: values.sftp_reconnect_delay_seconds || 5,
             inactivity_lock_minutes: values.inactivity_lock_minutes || 10,
             reconnect_delay_seconds: values.reconnect_delay_seconds || 5,
           }),
@@ -408,6 +409,17 @@ export function SettingsPage() {
                 min={64}
                 max={8192}
                 {...settingsForm.register("sftp_chunk_size_kb", { valueAsNumber: true })}
+              />
+            }
+          />
+          <SettingsRow
+            title="Delay de reconnect SFTP"
+            description="Tempo em segundos para tentar novamente em timeout de conexao/listagem inicial."
+            control={
+              <Input
+                type="number"
+                min={1}
+                {...settingsForm.register("sftp_reconnect_delay_seconds", { valueAsNumber: true })}
               />
             }
           />

@@ -140,6 +140,8 @@ pub struct AppSettings {
     pub sync_interval_minutes: u32,
     #[serde(default = "default_sftp_chunk_size_kb")]
     pub sftp_chunk_size_kb: u32,
+    #[serde(default = "default_sftp_reconnect_delay_seconds")]
+    pub sftp_reconnect_delay_seconds: u32,
     #[serde(default = "default_inactivity_lock_minutes")]
     pub inactivity_lock_minutes: u32,
     #[serde(default = "default_auto_reconnect_enabled")]
@@ -184,6 +186,10 @@ fn default_sftp_chunk_size_kb() -> u32 {
     1024
 }
 
+fn default_sftp_reconnect_delay_seconds() -> u32 {
+    5
+}
+
 fn default_inactivity_lock_minutes() -> u32 {
     10
 }
@@ -222,6 +228,7 @@ impl Default for AppSettings {
             sync_on_settings_change: default_sync_on_settings_change(),
             sync_interval_minutes: default_sync_interval(),
             sftp_chunk_size_kb: default_sftp_chunk_size_kb(),
+            sftp_reconnect_delay_seconds: default_sftp_reconnect_delay_seconds(),
             inactivity_lock_minutes: default_inactivity_lock_minutes(),
             auto_reconnect_enabled: default_auto_reconnect_enabled(),
             reconnect_delay_seconds: default_reconnect_delay_seconds(),

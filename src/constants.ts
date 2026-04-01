@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sync_on_settings_change: false,
   sync_interval_minutes: 5,
   sftp_chunk_size_kb: 1024,
+  sftp_reconnect_delay_seconds: 5,
   inactivity_lock_minutes: 10,
   auto_reconnect_enabled: true,
   reconnect_delay_seconds: 5,
