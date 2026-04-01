@@ -21,6 +21,7 @@ const initialState: Omit<
   | "setWorkspaceBlockCount"
   | "setWorkspaceSnapshot"
   | "clearWorkspaceSnapshot"
+  | "setSettingsUnsavedDraft"
   | "bootstrap"
   | "loadWorkspace"
   | "vaultInit"
@@ -62,6 +63,7 @@ const initialState: Omit<
   connections: [],
   keychainEntries: [],
   settings: DEFAULT_SETTINGS,
+  settingsUnsavedDraft: null,
   syncState: INITIAL_SYNC_STATE,
   knownHosts: [],
   sessions: [],

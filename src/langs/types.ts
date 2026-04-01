@@ -255,6 +255,15 @@ export interface AppDictionary {
       confirmPlaceholder: string;
       updateButton: string;
     };
+    unsaved: {
+      title: string;
+      description: string;
+      saveAndLeave: string;
+      discardAndLeave: string;
+      stay: string;
+      preview: string;
+      emptyPreview: string;
+    };
   };
   keychain: {
     title: string;

@@ -113,4 +113,13 @@ export const settings: AppDictionary["settings"] = {
     confirmPlaceholder: "Confirm",
     updateButton: "Update Password",
   },
+  unsaved: {
+    title: "Unsaved changes",
+    description: "Do you want to save your changes before leaving settings?",
+    saveAndLeave: "Save and leave",
+    discardAndLeave: "Discard and leave",
+    stay: "Keep editing",
+    preview: "Changes preview",
+    emptyPreview: "No changes detected.",
+  },
 };

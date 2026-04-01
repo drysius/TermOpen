@@ -23,6 +23,7 @@ export interface AppState {
   connections: ConnectionProfile[];
   keychainEntries: KeychainEntry[];
   settings: AppSettings;
+  settingsUnsavedDraft: AppSettings | null;
   syncState: SyncState;
   knownHosts: KnownHostEntry[];
   sessions: SshSessionInfo[];
@@ -57,6 +58,7 @@ export interface AppActions {
   setWorkspaceBlockCount: (tabId: string, count: number) => void;
   setWorkspaceSnapshot: (tabId: string, snapshot: WorkspaceSnapshot) => void;
   clearWorkspaceSnapshot: (tabId: string) => void;
+  setSettingsUnsavedDraft: (draft: AppSettings | null) => void;
 
   bootstrap: () => Promise<void>;
   loadWorkspace: () => Promise<void>;

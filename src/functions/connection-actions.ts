@@ -47,6 +47,7 @@ export function createConnectionActions(
   | "setWorkspaceBlockCount"
   | "setWorkspaceSnapshot"
   | "clearWorkspaceSnapshot"
+  | "setSettingsUnsavedDraft"
   | "setActiveTab"
   | "setCommandInput"
   | "setBusy"
@@ -119,6 +120,11 @@ export function createConnectionActions(
         const next = { ...state.workspaceSnapshotsByTab };
         delete next[tabId];
         return { workspaceSnapshotsByTab: next };
+      }),
+
+    setSettingsUnsavedDraft: (draft) =>
+      set({
+        settingsUnsavedDraft: draft,
       }),
 
     openHostDrawer: (profile, protocol: ConnectionProtocol = "ssh") => {

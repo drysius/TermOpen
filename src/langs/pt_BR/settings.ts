@@ -113,4 +113,13 @@ export const settings: AppDictionary["settings"] = {
     confirmPlaceholder: "Confirmar",
     updateButton: "Atualizar Senha",
   },
+  unsaved: {
+    title: "Alteracoes nao salvas",
+    description: "Deseja salvar as alteracoes feitas antes de sair das configuracoes?",
+    saveAndLeave: "Salvar e sair",
+    discardAndLeave: "Descartar e sair",
+    stay: "Continuar editando",
+    preview: "Preview das alteracoes",
+    emptyPreview: "Nenhuma alteracao detectada.",
+  },
 };

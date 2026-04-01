@@ -31,12 +31,12 @@ function SettingsRow({
   control: ReactNode;
 }) {
   return (
-    <div className="grid gap-2 border-b border-white/10 py-3 md:grid-cols-[260px_1fr] md:items-center">
-      <div>
+    <div className="grid gap-2 border-b border-white/10 py-3 xl:grid-cols-3 xl:items-center">
+      <div className="xl:col-span-1">
         <p className="text-sm font-medium text-zinc-100">{title}</p>
         <p className="text-xs text-zinc-400">{description}</p>
       </div>
-      <div>{control}</div>
+      <div className="xl:col-span-2">{control}</div>
     </div>
   );
 }
@@ -101,11 +101,25 @@ function OptionDropdown<T extends string>({
   );
 }
 
+function normalizeSettingsValues(values: SettingsFormValues): AppSettings {
+  return {
+    ...values,
+    external_editor_command: values.external_editor_command?.trim() ?? "",
+    known_hosts_path: values.known_hosts_path?.trim() ?? "",
+    sync_interval_minutes: values.sync_interval_minutes || 5,
+    sftp_chunk_size_kb: values.sftp_chunk_size_kb || 1024,
+    sftp_reconnect_delay_seconds: values.sftp_reconnect_delay_seconds || 5,
+    inactivity_lock_minutes: values.inactivity_lock_minutes || 10,
+    reconnect_delay_seconds: values.reconnect_delay_seconds || 5,
+  };
+}
+
 export function SettingsPage() {
   const settings = useAppStore((state) => state.settings);
   const syncState = useAppStore((state) => state.syncState);
   const busy = useAppStore((state) => state.busy);
   const saveSettings = useAppStore((state) => state.saveSettings);
+  const setSettingsUnsavedDraft = useAppStore((state) => state.setSettingsUnsavedDraft);
   const runSync = useAppStore((state) => state.runSync);
   const syncCancel = useAppStore((state) => state.syncCancel);
   const changeMasterPassword = useAppStore((state) => state.changeMasterPassword);
@@ -138,7 +152,21 @@ export function SettingsPage() {
 
   useEffect(() => {
     settingsForm.reset(settings);
-  }, [settings, settingsForm]);
+    setSettingsUnsavedDraft(null);
+  }, [setSettingsUnsavedDraft, settings, settingsForm]);
+
+  useEffect(() => {
+    const subscription = settingsForm.watch((values) => {
+      const normalized = normalizeSettingsValues(values as SettingsFormValues);
+      const hasChanges = JSON.stringify(normalized) !== JSON.stringify(settings);
+      setSettingsUnsavedDraft(hasChanges ? normalized : null);
+    });
+
+    return () => {
+      subscription.unsubscribe();
+      setSettingsUnsavedDraft(null);
+    };
+  }, [setSettingsUnsavedDraft, settings, settingsForm]);
 
   useEffect(() => {
     const prompted = localStorage.getItem(uploadPolicyStorageKey);
@@ -287,16 +315,7 @@ export function SettingsPage() {
     <div className="h-full overflow-auto px-4 py-3">
       <form
         onSubmit={settingsForm.handleSubmit((values) =>
-          void saveSettings({
-            ...values,
-            external_editor_command: values.external_editor_command?.trim() ?? "",
-            known_hosts_path: values.known_hosts_path?.trim() ?? "",
-            sync_interval_minutes: values.sync_interval_minutes || 5,
-            sftp_chunk_size_kb: values.sftp_chunk_size_kb || 1024,
-            sftp_reconnect_delay_seconds: values.sftp_reconnect_delay_seconds || 5,
-            inactivity_lock_minutes: values.inactivity_lock_minutes || 10,
-            reconnect_delay_seconds: values.reconnect_delay_seconds || 5,
-          }),
+          void saveSettings(normalizeSettingsValues(values)).then(() => setSettingsUnsavedDraft(null)),
         )}
       >
         <div className="mb-4 grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-zinc-950/40 p-1 text-xs md:grid-cols-5">

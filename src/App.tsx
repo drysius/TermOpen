@@ -9,6 +9,7 @@ import { KeychainFormDrawer } from "@/components/drawers/keychain-form-drawer";
 import { AppHeader } from "@/components/layout/app-header";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
+import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { AboutPage } from "@/pages/sections/about-page";
 import { HomePage } from "@/pages/sections/home-page";
@@ -54,9 +55,20 @@ function pathFromSection(section: SidebarSection): string {
   return "/home";
 }
 
+function formatSettingValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return String(value);
+}
+
 function App() {
   const location = useLocation();
   const navigate = useNavigate();
+  const t = useT();
 
   const vaultStatus = useAppStore((state) => state.vaultStatus);
   const settings = useAppStore((state) => state.settings);
@@ -67,6 +79,7 @@ function App() {
   const workspaceBlockCountByTab = useAppStore((state) => state.workspaceBlockCountByTab);
   const startupConflicts = useAppStore((state) => state.startupConflicts);
   const startupSyncBusy = useAppStore((state) => state.startupSyncBusy);
+  const settingsUnsavedDraft = useAppStore((state) => state.settingsUnsavedDraft);
 
   const bootstrap = useAppStore((state) => state.bootstrap);
   const resolveStartupConflicts = useAppStore((state) => state.resolveStartupConflicts);
@@ -79,6 +92,8 @@ function App() {
   const openEditorExternal = useAppStore((state) => state.openEditorExternal);
   const vaultLock = useAppStore((state) => state.vaultLock);
   const runSync = useAppStore((state) => state.runSync);
+  const saveSettings = useAppStore((state) => state.saveSettings);
+  const setSettingsUnsavedDraft = useAppStore((state) => state.setSettingsUnsavedDraft);
 
   const lastActivityRef = useRef<number>(Date.now());
   const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
@@ -90,11 +105,25 @@ function App() {
   const [loggedUser, setLoggedUser] = useState<SyncLoggedUser | null>(null);
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
   const [headerSyncBusy, setHeaderSyncBusy] = useState(false);
+  const [pendingSettingsNavigation, setPendingSettingsNavigation] = useState<SidebarSection | null>(null);
+  const [leavingSettingsBusy, setLeavingSettingsBusy] = useState(false);
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId]);
   const pendingCloseTab = useMemo(
     () => tabs.find((tab) => tab.id === pendingCloseTabId) ?? null,
     [pendingCloseTabId, tabs],
   );
+  const settingsDiffPreview = useMemo(() => {
+    if (!settingsUnsavedDraft) {
+      return [] as Array<{ key: string; from: string; to: string }>;
+    }
+    return (Object.keys(settingsUnsavedDraft) as Array<keyof typeof settingsUnsavedDraft>)
+      .filter((key) => settings[key] !== settingsUnsavedDraft[key])
+      .map((key) => ({
+        key,
+        from: formatSettingValue(settings[key]),
+        to: formatSettingValue(settingsUnsavedDraft[key]),
+      }));
+  }, [settings, settingsUnsavedDraft]);
   const currentSection = activeTabId ? "home" : sectionFromPath(location.pathname);
   const shellClass = isWindowMaximized
     ? "flex h-full w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100"
@@ -290,6 +319,24 @@ function App() {
     await resolveStartupConflicts(decisions);
   }
 
+  async function continueNavigationAfterSettings(section: SidebarSection, saveDraft: boolean) {
+    if (leavingSettingsBusy) {
+      return;
+    }
+    setLeavingSettingsBusy(true);
+    try {
+      if (saveDraft && settingsUnsavedDraft) {
+        await saveSettings(settingsUnsavedDraft);
+      }
+      setSettingsUnsavedDraft(null);
+      setActiveTab(null);
+      navigate(pathFromSection(section));
+      setPendingSettingsNavigation(null);
+    } finally {
+      setLeavingSettingsBusy(false);
+    }
+  }
+
   if (booting) {
     return (
       <main className={shellClass}>
@@ -404,6 +451,11 @@ function App() {
         <AppSidebar
           current={currentSection}
           onSelect={(next) => {
+            if (currentSection === "settings" && next !== "settings" && settingsUnsavedDraft) {
+              setPendingSettingsNavigation(next);
+              return;
+            }
+            setSettingsUnsavedDraft(null);
             setActiveTab(null);
             navigate(pathFromSection(next));
           }}
@@ -511,6 +563,72 @@ function App() {
               </div>
             );
           })}
+        </div>
+      </Dialog>
+      <Dialog
+        open={pendingSettingsNavigation !== null}
+        title={t.settings.unsaved.title}
+        description={t.settings.unsaved.description}
+        onClose={() => {
+          if (!leavingSettingsBusy) {
+            setPendingSettingsNavigation(null);
+          }
+        }}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-white/20 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
+              disabled={leavingSettingsBusy}
+              onClick={() => setPendingSettingsNavigation(null)}
+            >
+              {t.settings.unsaved.stay}
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-white/20 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
+              disabled={leavingSettingsBusy || !pendingSettingsNavigation}
+              onClick={() => {
+                if (!pendingSettingsNavigation) {
+                  return;
+                }
+                void continueNavigationAfterSettings(pendingSettingsNavigation, false);
+              }}
+            >
+              {t.settings.unsaved.discardAndLeave}
+            </button>
+            <button
+              type="button"
+              className="rounded-md bg-cyan-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
+              disabled={leavingSettingsBusy || !pendingSettingsNavigation}
+              onClick={() => {
+                if (!pendingSettingsNavigation) {
+                  return;
+                }
+                void continueNavigationAfterSettings(pendingSettingsNavigation, true);
+              }}
+            >
+              {t.settings.unsaved.saveAndLeave}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-2">
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">{t.settings.unsaved.preview}</p>
+          {settingsDiffPreview.length === 0 ? (
+            <p className="text-sm text-zinc-400">{t.settings.unsaved.emptyPreview}</p>
+          ) : (
+            <div className="max-h-56 space-y-1 overflow-auto rounded border border-white/10 bg-zinc-950/60 p-2">
+              {settingsDiffPreview.map((item) => (
+                <div key={item.key} className="rounded border border-white/10 bg-zinc-900/60 px-2 py-1.5 text-xs">
+                  <p className="font-medium text-zinc-100">{item.key}</p>
+                  <p className="mt-0.5 text-zinc-500">
+                    {item.from} {"->"} {item.to}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </Dialog>
       <ConfirmDialog

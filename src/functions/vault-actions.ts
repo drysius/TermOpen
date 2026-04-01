@@ -154,6 +154,7 @@ export function createVaultActions(
           workspaceBlockCountByTab: {},
           workspaceSnapshotsByTab: {},
           knownHosts: [],
+          settingsUnsavedDraft: null,
           leftPane: DEFAULT_PANE,
           rightPane: { ...DEFAULT_PANE, path: "/" },
           syncState: INITIAL_SYNC_STATE,
