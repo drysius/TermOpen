@@ -55,7 +55,6 @@ pub struct ConnectionProfile {
     #[serde(default = "default_connection_protocols")]
     pub protocols: Vec<ConnectionProtocol>,
     #[serde(default = "default_connection_kind")]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<ConnectionKind>,
 }
 
