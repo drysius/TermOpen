@@ -72,6 +72,31 @@ export interface SshSessionInfo {
   session_kind: "ssh" | "local";
 }
 
+export type RdpMouseButton = "left" | "right" | "middle";
+
+export type RdpInputAction =
+  | {
+      kind: "mouse_move";
+      x: number;
+      y: number;
+    }
+  | {
+      kind: "mouse_click";
+      x: number;
+      y: number;
+      button: RdpMouseButton;
+      double_click?: boolean;
+    }
+  | {
+      kind: "key_press";
+      code: string;
+      text?: string | null;
+      ctrl?: boolean;
+      alt?: boolean;
+      shift?: boolean;
+      meta?: boolean;
+    };
+
 export type RdpCaptureResult =
   | {
       status: "ready";

@@ -39,7 +39,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sha2 = "0.10"
 ssh2 = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
-ironrdp = { version = "0.14.0", features = ["connector", "session", "graphics"] }
+ironrdp = { version = "0.14.0", features = ["connector", "session", "graphics", "core"] }
 ironrdp-blocking = "0.8.0"
 ironrdp-graphics = "0.7.0"
 ironrdp-pdu = "0.7.0"

@@ -10,10 +10,11 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use models::{
     AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, KeychainEntry, KnownHostEntry,
-    RdpCaptureResult, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult, SshSessionInfo,
-    SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState, VaultStatus, WindowState,
+    RdpCaptureResult, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult,
+    SshSessionInfo, SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState,
+    VaultStatus, WindowState,
 };
-use rdp::{capture_png_once, RdpCaptureOptions};
+use rdp::{capture_png_once, RdpCaptureOptions, RdpInputAction};
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
 use tauri::{Emitter, Manager, State};
@@ -95,8 +96,12 @@ fn split_domain_username(username: &str) -> (Option<String>, String) {
 fn looks_like_rdp_auth_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("logon")
+        || lower.contains("logon failure")
         || lower.contains("authentication")
         || lower.contains("credssp")
+        || lower.contains("sec_e_logon_denied")
+        || lower.contains("status_logon_failure")
+        || lower.contains("nla")
         || lower.contains("access denied")
         || lower.contains("password")
         || lower.contains("account restriction")
@@ -357,6 +362,7 @@ async fn rdp_capture(
     password_override: Option<String>,
     keychain_id_override: Option<String>,
     save_auth_choice: Option<bool>,
+    input_actions: Option<Vec<RdpInputAction>>,
 ) -> Result<RdpCaptureResult, String> {
     let profile = {
         let mut vault = state.vault.lock().await;
@@ -422,6 +428,10 @@ async fn rdp_capture(
         .unwrap_or(DEFAULT_RDP_HEIGHT)
         .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
 
+    let has_input_actions = input_actions
+        .as_ref()
+        .is_some_and(|actions| !actions.is_empty());
+
     let options = RdpCaptureOptions {
         host,
         port: if profile.port == 0 {
@@ -434,7 +444,12 @@ async fn rdp_capture(
         domain: domain_from_user,
         width: target_width,
         height: target_height,
-        timeout_seconds: 8,
+        timeout_seconds: if has_input_actions { 6 } else { 20 },
+        input_actions: input_actions
+            .unwrap_or_default()
+            .into_iter()
+            .take(32)
+            .collect(),
     };
 
     let captured = tokio::task::spawn_blocking(move || capture_png_once(options))
@@ -449,7 +464,7 @@ async fn rdp_capture(
             captured_at: chrono::Utc::now().timestamp(),
         }),
         Err(error) => {
-            let message = error.to_string();
+            let message = format!("{error:#}");
             if looks_like_rdp_auth_error(&message) {
                 return Ok(RdpCaptureResult::AuthRequired { message });
             }

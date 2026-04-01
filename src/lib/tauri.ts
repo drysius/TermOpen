@@ -10,6 +10,7 @@ import type {
   RecoveryProbeResult,
   ReleaseCheckResult,
   RdpCaptureResult,
+  RdpInputAction,
   SftpEntry,
   SyncLoggedUser,
   SyncConflictDecision,
@@ -71,6 +72,7 @@ export const api = {
       passwordOverride?: string | null;
       keychainIdOverride?: string | null;
       saveAuthChoice?: boolean;
+      inputActions?: RdpInputAction[];
     },
   ) =>
     invoke<RdpCaptureResult>("rdp_capture", {
@@ -80,6 +82,7 @@ export const api = {
       passwordOverride: options?.passwordOverride,
       keychainIdOverride: options?.keychainIdOverride,
       saveAuthChoice: options?.saveAuthChoice,
+      inputActions: options?.inputActions,
     }),
   sshWrite: (sessionId: string, data: string) => invoke<string>("ssh_write", { sessionId, data }),
   sshResize: (sessionId: string, cols: number, rows: number) => invoke<void>("ssh_resize", { sessionId, cols, rows }),

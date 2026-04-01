@@ -14,6 +14,7 @@ interface WorkspaceBlockControllerProps {
   subtitle?: string;
   layout: WorkspaceBlockLayout;
   zIndex?: number;
+  active?: boolean;
   interactive?: boolean;
   minWidth?: number;
   minHeight?: number;
@@ -32,6 +33,7 @@ export function WorkspaceBlockController({
   subtitle,
   layout,
   zIndex = 1,
+  active = false,
   interactive = true,
   minWidth = 320,
   minHeight = 220,
@@ -109,7 +111,11 @@ export function WorkspaceBlockController({
         })
       }
       dragHandleClassName="workspace-block-handle"
-      className="overflow-hidden rounded-md border border-white/10 bg-zinc-950 shadow-2xl"
+      className={
+        active
+          ? "overflow-hidden rounded-md border border-cyan-400/45 bg-zinc-950 shadow-[0_0_18px_rgba(34,211,238,0.22)]"
+          : "overflow-hidden rounded-md border border-white/10 bg-zinc-950 shadow-2xl"
+      }
       style={{ zIndex }}
       onMouseDown={() => onFocus?.(id)}
     >
