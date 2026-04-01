@@ -125,6 +125,22 @@ export interface AppDictionary {
       active: string;
       empty: string;
     };
+    connections: {
+      title: string;
+      subtitle: string;
+      zeroLabel: string;
+      newConnection: string;
+      createFirst: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      openSsh: string;
+      openSftp: string;
+      quickActions: string;
+      cardHint: string;
+      protocolSsh: string;
+      protocolSftp: string;
+      protocolBoth: string;
+    };
   };
   settings: {
     save: string;

@@ -40,4 +40,21 @@ export const home: AppDictionary["home"] = {
     active: "{count} active session(s). Open more blocks to work in parallel.",
     empty: "No active sessions. Use SSH/SFTP cards to start a workspace.",
   },
+  connections: {
+    title: "Connections",
+    subtitle: "Manage SSH/SFTP endpoints in one panel. Current total: {count}.",
+    zeroLabel: "Zero connections",
+    newConnection: "New Connection",
+    createFirst: "Create first connection",
+    emptyTitle: "No connections registered",
+    emptyDescription:
+      "Add a connection to open SSH terminals, browse SFTP files and start protocol-aware workspaces.",
+    openSsh: "Open SSH",
+    openSftp: "Open SFTP",
+    quickActions: "Quick actions",
+    cardHint: "Click the card to open its primary protocol.",
+    protocolSsh: "SSH",
+    protocolSftp: "SFTP",
+    protocolBoth: "SSH + SFTP",
+  },
 };

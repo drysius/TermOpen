@@ -40,4 +40,21 @@ export const home: AppDictionary["home"] = {
     active: "{count} sessao(oes) ativa(s). Abra mais blocos para trabalhar em paralelo.",
     empty: "Nenhuma sessao ativa. Use os cards SSH/SFTP para iniciar um workspace.",
   },
+  connections: {
+    title: "Connections",
+    subtitle: "Gerencie conexoes SSH/SFTP em um unico painel. Total atual: {count}.",
+    zeroLabel: "Zero conexoes",
+    newConnection: "Nova Connection",
+    createFirst: "Criar primeira connection",
+    emptyTitle: "Nenhuma connection cadastrada",
+    emptyDescription:
+      "Adicione uma connection para abrir terminal SSH, explorar arquivos SFTP e criar workspaces por protocolo.",
+    openSsh: "Abrir SSH",
+    openSftp: "Abrir SFTP",
+    quickActions: "Acoes rapidas",
+    cardHint: "Clique no card para abrir o protocolo principal.",
+    protocolSsh: "SSH",
+    protocolSftp: "SFTP",
+    protocolBoth: "SSH + SFTP",
+  },
 };

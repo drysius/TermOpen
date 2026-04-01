@@ -1,13 +1,4 @@
-import {
-  Cloud,
-  FolderOpen,
-  MoreVertical,
-  Plus,
-  Server,
-  ShieldCheck,
-  TerminalSquare,
-  Workflow,
-} from "lucide-react";
+import { FolderOpen, MoreVertical, Plus, Server, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,37 +7,32 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { supportsProtocol } from "@/functions/common";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
+import type { ConnectionProfile } from "@/types/termopen";
 
-function protocolsLabel(protocols: string[]): string {
-  if (protocols.length === 2) {
-    return "SSH + SFTP";
+function protocolLabel(profile: ConnectionProfile, t: ReturnType<typeof useT>): string {
+  const supportsSsh = supportsProtocol(profile, "ssh");
+  const supportsSftp = supportsProtocol(profile, "sftp");
+  if (supportsSsh && supportsSftp) {
+    return t.home.connections.protocolBoth;
   }
-  if (protocols[0] === "ssh") {
-    return "SSH";
+  if (supportsSsh) {
+    return t.home.connections.protocolSsh;
   }
-  return "SFTP";
+  return t.home.connections.protocolSftp;
+}
+
+function isPrimarySftp(profile: ConnectionProfile): boolean {
+  return supportsProtocol(profile, "sftp") && !supportsProtocol(profile, "ssh");
 }
 
 export function HomePage() {
   const t = useT();
   const connections = useAppStore((state) => state.connections);
   const sessions = useAppStore((state) => state.sessions);
-  const syncState = useAppStore((state) => state.syncState);
-  const vaultStatus = useAppStore((state) => state.vaultStatus);
-
   const openHostDrawer = useAppStore((state) => state.openHostDrawer);
   const deleteHost = useAppStore((state) => state.deleteHost);
   const openSsh = useAppStore((state) => state.openSsh);
   const openSftpWorkspace = useAppStore((state) => state.openSftpWorkspace);
-
-  const hostProfiles = useMemo(
-    () => connections.filter((profile) => supportsProtocol(profile, "ssh")),
-    [connections],
-  );
-  const sftpProfiles = useMemo(
-    () => connections.filter((profile) => supportsProtocol(profile, "sftp")),
-    [connections],
-  );
 
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const menuRootRef = useRef<HTMLDivElement | null>(null);
@@ -64,113 +50,79 @@ export function HomePage() {
     return () => window.removeEventListener("mousedown", onPointerDown);
   }, []);
 
-  const gridClass = "grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4";
+  const subtitle = useMemo(
+    () => t.home.connections.subtitle.replace("{count}", String(connections.length)),
+    [connections.length, t.home.connections.subtitle],
+  );
 
   return (
-    <div ref={menuRootRef} className="h-full overflow-auto px-3 py-2">
-      <section className="mb-4 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
-        <Card className="rounded-md border-white/10 bg-zinc-950/60">
-          <CardHeader className="pb-2">
-            <CardTitle className="inline-flex items-center gap-2 text-sm">
-              <Server className="h-4 w-4 text-cyan-300" />
-              {t.home.stats.hosts}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <p className="text-xl font-semibold text-zinc-100">{connections.length}</p>
-            <p className="text-xs text-zinc-500">{t.home.stats.hostsSub}</p>
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-md border-white/10 bg-zinc-950/60">
-          <CardHeader className="pb-2">
-            <CardTitle className="inline-flex items-center gap-2 text-sm">
-              <Workflow className="h-4 w-4 text-purple-300" />
-              {t.home.stats.sessions}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <p className="text-xl font-semibold text-zinc-100">{sessions.length}</p>
-            <p className="text-xs text-zinc-500">{t.home.stats.sessionsSub}</p>
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-md border-white/10 bg-zinc-950/60">
-          <CardHeader className="pb-2">
-            <CardTitle className="inline-flex items-center gap-2 text-sm">
-              <Cloud className="h-4 w-4 text-emerald-300" />
-              {t.home.stats.sync}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <p className="text-sm font-semibold text-zinc-100">
-              {syncState.connected ? t.home.stats.syncConnected : t.home.stats.syncDisconnected}
-            </p>
-            <p className="truncate text-xs text-zinc-500">{syncState.message}</p>
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-md border-white/10 bg-zinc-950/60">
-          <CardHeader className="pb-2">
-            <CardTitle className="inline-flex items-center gap-2 text-sm">
-              <ShieldCheck className="h-4 w-4 text-amber-300" />
-              {t.home.stats.vault}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <p className="text-sm font-semibold text-zinc-100">
-              {vaultStatus?.initialized ? t.home.stats.vaultInitialized : t.home.stats.vaultPending}
-            </p>
-            <p className="text-xs text-zinc-500">{vaultStatus?.locked ? t.home.stats.vaultLocked : t.home.stats.vaultUnlocked}</p>
-          </CardContent>
-        </Card>
+    <div ref={menuRootRef} className="h-full overflow-auto px-4 py-4">
+      <section className="rounded-xl border border-white/10 bg-gradient-to-br from-cyan-500/15 via-zinc-950 to-zinc-950 p-4 shadow-xl shadow-black/20">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-cyan-400/40 bg-cyan-500/10">
+            <Server className="h-5 w-5 text-cyan-200" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-base font-semibold text-zinc-100">{t.home.connections.title}</p>
+            <p className="text-xs text-zinc-400">{subtitle}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full border border-white/10 bg-zinc-900/70 px-2 py-1 text-xs text-zinc-300">
+              {connections.length > 0 ? `${connections.length}` : t.home.connections.zeroLabel}
+            </span>
+            <Button size="sm" onClick={() => openHostDrawer(undefined, "ssh")}>
+              <Plus className="mr-1 h-4 w-4" />
+              {t.home.connections.newConnection}
+            </Button>
+          </div>
+        </div>
       </section>
 
-      <section>
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-zinc-100">{t.home.hosts.title}</h2>
-          <Button size="sm" onClick={() => openHostDrawer(undefined, "ssh")}>
-            <Plus className="mr-1 h-4 w-4" /> {t.home.hosts.newHost}
-          </Button>
-        </div>
-
-        {hostProfiles.length === 0 ? (
-          <Card className="rounded-md border-dashed border-white/15 bg-zinc-950/40">
-            <CardContent className="py-6">
-              <p className="text-sm font-medium text-zinc-200">{t.home.hosts.emptyTitle}</p>
-              <p className="mt-1 text-xs text-zinc-500">
-                {t.home.hosts.emptyDescription}
-              </p>
-              <Button size="sm" className="mt-3" onClick={() => openHostDrawer(undefined, "ssh")}>
-                <Plus className="mr-1 h-4 w-4" /> {t.home.hosts.addButton}
+      <section className="mt-4">
+        {connections.length === 0 ? (
+          <Card className="rounded-xl border-dashed border-white/20 bg-zinc-950/60">
+            <CardContent className="py-8 text-center">
+              <p className="text-base font-semibold text-zinc-100">{t.home.connections.emptyTitle}</p>
+              <p className="mx-auto mt-2 max-w-xl text-sm text-zinc-400">{t.home.connections.emptyDescription}</p>
+              <Button className="mt-4" onClick={() => openHostDrawer(undefined, "ssh")}>
+                <Plus className="mr-1 h-4 w-4" />
+                {t.home.connections.createFirst}
               </Button>
             </CardContent>
           </Card>
         ) : (
-          <div className={gridClass}>
-            {hostProfiles.map((profile) => {
-              const protocols = profile.protocols?.length
-                ? profile.protocols
-                : profile.kind === "host"
-                  ? ["ssh"]
-                  : profile.kind === "sftp"
-                    ? ["sftp"]
-                    : ["ssh", "sftp"];
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            {connections.map((profile) => {
+              const hasSsh = supportsProtocol(profile, "ssh");
+              const hasSftp = supportsProtocol(profile, "sftp");
               const isMenuOpen = menuOpenId === profile.id;
               return (
                 <Card
                   key={profile.id}
-                  className="cursor-pointer rounded-md border-white/10 bg-zinc-950/60 transition hover:border-purple-400/40"
-                  onClick={() => void openSsh(profile)}
+                  className="group cursor-pointer rounded-xl border-white/10 bg-zinc-950/70 transition hover:border-cyan-400/40"
+                  onClick={() => {
+                    if (isPrimarySftp(profile)) {
+                      void openSftpWorkspace(profile);
+                      return;
+                    }
+                    if (hasSsh) {
+                      void openSsh(profile);
+                    } else if (hasSftp) {
+                      void openSftpWorkspace(profile);
+                    }
+                  }}
                 >
                   <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center justify-between text-sm">
-                      <span className="inline-flex items-center gap-2">
-                        <TerminalSquare className="h-4 w-4 text-purple-300" />
-                        {profile.name}
+                    <CardTitle className="flex items-start justify-between gap-2 text-sm">
+                      <span className="inline-flex min-w-0 items-center gap-2">
+                        {isPrimarySftp(profile) ? (
+                          <FolderOpen className="h-4 w-4 shrink-0 text-cyan-300" />
+                        ) : (
+                          <TerminalSquare className="h-4 w-4 shrink-0 text-cyan-300" />
+                        )}
+                        <span className="truncate">{profile.name}</span>
                       </span>
-                      <div className="relative flex items-center gap-2">
-                        <Badge variant="outline">{protocolsLabel(protocols)}</Badge>
+                      <div className="relative shrink-0">
                         <button
                           type="button"
                           className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 hover:bg-zinc-900"
@@ -182,13 +134,13 @@ export function HomePage() {
                           <MoreVertical className="h-4 w-4" />
                         </button>
                         {isMenuOpen ? (
-                          <div className="absolute right-0 top-8 z-20 min-w-[150px] rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
+                          <div className="absolute right-0 top-8 z-[240] min-w-[170px] rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
                             <button
                               type="button"
                               className="w-full rounded px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-900"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                openHostDrawer(profile, "ssh");
+                                openHostDrawer(profile, hasSftp ? "sftp" : "ssh");
                                 setMenuOpenId(null);
                               }}
                             >
@@ -209,132 +161,51 @@ export function HomePage() {
                         ) : null}
                       </div>
                     </CardTitle>
-                    <p className="text-xs text-zinc-400">
+                    <p className="truncate text-xs text-zinc-400">
                       {profile.username}@{profile.host}:{profile.port}
                     </p>
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <p className="text-xs text-zinc-500">{t.home.hosts.clickToOpen}</p>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      <section className="mt-4">
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-zinc-100">{t.home.sftp.title}</h2>
-          <Button size="sm" onClick={() => openHostDrawer(undefined, "sftp")}>
-            <Plus className="mr-1 h-4 w-4" /> {t.home.sftp.newSftp}
-          </Button>
-        </div>
-
-        {sftpProfiles.length === 0 ? (
-          <Card className="rounded-md border-dashed border-white/15 bg-zinc-950/40">
-            <CardContent className="py-6">
-              <p className="text-sm font-medium text-zinc-200">{t.home.sftp.emptyTitle}</p>
-              <p className="mt-1 text-xs text-zinc-500">
-                {t.home.sftp.emptyDescription}
-              </p>
-              <Button size="sm" className="mt-3" onClick={() => openHostDrawer(undefined, "sftp")}>
-                <Plus className="mr-1 h-4 w-4" /> {t.home.sftp.addButton}
-              </Button>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className={gridClass}>
-            {sftpProfiles.map((profile) => {
-              const protocols = profile.protocols?.length
-                ? profile.protocols
-                : profile.kind === "host"
-                  ? ["ssh"]
-                  : profile.kind === "sftp"
-                    ? ["sftp"]
-                    : ["ssh", "sftp"];
-              const menuId = `${profile.id}:sftp`;
-              const isMenuOpen = menuOpenId === menuId;
-              return (
-                <Card
-                  key={profile.id}
-                  className="cursor-pointer rounded-md border-white/10 bg-zinc-950/60 transition hover:border-purple-400/40"
-                  onClick={() => void openSftpWorkspace(profile)}
-                >
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center justify-between text-sm">
-                      <span className="inline-flex items-center gap-2">
-                        <FolderOpen className="h-4 w-4 text-purple-300" />
-                        {profile.name}
-                      </span>
-                      <div className="relative flex items-center gap-2">
-                        <Badge variant="outline">{protocolsLabel(protocols)}</Badge>
-                        <button
-                          type="button"
-                          className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 hover:bg-zinc-900"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setMenuOpenId(isMenuOpen ? null : menuId);
-                          }}
-                        >
-                          <MoreVertical className="h-4 w-4" />
-                        </button>
-                        {isMenuOpen ? (
-                          <div className="absolute right-0 top-8 z-20 min-w-[150px] rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
-                            <button
-                              type="button"
-                              className="w-full rounded px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-900"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openHostDrawer(profile, "sftp");
-                                setMenuOpenId(null);
-                              }}
-                            >
-                              {t.home.sftp.edit}
-                            </button>
-                            <button
-                              type="button"
-                              className="w-full rounded px-2 py-1.5 text-left text-xs text-red-300 hover:bg-zinc-900"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void deleteHost(profile.id);
-                                setMenuOpenId(null);
-                              }}
-                            >
-                              {t.home.sftp.remove}
-                            </button>
-                          </div>
+                    <div className="mb-3 flex items-center gap-1">
+                      <Badge variant="outline">{protocolLabel(profile, t)}</Badge>
+                      <Badge variant="secondary">{sessions.length} session(s)</Badge>
+                    </div>
+                    <p className="text-xs text-zinc-500">{t.home.connections.cardHint}</p>
+                    <div className="mt-3">
+                      <p className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">{t.home.connections.quickActions}</p>
+                      <div className="flex gap-2">
+                        {hasSsh ? (
+                          <button
+                            type="button"
+                            className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void openSsh(profile);
+                            }}
+                          >
+                            {t.home.connections.openSsh}
+                          </button>
+                        ) : null}
+                        {hasSftp ? (
+                          <button
+                            type="button"
+                            className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void openSftpWorkspace(profile);
+                            }}
+                          >
+                            {t.home.connections.openSftp}
+                          </button>
                         ) : null}
                       </div>
-                    </CardTitle>
-                    <p className="text-xs text-zinc-400">
-                      {profile.username}@{profile.host}:{profile.port}
-                    </p>
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <p className="text-xs text-zinc-500">{t.home.sftp.clickToOpen}</p>
+                    </div>
                   </CardContent>
                 </Card>
               );
             })}
           </div>
         )}
-      </section>
-
-      <section className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        <Card className="rounded-md border-white/10 bg-zinc-950/60">
-          <CardHeader className="pb-2">
-            <CardTitle className="inline-flex items-center gap-2 text-sm">
-              <Server className="h-4 w-4 text-purple-300" />
-              {t.home.sessionsCard.title}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0 text-xs text-zinc-500">
-            {sessions.length > 0
-              ? t.home.sessionsCard.active.replace("{count}", String(sessions.length))
-              : t.home.sessionsCard.empty}
-          </CardContent>
-        </Card>
       </section>
     </div>
   );
