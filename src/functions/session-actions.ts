@@ -221,21 +221,15 @@ export function createSessionActions(
     },
 
     openSsh: async (profile: ConnectionProfile) => {
-      try {
-        const session = await get().getOrCreateSession(profile);
-        get().openTab({
-          id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
-          type: "workspace",
-          title: `Workspace - ${profile.name}`,
-          closable: true,
-          profileId: profile.id,
-          initialBlock: "terminal",
-          initialSourceId: session.session_id,
-        });
-        get().appendSessionBuffer(session.session_id, `\r\nConnected to ${profile.host}\r\n`);
-      } catch (error) {
-        toast.error(getError(error));
-      }
+      get().openTab({
+        id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+        type: "workspace",
+        title: `Workspace - ${profile.name}`,
+        closable: true,
+        profileId: profile.id,
+        initialBlock: "terminal",
+        initialSourceId: `profile:${profile.id}`,
+      });
     },
 
     sshWrite: async (sessionId, data) => {

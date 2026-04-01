@@ -57,9 +57,27 @@ interface BaseBlock {
   maximized: boolean;
 }
 
+type TerminalConnectStage = "ready" | "connecting" | "verifying_fingerprint" | "awaiting_password" | "error";
+
+interface PendingHostChallenge {
+  host: string;
+  port: number;
+  keyType: string;
+  fingerprint: string;
+  message: string;
+}
+
 interface TerminalBlock extends BaseBlock {
   kind: "terminal";
-  sessionId: string;
+  sessionId: string | null;
+  pendingProfileId: string | null;
+  connectStage: TerminalConnectStage;
+  connectMessage: string;
+  connectError: string | null;
+  hostChallenge: PendingHostChallenge | null;
+  passwordDraft: string;
+  savePasswordChoice: boolean;
+  acceptUnknownHost: boolean;
 }
 
 interface SftpBlock extends BaseBlock {
@@ -157,6 +175,21 @@ function writeDragPayload(dataTransfer: DataTransfer, payload: DragPayload): voi
 
 function createId(prefix: string): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function parseProfileSourceId(sourceId?: string): string | null {
+  if (!sourceId || !sourceId.startsWith("profile:")) {
+    return null;
+  }
+  const value = sourceId.slice("profile:".length).trim();
+  return value.length > 0 ? value : null;
+}
+
+function terminalDisconnectedLabel(sessionId: string | null): string {
+  if (!sessionId) {
+    return "Sessao pendente";
+  }
+  return `${sessionId} (desconectada)`;
 }
 
 function formatSize(size: number): string {
@@ -340,6 +373,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const connections = useAppStore((state) => state.connections);
   const settings = useAppStore((state) => state.settings);
   const sshWrite = useAppStore((state) => state.sshWrite);
+  const appendSessionBuffer = useAppStore((state) => state.appendSessionBuffer);
   const ensureSessionListeners = useAppStore((state) => state.ensureSessionListeners);
   const getOrCreateSession = useAppStore((state) => state.getOrCreateSession);
   const setWorkspaceSessions = useAppStore((state) => state.setWorkspaceSessions);
@@ -373,7 +407,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       new Set(
         blocks
           .flatMap((block) => {
-            if (block.kind === "terminal") {
+            if (block.kind === "terminal" && block.sessionId) {
               return [block.sessionId];
             }
             if (block.kind === "sftp" && block.sourceId !== "local") {
@@ -804,6 +838,172 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     [refreshSftpBlock, sessions, sessionHostById, workspaceSize.height, workspaceSize.width],
   );
 
+  const resolvePendingTerminalConnection = useCallback(
+    async (
+      blockId: string,
+      options?: {
+        acceptUnknownHost?: boolean;
+        passwordOverride?: string | null;
+        saveAuthChoice?: boolean;
+      },
+    ) => {
+      const target = blocksRef.current.find(
+        (item): item is TerminalBlock => item.id === blockId && item.kind === "terminal",
+      );
+      if (!target || !target.pendingProfileId) {
+        return;
+      }
+
+      const profile = connections.find((item) => item.id === target.pendingProfileId);
+      if (!profile) {
+        setBlocks((current) =>
+          current.map((block) =>
+            block.id === blockId && block.kind === "terminal"
+              ? {
+                  ...block,
+                  connectStage: "error",
+                  connectMessage: "Host nao encontrado.",
+                  connectError: "Host nao encontrado para concluir conexao.",
+                }
+              : block,
+          ),
+        );
+        return;
+      }
+
+      const acceptUnknownHost = options?.acceptUnknownHost ?? target.acceptUnknownHost;
+      const passwordOverride = options?.passwordOverride ?? null;
+      const saveAuthChoice = options?.saveAuthChoice ?? false;
+      const connectingMessage = passwordOverride
+        ? "Logando..."
+        : acceptUnknownHost
+          ? "Verificando fingerprint..."
+          : "Conectando...";
+
+      setBlocks((current) =>
+        current.map((block) =>
+          block.id === blockId && block.kind === "terminal"
+            ? {
+                ...block,
+                connectStage: "connecting",
+                connectMessage: connectingMessage,
+                connectError: null,
+                hostChallenge: null,
+              }
+            : block,
+        ),
+      );
+
+      try {
+        const result = await api.sshConnectEx(profile.id, {
+          acceptUnknownHost,
+          passwordOverride,
+          saveAuthChoice,
+        });
+
+        if (result.status === "connected") {
+          const session = result.session;
+          useAppStore.setState((state) => ({
+            sessions: state.sessions.some((item) => item.session_id === session.session_id)
+              ? state.sessions
+              : [...state.sessions, session],
+          }));
+          await ensureSessionListeners(session.session_id);
+
+          const prefix = "SSH";
+          const host = profile.host || session.session_id.slice(0, 8);
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "terminal"
+                ? {
+                    ...block,
+                    title: `${prefix} - ${host}`,
+                    sessionId: session.session_id,
+                    pendingProfileId: null,
+                    connectStage: "ready",
+                    connectMessage: "Logado",
+                    connectError: null,
+                    hostChallenge: null,
+                    acceptUnknownHost: false,
+                  }
+                : block,
+            ),
+          );
+          appendSessionBuffer(session.session_id, `\r\nConnected to ${profile.host}\r\n`);
+          return;
+        }
+
+        if (result.status === "unknown_host_challenge") {
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "terminal"
+                ? {
+                    ...block,
+                    connectStage: "verifying_fingerprint",
+                    connectMessage: "Fingerprint do host precisa ser confirmada.",
+                    connectError: null,
+                    hostChallenge: {
+                      host: result.host,
+                      port: result.port,
+                      keyType: result.key_type,
+                      fingerprint: result.fingerprint,
+                      message: result.message,
+                    },
+                  }
+                : block,
+            ),
+          );
+          return;
+        }
+
+        if (result.status === "auth_required") {
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "terminal"
+                ? {
+                    ...block,
+                    connectStage: "awaiting_password",
+                    connectMessage: "Login pendente.",
+                    connectError: result.message,
+                    hostChallenge: null,
+                  }
+                : block,
+            ),
+          );
+          return;
+        }
+
+        setBlocks((current) =>
+          current.map((block) =>
+            block.id === blockId && block.kind === "terminal"
+              ? {
+                  ...block,
+                  connectStage: "error",
+                  connectMessage: "Falha ao conectar.",
+                  connectError: result.message,
+                }
+              : block,
+          ),
+        );
+      } catch (error) {
+        setBlocks((current) =>
+          current.map((block) =>
+            block.id === blockId && block.kind === "terminal"
+              ? {
+                  ...block,
+                  connectStage: "error",
+                  connectMessage: "Falha ao conectar.",
+                  connectError: getError(error),
+                  hostChallenge: null,
+                }
+              : block,
+          ),
+        );
+      }
+    },
+    [appendSessionBuffer, connections, ensureSessionListeners],
+  );
+
   const addTerminalBlock = useCallback(
     (sessionId?: string) => {
       const resolved = sessionId ?? sessions[0]?.session_id ?? null;
@@ -821,6 +1021,14 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         kind: "terminal",
         title: count > 0 ? `${baseTitle} (${count + 1})` : baseTitle,
         sessionId: resolved,
+        pendingProfileId: null,
+        connectStage: "ready",
+        connectMessage: "Logado",
+        connectError: null,
+        hostChallenge: null,
+        passwordDraft: "",
+        savePasswordChoice: false,
+        acceptUnknownHost: false,
         layout: workspaceDefaultLayout("terminal", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
         maximized: false,
@@ -831,19 +1039,61 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     [ensureSessionListeners, localSessionIds, sessionHostById, sessions, workspaceSize.height, workspaceSize.width],
   );
 
+  const addPendingTerminalBlock = useCallback(
+    (profileId: string) => {
+      const profile = connections.find((item) => item.id === profileId);
+      if (!profile) {
+        toast.error("Host nao encontrado para abrir o terminal.");
+        return;
+      }
+
+      const host = profile.host || profileId.slice(0, 8);
+      const baseTitle = `SSH - ${host}`;
+      const count = blocksRef.current.filter((item) => item.kind === "terminal" && item.title.startsWith(baseTitle)).length;
+      const blockId = createId("terminal");
+      const block: TerminalBlock = {
+        id: blockId,
+        kind: "terminal",
+        title: count > 0 ? `${baseTitle} (${count + 1})` : baseTitle,
+        sessionId: null,
+        pendingProfileId: profileId,
+        connectStage: "connecting",
+        connectMessage: "Conectando...",
+        connectError: null,
+        hostChallenge: null,
+        passwordDraft: "",
+        savePasswordChoice: false,
+        acceptUnknownHost: false,
+        layout: workspaceDefaultLayout("terminal", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
+        zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+        maximized: false,
+      };
+      setBlocks((current) => [...current, block]);
+      window.setTimeout(() => {
+        void resolvePendingTerminalConnection(blockId);
+      }, 0);
+    },
+    [connections, resolvePendingTerminalConnection, workspaceSize.height, workspaceSize.width],
+  );
+
   useEffect(() => {
     if (initializedRef.current) {
       return;
     }
     initializedRef.current = true;
     if (initialBlock === "terminal" && initialSourceId) {
+      const profileId = parseProfileSourceId(initialSourceId);
+      if (profileId) {
+        addPendingTerminalBlock(profileId);
+        return;
+      }
       addTerminalBlock(initialSourceId);
       return;
     }
     if (initialBlock === "sftp") {
       addSftpBlock(initialSourceId ?? "local");
     }
-  }, [addSftpBlock, addTerminalBlock, initialBlock, initialSourceId]);
+  }, [addPendingTerminalBlock, addSftpBlock, addTerminalBlock, initialBlock, initialSourceId]);
 
   const connectLocalTerminal = useCallback(async (): Promise<string> => {
     const session = await api.localTerminalConnect(null);
@@ -876,9 +1126,9 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       if (sourceId === "local") {
         const existing = blocksRef.current.find(
           (item): item is TerminalBlock =>
-            item.kind === "terminal" && localSessionIds.has(item.sessionId),
+            item.kind === "terminal" && !!item.sessionId && localSessionIds.has(item.sessionId),
         );
-        if (existing) {
+        if (existing?.sessionId) {
           sessionId = existing.sessionId;
         } else {
           sessionId = await connectLocalTerminal();
@@ -1026,6 +1276,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       let sourceId = createSourceDraft;
       if (createSourceDraft === "local" && createBlockKind === "terminal") {
         sourceId = await connectLocalTerminal();
+      } else if (createSourceDraft.startsWith("profile:") && createBlockKind === "terminal") {
+        const profileId = createSourceDraft.replace("profile:", "");
+        addPendingTerminalBlock(profileId);
+        setCreateBlockModalOpen(false);
+        return;
       } else if (createSourceDraft.startsWith("profile:")) {
         const profileId = createSourceDraft.replace("profile:", "");
         sourceId = await connectProfileSession(profileId);
@@ -1041,6 +1296,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       toast.error(getError(error));
     }
   }, [
+    addPendingTerminalBlock,
     addSftpBlock,
     addTerminalBlock,
     connectLocalTerminal,
@@ -1201,7 +1457,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           >
             {block.kind === "terminal" ? (
               <TerminalBlockView
-                sessionId={block.sessionId}
+                block={block}
                 sessionOptions={terminalOptions}
                 onSessionChange={(nextSessionId) => {
                   const nextHost = sessionHostById.get(nextSessionId) ?? nextSessionId.slice(0, 8);
@@ -1213,6 +1469,12 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                             ...item,
                             sessionId: nextSessionId,
                             title: `${nextPrefix} - ${nextHost}`,
+                            pendingProfileId: null,
+                            connectStage: "ready",
+                            connectMessage: "Logado",
+                            connectError: null,
+                            hostChallenge: null,
+                            acceptUnknownHost: false,
                           }
                         : item,
                     ),
@@ -1221,6 +1483,60 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 }}
                 ensureSessionListeners={ensureSessionListeners}
                 sshWrite={sshWrite}
+                onTrustHost={() => {
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "terminal"
+                        ? { ...item, acceptUnknownHost: true }
+                        : item,
+                    ),
+                  );
+                  void resolvePendingTerminalConnection(block.id, { acceptUnknownHost: true });
+                }}
+                onRetry={() => {
+                  if (!block.pendingProfileId) {
+                    return;
+                  }
+                  void resolvePendingTerminalConnection(block.id, {
+                    acceptUnknownHost: block.acceptUnknownHost,
+                  });
+                }}
+                onPasswordDraftChange={(value) => {
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "terminal"
+                        ? { ...item, passwordDraft: value }
+                        : item,
+                    ),
+                  );
+                }}
+                onSavePasswordChange={(checked) => {
+                  setBlocks((current) =>
+                    current.map((item) =>
+                      item.id === block.id && item.kind === "terminal"
+                        ? { ...item, savePasswordChoice: checked }
+                        : item,
+                    ),
+                  );
+                }}
+                onSubmitPassword={() => {
+                  const password = block.passwordDraft.trim();
+                  if (!password) {
+                    setBlocks((current) =>
+                      current.map((item) =>
+                        item.id === block.id && item.kind === "terminal"
+                          ? { ...item, connectError: "Informe a senha para continuar." }
+                          : item,
+                      ),
+                    );
+                    return;
+                  }
+                  void resolvePendingTerminalConnection(block.id, {
+                    acceptUnknownHost: block.acceptUnknownHost,
+                    passwordOverride: password,
+                    saveAuthChoice: block.savePasswordChoice,
+                  });
+                }}
               />
             ) : null}
 
@@ -1378,33 +1694,52 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
 }
 
 interface TerminalBlockViewProps {
-  sessionId: string;
+  block: TerminalBlock;
   sessionOptions: Array<{ id: string; label: string }>;
   onSessionChange: (sessionId: string) => void;
   ensureSessionListeners: (sessionId: string) => Promise<void>;
   sshWrite: (sessionId: string, data: string) => Promise<void>;
+  onTrustHost: () => void;
+  onRetry: () => void;
+  onPasswordDraftChange: (value: string) => void;
+  onSavePasswordChange: (checked: boolean) => void;
+  onSubmitPassword: () => void;
 }
 
 function TerminalBlockView({
-  sessionId,
+  block,
   sessionOptions,
   onSessionChange,
   ensureSessionListeners,
   sshWrite,
+  onTrustHost,
+  onRetry,
+  onPasswordDraftChange,
+  onSavePasswordChange,
+  onSubmitPassword,
 }: TerminalBlockViewProps) {
+  const { sessionId } = block;
+  const settings = useAppStore((state) => state.settings);
   const selectableSessions = useMemo(() => {
+    if (!sessionId) {
+      return [{ id: "", label: terminalDisconnectedLabel(null) }, ...sessionOptions];
+    }
     if (sessionOptions.some((option) => option.id === sessionId)) {
       return sessionOptions;
     }
-    return [{ id: sessionId, label: `${sessionId} (desconectada)` }, ...sessionOptions];
+    return [{ id: sessionId, label: terminalDisconnectedLabel(sessionId) }, ...sessionOptions];
   }, [sessionId, sessionOptions]);
-  const buffer = useAppStore((state) => state.sessionBuffers[sessionId] ?? "");
+  const buffer = useAppStore((state) => (sessionId ? state.sessionBuffers[sessionId] ?? "" : ""));
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const writtenRef = useRef(0);
+  const isConnected = block.connectStage === "ready" && !!sessionId;
 
   const safeResize = useCallback(() => {
+    if (!sessionId) {
+      return;
+    }
     const term = termRef.current;
     const fit = fitRef.current;
     if (!term || !fit) {
@@ -1415,10 +1750,16 @@ function TerminalBlockView({
   }, [sessionId]);
 
   useEffect(() => {
+    if (!sessionId || !isConnected) {
+      return;
+    }
     void ensureSessionListeners(sessionId);
-  }, [ensureSessionListeners, sessionId]);
+  }, [ensureSessionListeners, isConnected, sessionId]);
 
   useEffect(() => {
+    if (!sessionId || !isConnected) {
+      return;
+    }
     const host = hostRef.current;
     if (!host) {
       return;
@@ -1455,8 +1796,33 @@ function TerminalBlockView({
     terminal.open(host);
     fitAddon.fit();
 
+    const selectionDisposable = settings.terminal_copy_on_select
+      ? terminal.onSelectionChange(() => {
+          const selection = terminal.getSelection();
+          if (selection) {
+            void navigator.clipboard.writeText(selection).catch(() => undefined);
+          }
+        })
+      : null;
+
+    const onContextMenu = (event: globalThis.MouseEvent) => {
+      if (!settings.terminal_right_click_paste) {
+        return;
+      }
+      event.preventDefault();
+      void navigator.clipboard.readText().then((value) => {
+        if (value) {
+          void sshWrite(sessionId, value);
+        }
+      });
+    };
+    host.addEventListener("contextmenu", onContextMenu);
+
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") {
+        return true;
+      }
+      if (!settings.terminal_ctrl_shift_shortcuts) {
         return true;
       }
       const key = event.key.toLowerCase();
@@ -1491,14 +1857,26 @@ function TerminalBlockView({
 
     return () => {
       disposable.dispose();
+      selectionDisposable?.dispose();
+      host.removeEventListener("contextmenu", onContextMenu);
       terminal.dispose();
       termRef.current = null;
       fitRef.current = null;
       writtenRef.current = 0;
     };
-  }, [sessionId, sshWrite]);
+  }, [
+    isConnected,
+    sessionId,
+    settings.terminal_copy_on_select,
+    settings.terminal_ctrl_shift_shortcuts,
+    settings.terminal_right_click_paste,
+    sshWrite,
+  ]);
 
   useEffect(() => {
+    if (!isConnected) {
+      return;
+    }
     const term = termRef.current;
     if (!term) {
       return;
@@ -1514,13 +1892,19 @@ function TerminalBlockView({
   }, [buffer]);
 
   useEffect(() => {
+    if (!sessionId || !isConnected) {
+      return;
+    }
     const timer = window.setInterval(() => {
       void sshWrite(sessionId, "");
     }, 180);
     return () => window.clearInterval(timer);
-  }, [sessionId, sshWrite]);
+  }, [isConnected, sessionId, sshWrite]);
 
   useEffect(() => {
+    if (!sessionId || !isConnected) {
+      return;
+    }
     const host = hostRef.current;
     if (!host) {
       return;
@@ -1528,7 +1912,7 @@ function TerminalBlockView({
     const observer = new ResizeObserver(() => safeResize());
     observer.observe(host);
     return () => observer.disconnect();
-  }, [safeResize]);
+  }, [isConnected, safeResize, sessionId]);
 
   return (
     <div className="h-full min-h-0 overflow-hidden bg-zinc-950 p-1.5">
@@ -1537,8 +1921,12 @@ function TerminalBlockView({
           <TerminalSquare className="h-4 w-4 text-purple-300" />
           <select
             className="h-7 min-w-[220px] rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
-            value={sessionId}
-            onChange={(event) => onSessionChange(event.target.value)}
+            value={sessionId ?? ""}
+            onChange={(event) => {
+              if (event.target.value) {
+                onSessionChange(event.target.value);
+              }
+            }}
           >
             {selectableSessions.map((option) => (
               <option key={option.id} value={option.id}>
@@ -1547,8 +1935,111 @@ function TerminalBlockView({
             ))}
           </select>
         </div>
-        <div className="min-h-0 flex-1 overflow-hidden px-1 py-1">
-          <div ref={hostRef} className="h-full w-full overflow-hidden" />
+        <div className="relative min-h-0 flex-1 overflow-hidden px-1 py-1">
+          <div ref={hostRef} className={cn("h-full w-full overflow-hidden", !isConnected ? "opacity-40" : "")} />
+          {!isConnected ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80 p-3">
+              <div className="w-full max-w-md rounded-lg border border-white/15 bg-zinc-950/95 p-4 shadow-2xl shadow-black/50">
+                <div className="inline-flex items-center gap-2 text-sm text-zinc-100">
+                  {block.connectStage === "connecting" ? (
+                    <RefreshCw className="h-4 w-4 animate-spin text-cyan-300" />
+                  ) : (
+                    <TerminalSquare className="h-4 w-4 text-cyan-300" />
+                  )}
+                  <span>{block.connectMessage}</span>
+                </div>
+                <div className="mt-3 space-y-1 text-xs text-zinc-400">
+                  <p className={cn(block.connectStage === "connecting" ? "text-cyan-300" : undefined)}>1. Conectando...</p>
+                  <p className={cn(block.connectStage === "verifying_fingerprint" ? "text-cyan-300" : undefined)}>
+                    2. Verificando fingerprint...
+                  </p>
+                  <p
+                    className={cn(
+                      block.connectStage === "awaiting_password" || block.connectStage === "error"
+                        ? "text-cyan-300"
+                        : undefined,
+                    )}
+                  >
+                    3. Logando...
+                  </p>
+                </div>
+
+                {block.connectStage === "verifying_fingerprint" && block.hostChallenge ? (
+                  <div className="mt-3 rounded border border-white/10 bg-zinc-900/70 p-3 text-xs text-zinc-300">
+                    <p className="font-medium text-zinc-100">{block.hostChallenge.message}</p>
+                    <p className="mt-1">
+                      {block.hostChallenge.host}:{block.hostChallenge.port}
+                    </p>
+                    <p className="mt-1 break-all text-zinc-400">
+                      {block.hostChallenge.keyType} {block.hostChallenge.fingerprint}
+                    </p>
+                    <div className="mt-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                        onClick={onTrustHost}
+                      >
+                        Confiar e continuar
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                        onClick={onRetry}
+                      >
+                        Tentar novamente
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {(block.connectStage === "awaiting_password" || block.connectStage === "error") &&
+                block.pendingProfileId ? (
+                  <div className="mt-3 space-y-2">
+                    <input
+                      type="password"
+                      value={block.passwordDraft}
+                      className="h-9 w-full rounded border border-white/15 bg-zinc-900 px-2 text-sm text-zinc-100 outline-none focus:border-cyan-400/60"
+                      placeholder="Senha SSH"
+                      onChange={(event) => onPasswordDraftChange(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          onSubmitPassword();
+                        }
+                      }}
+                    />
+                    <label className="inline-flex items-center gap-2 text-xs text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={block.savePasswordChoice}
+                        onChange={(event) => onSavePasswordChange(event.target.checked)}
+                      />
+                      Salvar senha no perfil
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                        onClick={onSubmitPassword}
+                      >
+                        Logar
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                        onClick={onRetry}
+                      >
+                        Repetir conexao
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {block.connectError ? (
+                  <p className="mt-3 text-xs text-red-300">{block.connectError}</p>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

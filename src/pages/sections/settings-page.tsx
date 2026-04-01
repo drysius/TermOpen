@@ -434,6 +434,39 @@ export function SettingsPage() {
             control={<Input type="number" min={1} {...settingsForm.register("reconnect_delay_seconds", { valueAsNumber: true })} />}
           />
           <SettingsRow
+            title="Copy on select"
+            description="Copia automaticamente o texto selecionado no terminal."
+            control={
+              <Controller
+                control={settingsForm.control}
+                name="terminal_copy_on_select"
+                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
+              />
+            }
+          />
+          <SettingsRow
+            title="Paste no clique direito"
+            description="Permite colar com botao direito dentro do bloco de terminal."
+            control={
+              <Controller
+                control={settingsForm.control}
+                name="terminal_right_click_paste"
+                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
+              />
+            }
+          />
+          <SettingsRow
+            title="Atalhos Ctrl+Shift"
+            description="Ativa Ctrl+Shift+C/V para copiar e colar no terminal."
+            control={
+              <Controller
+                control={settingsForm.control}
+                name="terminal_ctrl_shift_shortcuts"
+                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
+              />
+            }
+          />
+          <SettingsRow
             title="Known Hosts"
             description="Caminho do arquivo known_hosts usado pelo ambiente SSH."
             control={

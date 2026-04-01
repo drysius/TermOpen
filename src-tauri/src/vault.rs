@@ -389,6 +389,7 @@ impl VaultManager {
         }
 
         entry.name = entry.name.trim().to_string();
+        entry.password = normalize_option(entry.password);
         entry.private_key = normalize_option(entry.private_key);
         entry.public_key = normalize_option(entry.public_key);
         entry.passphrase = normalize_option(entry.passphrase);
@@ -397,9 +398,9 @@ impl VaultManager {
             return Err(anyhow!("Nome e obrigatorio no keychain"));
         }
 
-        if entry.private_key.is_none() && entry.public_key.is_none() {
+        if entry.private_key.is_none() && entry.public_key.is_none() && entry.password.is_none() {
             return Err(anyhow!(
-                "Informe ao menos uma chave (privada ou publica) no keychain"
+                "Informe ao menos uma credencial no keychain (senha, chave privada ou chave publica)"
             ));
         }
 

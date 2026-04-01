@@ -18,6 +18,7 @@ export const BLANK_PROFILE: ConnectionProfile = {
 export const BLANK_KEYCHAIN_ENTRY: KeychainEntry = {
   id: "",
   name: "",
+  password: "",
   private_key: "",
   public_key: "",
   passphrase: "",
@@ -35,6 +36,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   inactivity_lock_minutes: 10,
   auto_reconnect_enabled: true,
   reconnect_delay_seconds: 5,
+  terminal_copy_on_select: true,
+  terminal_right_click_paste: true,
+  terminal_ctrl_shift_shortcuts: true,
   modified_files_upload_policy: "ask",
   known_hosts_path: "",
   selected_auth_server_id: null,

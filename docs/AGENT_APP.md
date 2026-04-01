@@ -109,3 +109,7 @@
 - Commit messages must be written in English.
 - Code comments must be written in English.
 - Technical notes such as `TODO` and `FIXME` must be written in English.
+
+## Block Interaction UX Rule
+- For workspace block interactions, avoid direct browser dialogs (`window.alert`, `window.confirm`, `window.prompt`).
+- Use inline, centered interaction panels within the block itself (for example: fingerprint confirmation, password input, retry actions).

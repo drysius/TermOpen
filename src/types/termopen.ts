@@ -36,6 +36,7 @@ export interface ConnectionProfile {
 export interface KeychainEntry {
   id: string;
   name: string;
+  password?: string | null;
   private_key?: string | null;
   public_key?: string | null;
   passphrase?: string | null;
@@ -53,6 +54,9 @@ export interface AppSettings {
   inactivity_lock_minutes: number;
   auto_reconnect_enabled: boolean;
   reconnect_delay_seconds: number;
+  terminal_copy_on_select: boolean;
+  terminal_right_click_paste: boolean;
+  terminal_ctrl_shift_shortcuts: boolean;
   modified_files_upload_policy: ModifiedUploadPolicy;
   known_hosts_path: string;
   selected_auth_server_id?: string | null;

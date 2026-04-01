@@ -24,6 +24,8 @@ mod models;
 mod ssh;
 mod sync;
 mod vault;
+#[cfg(test)]
+mod tests;
 
 struct AppState {
     vault: Mutex<VaultManager>,
@@ -205,7 +207,7 @@ async fn ssh_connect(
                 profile.private_key = key.private_key;
             }
             if profile.password.is_none() {
-                profile.password = key.passphrase;
+                profile.password = key.password.or(key.passphrase);
             }
         }
         let settings = vault.settings_get().map_err(app_error)?;
@@ -242,7 +244,7 @@ async fn ssh_connect_ex(
                 profile.private_key = key.private_key;
             }
             if profile.password.is_none() {
-                profile.password = key.passphrase;
+                profile.password = key.password.or(key.passphrase);
             }
             profile.keychain_id = Some(keychain_id);
         }

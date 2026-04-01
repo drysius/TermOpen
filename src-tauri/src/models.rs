@@ -89,6 +89,7 @@ impl ConnectionProfile {
 pub struct KeychainEntry {
     pub id: String,
     pub name: String,
+    pub password: Option<String>,
     pub private_key: Option<String>,
     pub public_key: Option<String>,
     pub passphrase: Option<String>,
@@ -145,6 +146,12 @@ pub struct AppSettings {
     pub auto_reconnect_enabled: bool,
     #[serde(default = "default_reconnect_delay_seconds")]
     pub reconnect_delay_seconds: u32,
+    #[serde(default = "default_terminal_copy_on_select")]
+    pub terminal_copy_on_select: bool,
+    #[serde(default = "default_terminal_right_click_paste")]
+    pub terminal_right_click_paste: bool,
+    #[serde(default = "default_terminal_ctrl_shift_shortcuts")]
+    pub terminal_ctrl_shift_shortcuts: bool,
     #[serde(default)]
     pub modified_files_upload_policy: ModifiedUploadPolicy,
     #[serde(default = "default_known_hosts_path")]
@@ -189,6 +196,18 @@ fn default_reconnect_delay_seconds() -> u32 {
     5
 }
 
+fn default_terminal_copy_on_select() -> bool {
+    true
+}
+
+fn default_terminal_right_click_paste() -> bool {
+    true
+}
+
+fn default_terminal_ctrl_shift_shortcuts() -> bool {
+    true
+}
+
 fn default_known_hosts_path() -> String {
     String::new()
 }
@@ -206,6 +225,9 @@ impl Default for AppSettings {
             inactivity_lock_minutes: default_inactivity_lock_minutes(),
             auto_reconnect_enabled: default_auto_reconnect_enabled(),
             reconnect_delay_seconds: default_reconnect_delay_seconds(),
+            terminal_copy_on_select: default_terminal_copy_on_select(),
+            terminal_right_click_paste: default_terminal_right_click_paste(),
+            terminal_ctrl_shift_shortcuts: default_terminal_ctrl_shift_shortcuts(),
             modified_files_upload_policy: ModifiedUploadPolicy::Ask,
             known_hosts_path: default_known_hosts_path(),
             selected_auth_server_id: None,
