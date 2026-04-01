@@ -108,6 +108,7 @@ export function createSessionActions(
       const candidateSessionIds = new Set<string>([...sessionsFromTab, ...(closing.sessionId ? [closing.sessionId] : [])]);
 
       const remainingTabs = state.tabs.filter((tab) => tab.id !== tabId);
+      const remainingWorkspaceTabs = remainingTabs.filter((tab) => tab.type === "workspace");
       const remainingSessionIds = new Set<string>();
       remainingTabs.forEach((tab) => {
         if (tab.sessionId) {
@@ -116,8 +117,19 @@ export function createSessionActions(
         (state.workspaceSessionsByTab[tab.id] ?? []).forEach((sessionId) => remainingSessionIds.add(sessionId));
       });
 
-      for (const sessionId of candidateSessionIds) {
-        if (!remainingSessionIds.has(sessionId)) {
+      const sessionIdsToClose = new Set<string>();
+      if (remainingWorkspaceTabs.length === 0) {
+        state.sessions.forEach((session) => sessionIdsToClose.add(session.session_id));
+      } else {
+        for (const sessionId of candidateSessionIds) {
+          if (!remainingSessionIds.has(sessionId)) {
+            sessionIdsToClose.add(sessionId);
+          }
+        }
+      }
+
+      for (const sessionId of sessionIdsToClose) {
+        if (sessionId) {
           await get().disconnectSession(sessionId);
         }
       }
@@ -244,6 +256,11 @@ export function createSessionActions(
     },
 
     disconnectSession: async (sessionId) => {
+      if (reconnectTimers[sessionId]) {
+        window.clearTimeout(reconnectTimers[sessionId]);
+        delete reconnectTimers[sessionId];
+      }
+
       try {
         await api.sshDisconnect(sessionId);
       } catch (error) {

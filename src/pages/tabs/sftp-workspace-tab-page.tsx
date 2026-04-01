@@ -373,7 +373,6 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const connections = useAppStore((state) => state.connections);
   const settings = useAppStore((state) => state.settings);
   const sshWrite = useAppStore((state) => state.sshWrite);
-  const appendSessionBuffer = useAppStore((state) => state.appendSessionBuffer);
   const ensureSessionListeners = useAppStore((state) => state.ensureSessionListeners);
   const getOrCreateSession = useAppStore((state) => state.getOrCreateSession);
   const setWorkspaceSessions = useAppStore((state) => state.setWorkspaceSessions);
@@ -909,6 +908,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               : [...state.sessions, session],
           }));
           await ensureSessionListeners(session.session_id);
+          await sshWrite(session.session_id, "").catch(() => undefined);
 
           const prefix = "SSH";
           const host = profile.host || session.session_id.slice(0, 8);
@@ -929,7 +929,6 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 : block,
             ),
           );
-          appendSessionBuffer(session.session_id, `\r\nConnected to ${profile.host}\r\n`);
           return;
         }
 
@@ -1001,7 +1000,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         );
       }
     },
-    [appendSessionBuffer, connections, ensureSessionListeners],
+    [connections, ensureSessionListeners, sshWrite],
   );
 
   const addTerminalBlock = useCallback(
@@ -1853,7 +1852,7 @@ function TerminalBlockView({
     writtenRef.current = 0;
 
     void api.sshResize(sessionId, terminal.cols, terminal.rows).catch(() => undefined);
-    void sshWrite(sessionId, "\n");
+    void sshWrite(sessionId, "");
 
     return () => {
       disposable.dispose();
