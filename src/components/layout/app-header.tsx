@@ -33,12 +33,14 @@ export function AppHeader({
   compact = false,
 }: AppHeaderProps) {
   return (
-    <header data-tauri-drag-region className="flex h-10 items-center border-b border-white/10 bg-zinc-950">
-      <div className="px-3 text-sm font-semibold text-zinc-100">TermOpen</div>
+    <header className="flex h-10 items-center border-b border-white/10 bg-zinc-950">
+      <div data-tauri-drag-region className="h-full px-3 text-sm font-semibold text-zinc-100 flex items-center">
+        TermOpen
+      </div>
       {compact ? (
-        <div className="h-full flex-1" />
+        <div data-tauri-drag-region className="h-full flex-1" />
       ) : (
-        <div className="h-full flex-1" data-tauri-drag-region="false">
+        <div className="h-full flex-1 min-w-0">
           <WorkTabs
             tabs={tabs}
             activeId={activeTabId}
@@ -48,6 +50,7 @@ export function AppHeader({
           />
         </div>
       )}
+      <div data-tauri-drag-region className="h-full w-3" />
       <div className="flex h-full items-center" data-tauri-drag-region="false">
         {!compact ? (
           <div className="mr-1 flex h-full w-10 items-center justify-center text-zinc-400">
