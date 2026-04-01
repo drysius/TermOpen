@@ -15,11 +15,11 @@ use models::{
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use vault::VaultManager;
 
-mod deeplink;
 mod models;
 mod ssh;
 mod sync;
@@ -1384,7 +1384,7 @@ fn focus_main_window(app: &tauri::AppHandle) {
     }
 }
 
-fn handle_deeplink_input(app: &tauri::AppHandle, input: &str) {
+fn handle_deep_link_url(app: &tauri::AppHandle, input: &str) {
     let payload = input.trim().trim_matches('"');
     if payload.is_empty() {
         focus_main_window(app);
@@ -1404,10 +1404,6 @@ fn handle_deeplink_input(app: &tauri::AppHandle, input: &str) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if deeplink::prepare("com.drysius.termopen.deeplink") {
-        return;
-    }
-
     let vault = VaultManager::new().expect("failed to initialize vault manager");
     tauri::Builder::default()
         .manage(AppState {
@@ -1417,19 +1413,21 @@ pub fn run() {
         })
         .setup(|app| {
             let app_handle = app.handle().clone();
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for url in urls {
+                    handle_deep_link_url(&app_handle, url.as_str());
+                }
+            }
             let listener_handle = app_handle.clone();
-            if let Err(error) = deeplink::register("termopen", move |payload| {
-                handle_deeplink_input(&listener_handle, &payload);
-            }) {
-                eprintln!("Falha ao registrar protocolo termopen:// {}", error);
-            }
-
-            if let Some(initial_arg) = std::env::args().nth(1) {
-                handle_deeplink_input(&app_handle, &initial_arg);
-            }
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    handle_deep_link_url(&listener_handle, url.as_str());
+                }
+            });
 
             Ok(())
         })
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
