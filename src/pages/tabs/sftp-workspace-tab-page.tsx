@@ -180,6 +180,8 @@ interface SftpContextMenuState {
   x: number;
   y: number;
   entry: SftpEntry | null;
+  pointerX: number;
+  pointerY: number;
 }
 
 const workspaceCache = new Map<
@@ -3364,6 +3366,26 @@ function SftpBlockView({
   }, [contextMenu]);
 
   useEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) {
+      return;
+    }
+    const menu = contextMenuRef.current;
+    const rect = menu.getBoundingClientRect();
+    const margin = 8;
+    const clampedX = Math.max(margin, Math.min(contextMenu.pointerX, window.innerWidth - rect.width - margin));
+    const clampedY = Math.max(margin, Math.min(contextMenu.pointerY, window.innerHeight - rect.height - margin));
+    if (Math.round(clampedX) === Math.round(contextMenu.x) && Math.round(clampedY) === Math.round(contextMenu.y)) {
+      return;
+    }
+    setContextMenu((current) => {
+      if (!current) {
+        return current;
+      }
+      return { ...current, x: clampedX, y: clampedY };
+    });
+  }, [contextMenu]);
+
+  useEffect(() => {
     if (!transferMenuOpen) {
       return;
     }
@@ -3429,10 +3451,13 @@ function SftpBlockView({
       if (entry) {
         onSelectEntry(entry.path);
       }
-      const width = 224;
-      const x = Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8));
-      const y = Math.max(8, Math.min(event.clientY, window.innerHeight - 320));
-      setContextMenu({ x, y, entry });
+      setContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        pointerX: event.clientX,
+        pointerY: event.clientY,
+        entry,
+      });
     },
     [onSelectEntry],
   );
