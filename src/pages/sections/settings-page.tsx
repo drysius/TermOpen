@@ -2,6 +2,7 @@ import { ChevronDown, Cloud, CloudDownload, CloudUpload, ExternalLink, Lock, Sav
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { open } from "@tauri-apps/plugin-dialog";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -168,8 +169,11 @@ export function SettingsPage() {
     setServerPings({});
     for (const server of authServers) {
       const start = performance.now();
-      fetch(server.address, { mode: "cors" })
-        .then(() => {
+      tauriFetch(server.address, { method: "GET" })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
           setServerPings((prev) => ({ ...prev, [server.id]: Math.round(performance.now() - start) }));
         })
         .catch(() => {
