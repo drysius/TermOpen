@@ -37,7 +37,7 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
 import type { SftpEntry } from "@/types/termopen";
 
-type WorkspaceKind = "terminal" | "sftp" | "editor";
+type WorkspaceKind = "terminal" | "sftp" | "editor" | "logs";
 type WorkspaceMode = "free" | "grid";
 type SortKey = "name" | "size" | "permissions" | "modified_at";
 type SortDirection = "asc" | "desc";
@@ -107,13 +107,43 @@ interface EditorBlock extends BaseBlock {
   saving: boolean;
 }
 
-type WorkspaceBlock = TerminalBlock | SftpBlock | EditorBlock;
+interface LogsBlock extends BaseBlock {
+  kind: "logs";
+}
+
+type WorkspaceBlock = TerminalBlock | SftpBlock | EditorBlock | LogsBlock;
+
+type WorkspaceLogLevel = "info" | "success" | "warn" | "error";
+
+interface WorkspaceLogEntry {
+  id: string;
+  timestamp: number;
+  level: WorkspaceLogLevel;
+  message: string;
+  details?: string;
+}
+
+type TransferStatus = "running" | "completed" | "error";
 
 interface TransferItem {
   id: string;
+  sourceId: string;
+  targetId: string;
   from: string;
   to: string;
+  label: string;
+  status: TransferStatus;
+  errorMessage: string | null;
+  sourceBlockId: string | null;
+  targetBlockId: string | null;
   progress: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface BlockTransferItem {
+  transfer: TransferItem;
+  direction: "outgoing" | "incoming";
 }
 
 interface DragPayload {
@@ -141,7 +171,10 @@ interface SftpContextMenuState {
   entry: SftpEntry | null;
 }
 
-const workspaceCache = new Map<string, { blocks: WorkspaceBlock[]; workspaceMode: WorkspaceMode }>();
+const workspaceCache = new Map<
+  string,
+  { blocks: WorkspaceBlock[]; workspaceMode: WorkspaceMode; logs: WorkspaceLogEntry[] }
+>();
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 const DRAG_ENTRY_MIME = "application/x-termopen-entry";
 
@@ -190,6 +223,25 @@ function terminalDisconnectedLabel(sessionId: string | null): string {
     return "Sessao pendente";
   }
   return `${sessionId} (desconectada)`;
+}
+
+function normalizeAnyPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function joinPathBySource(sourceId: string, base: string, name: string): string {
+  if (sourceId === "local") {
+    return joinPath(base, name);
+  }
+  return joinRemotePath(base, name);
+}
+
+function joinRelativePathBySource(sourceId: string, base: string, relativePath: string): string {
+  const segments = relativePath.replace(/\\/g, "/").split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0) {
+    return base;
+  }
+  return segments.reduce((current, segment) => joinPathBySource(sourceId, current, segment), base);
 }
 
 function formatSize(size: number): string {
@@ -388,9 +440,10 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   );
   const [workspaceSize, setWorkspaceSize] = useState({ width: 1200, height: 740 });
   const [blocks, setBlocks] = useState<WorkspaceBlock[]>(cached?.blocks ?? []);
+  const [workspaceLogs, setWorkspaceLogs] = useState<WorkspaceLogEntry[]>(cached?.logs ?? []);
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [createBlockModalOpen, setCreateBlockModalOpen] = useState(false);
-  const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "editor">("terminal");
+  const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "editor" | "logs">("terminal");
   const [createSourceDraft, setCreateSourceDraft] = useState("local");
 
   useEffect(() => {
@@ -398,8 +451,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   }, [blocks]);
 
   useEffect(() => {
-    workspaceCache.set(tabId, { blocks, workspaceMode });
-  }, [blocks, tabId, workspaceMode]);
+    workspaceCache.set(tabId, { blocks, workspaceMode, logs: workspaceLogs });
+  }, [blocks, tabId, workspaceLogs, workspaceMode]);
 
   useEffect(() => {
     const sessionIds = Array.from(
@@ -528,6 +581,38 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     [sessionLabelById, sessions],
   );
 
+  const appendWorkspaceLog = useCallback(
+    (level: WorkspaceLogLevel, message: string, details?: string) => {
+      const entry: WorkspaceLogEntry = {
+        id: createId("log"),
+        timestamp: Date.now(),
+        level,
+        message,
+        details,
+      };
+      setWorkspaceLogs((current) => {
+        const next = [...current, entry];
+        if (next.length > 800) {
+          return next.slice(next.length - 800);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const setTransferSnapshot = useCallback(
+    (updater: (current: TransferItem[]) => TransferItem[]) => {
+      setTransfers((current) => {
+        const next = updater(current)
+          .sort((left, right) => right.updatedAt - left.updatedAt)
+          .slice(0, 400);
+        return next;
+      });
+    },
+    [],
+  );
+
   const focusBlock = useCallback((id: string) => {
     setBlocks((current) => {
       const target = current.find((block) => block.id === id);
@@ -595,6 +680,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         );
       } catch (error) {
         const message = getError(error);
+        appendWorkspaceLog("error", "Falha ao listar diretorio SFTP", `${normalizedPath} | ${message}`);
         toast.error(message);
         if (nextSourceId !== "local") {
           toast.warning(`Bloco SFTP desconectado (${nextSourceId.slice(0, 8)}).`);
@@ -743,16 +829,59 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   );
 
   const executeTransfer = useCallback(
-    async (fromSourceId: string, fromPath: string, toSourceId: string, toPath: string) => {
+    async (params: {
+      fromSourceId: string;
+      fromPath: string;
+      toSourceId: string;
+      toPath: string;
+      label?: string;
+      sourceBlockId?: string | null;
+      targetBlockId?: string | null;
+      notifySuccess?: boolean;
+    }) => {
+      const {
+        fromSourceId,
+        fromPath,
+        toSourceId,
+        toPath,
+        label,
+        sourceBlockId = null,
+        targetBlockId = null,
+        notifySuccess = true,
+      } = params;
       const transferId = createId("transfer");
-      setTransfers((current) => [...current, { id: transferId, from: fromPath, to: toPath, progress: 0 }]);
+      const now = Date.now();
+
+      setTransferSnapshot((current) => [
+        {
+          id: transferId,
+          sourceId: fromSourceId,
+          targetId: toSourceId,
+          from: fromPath,
+          to: toPath,
+          label: label ?? baseName(fromPath),
+          status: "running",
+          errorMessage: null,
+          sourceBlockId,
+          targetBlockId,
+          progress: 0,
+          createdAt: now,
+          updatedAt: now,
+        },
+        ...current,
+      ]);
+      appendWorkspaceLog("info", "Transferencia iniciada", `${fromPath} -> ${toPath}`);
 
       let unlisten: UnlistenFn | null = null;
       try {
         unlisten = await listen<number>(`transfer:progress:${transferId}`, (event) => {
           const progress = Number(event.payload ?? 0);
-          setTransfers((current) =>
-            current.map((item) => (item.id === transferId ? { ...item, progress } : item)),
+          setTransferSnapshot((current) =>
+            current.map((item) =>
+              item.id === transferId
+                ? { ...item, progress, status: "running", updatedAt: Date.now() }
+                : item,
+            ),
           );
         });
 
@@ -763,14 +892,110 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           toSourceId === "local" ? null : toSourceId,
           toPath,
         );
-        toast.success(`Transferido para ${toPath}`);
+
+        setTransferSnapshot((current) =>
+          current.map((item) =>
+            item.id === transferId
+              ? {
+                  ...item,
+                  progress: 100,
+                  status: "completed",
+                  errorMessage: null,
+                  updatedAt: Date.now(),
+                }
+              : item,
+          ),
+        );
+        appendWorkspaceLog("success", "Transferencia concluida", `${fromPath} -> ${toPath}`);
+        if (notifySuccess) {
+          toast.success(`Transferido para ${toPath}`);
+        }
       } catch (error) {
-        toast.error(getError(error));
+        const message = getError(error);
+        setTransferSnapshot((current) =>
+          current.map((item) =>
+            item.id === transferId
+              ? {
+                  ...item,
+                  status: "error",
+                  errorMessage: message,
+                  updatedAt: Date.now(),
+                }
+              : item,
+          ),
+        );
+        appendWorkspaceLog("error", "Falha em transferencia", `${fromPath} -> ${toPath} | ${message}`);
+        toast.error(message);
         throw error;
       } finally {
         unlisten?.();
-        setTransfers((current) => current.filter((item) => item.id !== transferId));
       }
+    },
+    [appendWorkspaceLog, setTransferSnapshot],
+  );
+
+  const ensureTargetFolderExists = useCallback(
+    async (targetSourceId: string, targetPath: string) => {
+      try {
+        await createSourceFolder(targetSourceId, targetPath);
+      } catch (error) {
+        const message = getError(error).toLowerCase();
+        if (
+          message.includes("exist") ||
+          message.includes("already") ||
+          message.includes("ja existe")
+        ) {
+          return;
+        }
+        throw error;
+      }
+    },
+    [appendWorkspaceLog],
+  );
+
+  const buildDirectoryTransferPlan = useCallback(
+    async (sourceId: string, rootPath: string) => {
+      const directories: string[] = [];
+      const files: Array<{ path: string; relativePath: string }> = [];
+      const stack: Array<{ path: string; relativeRoot: string }> = [{ path: rootPath, relativeRoot: "" }];
+      const visited = new Set<string>();
+
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current) {
+          continue;
+        }
+
+        const visitKey = `${sourceId}:${normalizeAnyPath(current.path)}`;
+        if (visited.has(visitKey)) {
+          continue;
+        }
+        visited.add(visitKey);
+
+        const entries = await listSourceEntries(sourceId, current.path);
+        for (const entry of entries) {
+          if (entry.name === "." || entry.name === "..") {
+            continue;
+          }
+
+          const relativePath = current.relativeRoot
+            ? `${current.relativeRoot}/${entry.name}`
+            : entry.name;
+          if (entry.is_dir) {
+            directories.push(relativePath);
+            stack.push({ path: entry.path, relativeRoot: relativePath });
+          } else {
+            files.push({ path: entry.path, relativePath });
+          }
+        }
+      }
+
+      directories.sort(
+        (left, right) =>
+          left.split("/").filter((part) => part.length > 0).length -
+          right.split("/").filter((part) => part.length > 0).length,
+      );
+      return { directories, files };
     },
     [],
   );
@@ -785,23 +1010,85 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         return;
       }
 
-      if (payload.isDir) {
-        toast.warning("Transferencia de pastas ainda esta em rollout. Por enquanto mova arquivos.");
-        return;
-      }
+      const targetBasePath = targetDirectory || target.path;
+      const droppedName = baseName(payload.path);
 
-      const destination =
-        target.sourceId === "local"
-          ? joinPath(targetDirectory || target.path, baseName(payload.path))
-          : joinRemotePath(targetDirectory || target.path, baseName(payload.path));
       try {
-        await executeTransfer(payload.sourceId, payload.path, target.sourceId, destination);
+        if (!payload.isDir) {
+          const destination = joinPathBySource(target.sourceId, targetBasePath, droppedName);
+          if (
+            payload.sourceId === target.sourceId &&
+            normalizeAnyPath(destination) === normalizeAnyPath(payload.path)
+          ) {
+            return;
+          }
+          await executeTransfer({
+            fromSourceId: payload.sourceId,
+            fromPath: payload.path,
+            toSourceId: target.sourceId,
+            toPath: destination,
+            sourceBlockId: payload.sourceBlockId,
+            targetBlockId,
+          });
+          await refreshSftpBlock(targetBlockId, target.path, target.sourceId);
+          return;
+        }
+
+        const destinationRoot = joinPathBySource(target.sourceId, targetBasePath, droppedName);
+        const normalizedSourceRoot = normalizeAnyPath(payload.path);
+        const normalizedDestinationRoot = normalizeAnyPath(destinationRoot);
+        if (
+          payload.sourceId === target.sourceId &&
+          (normalizedDestinationRoot === normalizedSourceRoot ||
+            normalizedDestinationRoot.startsWith(`${normalizedSourceRoot}/`))
+        ) {
+          toast.error("Nao e possivel copiar uma pasta para dentro dela mesma.");
+          appendWorkspaceLog("warn", "Copia de pasta bloqueada", `${payload.path} -> ${destinationRoot}`);
+          return;
+        }
+
+        appendWorkspaceLog("info", "Preparando transferencia de pasta", `${payload.path} -> ${destinationRoot}`);
+        const plan = await buildDirectoryTransferPlan(payload.sourceId, payload.path);
+        await ensureTargetFolderExists(target.sourceId, destinationRoot);
+        for (const relativeDir of plan.directories) {
+          const targetPath = joinRelativePathBySource(target.sourceId, destinationRoot, relativeDir);
+          await ensureTargetFolderExists(target.sourceId, targetPath);
+        }
+
+        let completedFiles = 0;
+        for (const file of plan.files) {
+          const targetFilePath = joinRelativePathBySource(target.sourceId, destinationRoot, file.relativePath);
+          await executeTransfer({
+            fromSourceId: payload.sourceId,
+            fromPath: file.path,
+            toSourceId: target.sourceId,
+            toPath: targetFilePath,
+            label: file.relativePath,
+            sourceBlockId: payload.sourceBlockId,
+            targetBlockId,
+            notifySuccess: false,
+          });
+          completedFiles += 1;
+        }
+
         await refreshSftpBlock(targetBlockId, target.path, target.sourceId);
+        toast.success(`Pasta transferida: ${completedFiles} arquivo(s).`);
+        appendWorkspaceLog(
+          "success",
+          "Transferencia de pasta concluida",
+          `${payload.path} -> ${destinationRoot} (${completedFiles} arquivo(s))`,
+        );
       } catch (error) {
         // handled by executeTransfer
       }
     },
-    [executeTransfer, refreshSftpBlock],
+    [
+      appendWorkspaceLog,
+      buildDirectoryTransferPlan,
+      ensureTargetFolderExists,
+      executeTransfer,
+      refreshSftpBlock,
+    ],
   );
 
   const addSftpBlock = useCallback(
@@ -830,12 +1117,32 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
+      appendWorkspaceLog("info", "Bloco SFTP criado", `${block.title} @ ${block.path || "/"}`);
       window.setTimeout(() => {
         void refreshSftpBlock(id, block.path, block.sourceId);
       }, 0);
     },
-    [refreshSftpBlock, sessions, sessionHostById, workspaceSize.height, workspaceSize.width],
+    [appendWorkspaceLog, refreshSftpBlock, sessions, sessionHostById, workspaceSize.height, workspaceSize.width],
   );
+
+  const addLogsBlock = useCallback(() => {
+    const existing = blocksRef.current.find((item): item is LogsBlock => item.kind === "logs");
+    if (existing) {
+      focusBlock(existing.id);
+      return;
+    }
+
+    const block: LogsBlock = {
+      id: createId("logs"),
+      kind: "logs",
+      title: "Workspace Logs",
+      layout: workspaceDefaultLayout("logs", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
+      zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+      maximized: false,
+    };
+    setBlocks((current) => [...current, block]);
+    appendWorkspaceLog("info", "Bloco de logs aberto");
+  }, [appendWorkspaceLog, focusBlock, workspaceSize.height, workspaceSize.width]);
 
   const resolvePendingTerminalConnection = useCallback(
     async (
@@ -878,6 +1185,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         : acceptUnknownHost
           ? "Verificando fingerprint..."
           : "Conectando...";
+      appendWorkspaceLog(
+        "info",
+        "Conexao SSH em andamento",
+        `${profile.username}@${profile.host}:${profile.port}`,
+      );
 
       setBlocks((current) =>
         current.map((block) =>
@@ -929,6 +1241,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 : block,
             ),
           );
+          appendWorkspaceLog(
+            "success",
+            "Sessao SSH conectada",
+            `${profile.username}@${profile.host}:${profile.port}`,
+          );
           return;
         }
 
@@ -952,6 +1269,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 : block,
             ),
           );
+          appendWorkspaceLog(
+            "warn",
+            "Fingerprint SSH requer confirmacao",
+            `${result.host}:${result.port} ${result.fingerprint}`,
+          );
           return;
         }
 
@@ -969,6 +1291,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 : block,
             ),
           );
+          appendWorkspaceLog(
+            "warn",
+            "Autenticacao SSH pendente",
+            `${profile.username}@${profile.host}:${profile.port}`,
+          );
           return;
         }
 
@@ -984,7 +1311,9 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               : block,
           ),
         );
+        appendWorkspaceLog("error", "Falha ao conectar sessao SSH", result.message);
       } catch (error) {
+        const message = getError(error);
         setBlocks((current) =>
           current.map((block) =>
             block.id === blockId && block.kind === "terminal"
@@ -992,15 +1321,16 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                   ...block,
                   connectStage: "error",
                   connectMessage: "Falha ao conectar.",
-                  connectError: getError(error),
+                  connectError: message,
                   hostChallenge: null,
                 }
               : block,
           ),
         );
+        appendWorkspaceLog("error", "Erro ao conectar sessao SSH", message);
       }
     },
-    [connections, ensureSessionListeners, sshWrite],
+    [appendWorkspaceLog, connections, ensureSessionListeners, sshWrite],
   );
 
   const addTerminalBlock = useCallback(
@@ -1033,9 +1363,18 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
+      appendWorkspaceLog("info", "Bloco de terminal criado", block.title);
       void ensureSessionListeners(resolved);
     },
-    [ensureSessionListeners, localSessionIds, sessionHostById, sessions, workspaceSize.height, workspaceSize.width],
+    [
+      appendWorkspaceLog,
+      ensureSessionListeners,
+      localSessionIds,
+      sessionHostById,
+      sessions,
+      workspaceSize.height,
+      workspaceSize.width,
+    ],
   );
 
   const addPendingTerminalBlock = useCallback(
@@ -1068,11 +1407,12 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
+      appendWorkspaceLog("info", "Conexao SSH solicitada", `${profile.username}@${profile.host}:${profile.port}`);
       window.setTimeout(() => {
         void resolvePendingTerminalConnection(blockId);
       }, 0);
     },
-    [connections, resolvePendingTerminalConnection, workspaceSize.height, workspaceSize.width],
+    [appendWorkspaceLog, connections, resolvePendingTerminalConnection, workspaceSize.height, workspaceSize.width],
   );
 
   useEffect(() => {
@@ -1188,7 +1528,14 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
             return;
           }
           const destination = joinPath(selected, baseName(entry.path));
-          await executeTransfer(block.sourceId, entry.path, "local", destination);
+          await executeTransfer({
+            fromSourceId: block.sourceId,
+            fromPath: entry.path,
+            toSourceId: "local",
+            toPath: destination,
+            sourceBlockId: block.id,
+            targetBlockId: null,
+          });
           return;
         }
         if (action === "mkdir") {
@@ -1271,6 +1618,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         setCreateBlockModalOpen(false);
         return;
       }
+      if (createBlockKind === "logs") {
+        addLogsBlock();
+        setCreateBlockModalOpen(false);
+        return;
+      }
 
       let sourceId = createSourceDraft;
       if (createSourceDraft === "local" && createBlockKind === "terminal") {
@@ -1295,6 +1647,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       toast.error(getError(error));
     }
   }, [
+    addLogsBlock,
     addPendingTerminalBlock,
     addSftpBlock,
     addTerminalBlock,
@@ -1309,13 +1662,36 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     if (!createBlockModalOpen) {
       return;
     }
-    if (createBlockKind === "editor") {
+    if (createBlockKind === "editor" || createBlockKind === "logs") {
       return;
     }
     if (!createSourceOptions.some((item) => item.id === createSourceDraft)) {
       setCreateSourceDraft("local");
     }
   }, [createBlockKind, createBlockModalOpen, createSourceDraft, createSourceOptions]);
+
+  const transferItemsByBlock = useMemo(() => {
+    const map = new Map<string, BlockTransferItem[]>();
+    for (const transfer of transfers) {
+      if (transfer.sourceBlockId) {
+        const list = map.get(transfer.sourceBlockId) ?? [];
+        list.push({ transfer, direction: "outgoing" });
+        map.set(transfer.sourceBlockId, list);
+      }
+      if (transfer.targetBlockId) {
+        const list = map.get(transfer.targetBlockId) ?? [];
+        list.push({ transfer, direction: "incoming" });
+        map.set(transfer.targetBlockId, list);
+      }
+    }
+    map.forEach((items, key) => {
+      map.set(
+        key,
+        items.sort((left, right) => right.transfer.updatedAt - left.transfer.updatedAt).slice(0, 40),
+      );
+    });
+    return map;
+  }, [transfers]);
 
   const renderedBlocks = useMemo(() => {
     if (workspaceMode === "free") {
@@ -1337,7 +1713,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     }));
   }, [blocks, workspaceMode, workspaceSize.height, workspaceSize.width]);
 
-  const activeTransfers = transfers.length;
+  const activeTransfers = transfers.filter((item) => item.status === "running").length;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -1377,6 +1753,13 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           onClick={() => setWorkspaceMode("grid")}
         >
           <Rows3 className="h-3.5 w-3.5" /> Grid
+        </button>
+        <button
+          type="button"
+          className="flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-zinc-900"
+          onClick={() => addLogsBlock()}
+        >
+          <FileText className="h-3.5 w-3.5" /> Logs
         </button>
 
         <div className="ml-auto flex items-center gap-2 text-xs text-zinc-300">
@@ -1418,6 +1801,13 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 >
                   <TerminalSquare className="h-3.5 w-3.5" /> Terminal
                 </button>
+                <button
+                  type="button"
+                  className="flex h-8 items-center gap-2 rounded border border-white/15 px-3 text-xs text-zinc-200 hover:bg-zinc-900"
+                  onClick={() => addLogsBlock()}
+                >
+                  <MonitorUp className="h-3.5 w-3.5" /> Logs
+                </button>
               </div>
             </div>
           </div>
@@ -1433,8 +1823,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
             interactive={interactive}
             onFocus={focusBlock}
             onLayoutChange={onLayoutChange}
-            minWidth={block.kind === "terminal" ? 420 : 360}
-            minHeight={block.kind === "terminal" ? 260 : 240}
+            minWidth={block.kind === "terminal" ? 420 : block.kind === "logs" ? 460 : 360}
+            minHeight={block.kind === "terminal" ? 260 : block.kind === "logs" ? 220 : 240}
             headerRight={
               <>
                 <button
@@ -1543,6 +1933,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               <SftpBlockView
                 block={block}
                 sourceOptions={sourceOptions}
+                transferItems={transferItemsByBlock.get(block.id) ?? []}
                 onFocus={() => focusBlock(block.id)}
                 onRefresh={(path, sourceId) => void refreshSftpBlock(block.id, path, sourceId)}
                 onSelectSort={(sortKey) =>
@@ -1592,6 +1983,13 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 onOpenExternal={() => void openEditorBlockExternal(block.id)}
               />
             ) : null}
+
+            {block.kind === "logs" ? (
+              <LogsBlockView
+                entries={workspaceLogs}
+                onClear={() => setWorkspaceLogs([])}
+              />
+            ) : null}
           </WorkspaceBlockController>
         ))}
       </div>
@@ -1621,7 +2019,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         }
       >
         <div className="space-y-3">
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-4 gap-2">
             <button
               type="button"
               className={cn(
@@ -1661,9 +2059,22 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               <FileText className="mx-auto h-4 w-4" />
               <p className="mt-1">Editor</p>
             </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded border p-2 text-xs transition",
+                createBlockKind === "logs"
+                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+              )}
+              onClick={() => setCreateBlockKind("logs")}
+            >
+              <MonitorUp className="mx-auto h-4 w-4" />
+              <p className="mt-1">Logs</p>
+            </button>
           </div>
 
-          {createBlockKind !== "editor" ? (
+          {createBlockKind === "terminal" || createBlockKind === "sftp" ? (
             <div className="space-y-1">
               <p className="text-xs font-medium text-zinc-300">Origem</p>
               <select
@@ -1683,8 +2094,10 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                   : "Escolha local ou host remoto para abrir o explorador SFTP."}
               </p>
             </div>
-          ) : (
+          ) : createBlockKind === "editor" ? (
             <p className="text-xs text-zinc-500">O editor abre arquivo local selecionado pelo sistema.</p>
+          ) : (
+            <p className="text-xs text-zinc-500">O bloco de logs mostra eventos e progresso do workspace.</p>
           )}
         </div>
       </Dialog>
@@ -2048,6 +2461,7 @@ function TerminalBlockView({
 interface SftpBlockViewProps {
   block: SftpBlock;
   sourceOptions: Array<{ id: string; label: string }>;
+  transferItems: BlockTransferItem[];
   onFocus: () => void;
   onRefresh: (path: string, sourceId: string) => void;
   onSelectSort: (sortKey: SortKey) => void;
@@ -2060,6 +2474,7 @@ interface SftpBlockViewProps {
 function SftpBlockView({
   block,
   sourceOptions,
+  transferItems,
   onFocus,
   onRefresh,
   onSelectSort,
@@ -2070,8 +2485,11 @@ function SftpBlockView({
 }: SftpBlockViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const transferMenuRef = useRef<HTMLDivElement | null>(null);
+  const transferToggleRef = useRef<HTMLButtonElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(1200);
   const [contextMenu, setContextMenu] = useState<SftpContextMenuState | null>(null);
+  const [transferMenuOpen, setTransferMenuOpen] = useState(false);
   const sortedEntries = useMemo(
     () => sortSftpEntries(block.entries, block.sortKey, block.sortDirection),
     [block.entries, block.sortDirection, block.sortKey],
@@ -2111,6 +2529,32 @@ function SftpBlockView({
   }, [contextMenu]);
 
   useEffect(() => {
+    if (!transferMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: globalThis.MouseEvent) => {
+      const target = event.target as Node;
+      if (transferMenuRef.current?.contains(target) || transferToggleRef.current?.contains(target)) {
+        return;
+      }
+      setTransferMenuOpen(false);
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setTransferMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [transferMenuOpen]);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container) {
       return;
@@ -2129,15 +2573,11 @@ function SftpBlockView({
     "inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-zinc-400 hover:text-zinc-100";
   const handleEntryDragStart = useCallback(
     (event: DragEvent<HTMLElement>, entry: SftpEntry) => {
-      if (entry.is_dir) {
-        event.preventDefault();
-        return;
-      }
       const payload: DragPayload = {
         sourceBlockId: block.id,
         sourceId: block.sourceId,
         path: entry.path,
-        isDir: false,
+        isDir: entry.is_dir,
       };
       writeDragPayload(event.dataTransfer, payload);
       event.dataTransfer.effectAllowed = "copy";
@@ -2181,6 +2621,11 @@ function SftpBlockView({
       },
     ];
   }, [block.sourceId, contextMenu?.entry]);
+
+  const runningTransfers = useMemo(
+    () => transferItems.filter((item) => item.transfer.status === "running").length,
+    [transferItems],
+  );
 
   const runContextAction = useCallback(
     (action: SftpContextAction) => {
@@ -2241,13 +2686,97 @@ function SftpBlockView({
           </datalist>
         </div>
 
-        <button
-          type="button"
-          className="inline-flex h-8 w-8 items-center justify-center rounded border border-white/10 text-zinc-300 hover:border-purple-400/60 hover:bg-zinc-900"
-          onClick={() => onRefresh(pathDraft, block.sourceId)}
-        >
-          <RefreshCw className={cn("h-3.5 w-3.5", block.loading ? "animate-spin" : undefined)} />
-        </button>
+        <div className="relative flex items-center justify-end gap-1">
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-white/10 text-zinc-300 hover:border-purple-400/60 hover:bg-zinc-900"
+            onClick={() => onRefresh(pathDraft, block.sourceId)}
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", block.loading ? "animate-spin" : undefined)} />
+          </button>
+          <button
+            ref={transferToggleRef}
+            type="button"
+            className={cn(
+              "relative inline-flex h-8 w-8 items-center justify-center rounded border text-zinc-300",
+              runningTransfers > 0
+                ? "border-cyan-400/50 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20"
+                : "border-white/10 hover:border-purple-400/60 hover:bg-zinc-900",
+            )}
+            onClick={() => setTransferMenuOpen((current) => !current)}
+            title="Transferencias deste bloco"
+          >
+            <MonitorUp className={cn("h-3.5 w-3.5", runningTransfers > 0 ? "animate-pulse" : undefined)} />
+            {runningTransfers > 0 ? (
+              <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan-500 px-1 text-[10px] font-semibold text-zinc-950">
+                {runningTransfers}
+              </span>
+            ) : null}
+          </button>
+          {transferMenuOpen ? (
+            <div
+              ref={transferMenuRef}
+              className="absolute right-0 top-9 z-30 w-96 max-w-[78vw] rounded border border-white/15 bg-zinc-950/95 p-2 shadow-2xl shadow-black/40 backdrop-blur"
+            >
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                Transferencias do bloco
+              </p>
+              {transferItems.length === 0 ? (
+                <p className="rounded border border-white/10 bg-zinc-900/60 px-2 py-2 text-xs text-zinc-500">
+                  Nenhuma transferencia registrada neste bloco.
+                </p>
+              ) : (
+                <div className="max-h-64 space-y-1 overflow-auto pr-1">
+                  {transferItems.map((item) => {
+                    const statusColor =
+                      item.transfer.status === "error"
+                        ? "text-red-300"
+                        : item.transfer.status === "completed"
+                          ? "text-emerald-300"
+                          : "text-cyan-200";
+                    const barColor =
+                      item.transfer.status === "error"
+                        ? "bg-red-500/70"
+                        : item.transfer.status === "completed"
+                          ? "bg-emerald-500/80"
+                          : "bg-cyan-500/80";
+
+                    return (
+                      <div key={`${item.direction}:${item.transfer.id}`} className="rounded border border-white/10 bg-zinc-900/60 p-2">
+                        <div className="flex items-center gap-2">
+                          {item.direction === "outgoing" ? (
+                            <ArrowUpAZ className="h-3.5 w-3.5 text-cyan-300" />
+                          ) : (
+                            <ArrowDownAZ className="h-3.5 w-3.5 text-emerald-300" />
+                          )}
+                          <p className="min-w-0 flex-1 truncate text-xs text-zinc-100">{item.transfer.label}</p>
+                          <span className={cn("text-[11px] font-medium", statusColor)}>
+                            {item.transfer.status === "running"
+                              ? `${item.transfer.progress}%`
+                              : item.transfer.status === "completed"
+                                ? "Concluido"
+                                : "Erro"}
+                          </span>
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded bg-white/10">
+                          <div
+                            className={cn("h-full transition-all", barColor)}
+                            style={{ width: `${Math.max(2, Math.min(100, item.transfer.progress))}%` }}
+                          />
+                        </div>
+                        <p className="mt-1 truncate text-[11px] text-zinc-500">{item.transfer.from}</p>
+                        <p className="truncate text-[11px] text-zinc-500">{item.transfer.to}</p>
+                        {item.transfer.errorMessage ? (
+                          <p className="mt-1 text-[11px] text-red-300">{item.transfer.errorMessage}</p>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
@@ -2297,10 +2826,10 @@ function SftpBlockView({
                   key={entry.path}
                   className={cn(
                     "border-b border-white/5 text-zinc-200 transition hover:bg-zinc-900/70",
-                    entry.is_dir ? "cursor-default" : "cursor-grab active:cursor-grabbing",
+                    "cursor-grab active:cursor-grabbing",
                     selected ? "bg-purple-600/10" : undefined,
                   )}
-                  draggable={!entry.is_dir}
+                  draggable
                   onClick={() => onSelectEntry(entry.path)}
                   onDoubleClick={() => onOpenEntry(entry)}
                   onContextMenu={(event) => openContextMenu(event, entry)}
@@ -2397,6 +2926,81 @@ interface EditorBlockViewProps {
   onChange: (value: string) => void;
   onSave: () => void;
   onOpenExternal: () => void;
+}
+
+interface LogsBlockViewProps {
+  entries: WorkspaceLogEntry[];
+  onClear: () => void;
+}
+
+function LogsBlockView({ entries, onClear }: LogsBlockViewProps) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [followTail, setFollowTail] = useState(true);
+
+  useEffect(() => {
+    if (!followTail) {
+      return;
+    }
+    const host = listRef.current;
+    if (!host) {
+      return;
+    }
+    host.scrollTop = host.scrollHeight;
+  }, [entries, followTail]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-zinc-950">
+      <div className="flex h-9 items-center justify-between border-b border-white/10 px-2">
+        <p className="text-xs text-zinc-300">Eventos do workspace ({entries.length})</p>
+        <div className="flex items-center gap-2">
+          <label className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+            <input type="checkbox" checked={followTail} onChange={(event) => setFollowTail(event.target.checked)} />
+            Seguir
+          </label>
+          <button
+            type="button"
+            className="rounded border border-white/15 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+            onClick={onClear}
+          >
+            Limpar
+          </button>
+        </div>
+      </div>
+      <div ref={listRef} className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px]">
+        {entries.length === 0 ? (
+          <p className="text-zinc-500">Nenhum log registrado neste workspace.</p>
+        ) : (
+          <div className="space-y-1">
+            {entries.map((entry) => (
+              <div key={entry.id} className="rounded border border-white/10 bg-zinc-900/60 px-2 py-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-zinc-500">
+                    {new Date(entry.timestamp).toLocaleTimeString()}
+                  </span>
+                  <span
+                    className={cn(
+                      "uppercase",
+                      entry.level === "error"
+                        ? "text-red-300"
+                        : entry.level === "warn"
+                          ? "text-amber-300"
+                          : entry.level === "success"
+                            ? "text-emerald-300"
+                            : "text-cyan-300",
+                    )}
+                  >
+                    [{entry.level}]
+                  </span>
+                  <span className="truncate text-zinc-100">{entry.message}</span>
+                </div>
+                {entry.details ? <p className="mt-0.5 break-all text-zinc-400">{entry.details}</p> : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function EditorBlockView({ block, onChange, onSave, onOpenExternal }: EditorBlockViewProps) {
