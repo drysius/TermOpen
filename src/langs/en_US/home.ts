@@ -1,6 +1,20 @@
 import type { AppDictionary } from "../types";
 
 export const home: AppDictionary["home"] = {
+  stats: {
+    hosts: "Hosts",
+    hostsSub: "Profiles saved in vault.",
+    sessions: "Active Sessions",
+    sessionsSub: "Connected terminals right now.",
+    sync: "Sync",
+    syncConnected: "Connected",
+    syncDisconnected: "Disconnected",
+    vault: "Vault",
+    vaultInitialized: "Initialized",
+    vaultPending: "Pending",
+    vaultLocked: "Locked",
+    vaultUnlocked: "Unlocked",
+  },
   hosts: {
     title: "Hosts",
     newHost: "New Host",
@@ -20,5 +34,10 @@ export const home: AppDictionary["home"] = {
     clickToOpen: "Click to open SFTP workspace.",
     edit: "Edit",
     remove: "Remove",
+  },
+  sessionsCard: {
+    title: "Sessions",
+    active: "{count} active session(s). Open more blocks to work in parallel.",
+    empty: "No active sessions. Use SSH/SFTP cards to start a workspace.",
   },
 };

@@ -73,6 +73,20 @@ export interface AppDictionary {
     };
   };
   home: {
+    stats: {
+      hosts: string;
+      hostsSub: string;
+      sessions: string;
+      sessionsSub: string;
+      sync: string;
+      syncConnected: string;
+      syncDisconnected: string;
+      vault: string;
+      vaultInitialized: string;
+      vaultPending: string;
+      vaultLocked: string;
+      vaultUnlocked: string;
+    };
     hosts: {
       title: string;
       newHost: string;
@@ -92,6 +106,11 @@ export interface AppDictionary {
       clickToOpen: string;
       edit: string;
       remove: string;
+    };
+    sessionsCard: {
+      title: string;
+      active: string;
+      empty: string;
     };
   };
   settings: {

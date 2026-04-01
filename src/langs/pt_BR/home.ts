@@ -1,6 +1,20 @@
 import type { AppDictionary } from "../types";
 
 export const home: AppDictionary["home"] = {
+  stats: {
+    hosts: "Hosts",
+    hostsSub: "Perfis salvos no vault.",
+    sessions: "Sessoes Ativas",
+    sessionsSub: "Terminais conectados agora.",
+    sync: "Sync",
+    syncConnected: "Conectado",
+    syncDisconnected: "Desconectado",
+    vault: "Vault",
+    vaultInitialized: "Inicializado",
+    vaultPending: "Pendente",
+    vaultLocked: "Bloqueado",
+    vaultUnlocked: "Desbloqueado",
+  },
   hosts: {
     title: "Hosts",
     newHost: "Novo Host",
@@ -20,5 +34,10 @@ export const home: AppDictionary["home"] = {
     clickToOpen: "Clique para abrir workspace SFTP.",
     edit: "Editar",
     remove: "Remover",
+  },
+  sessionsCard: {
+    title: "Sessoes",
+    active: "{count} sessao(oes) ativa(s). Abra mais blocos para trabalhar em paralelo.",
+    empty: "Nenhuma sessao ativa. Use os cards SSH/SFTP para iniciar um workspace.",
   },
 };
