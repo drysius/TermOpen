@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
 import { api } from "@/lib/tauri";
 import type { AppSettings, AuthServer, ModifiedUploadPolicy } from "@/types/termopen";
@@ -101,6 +102,7 @@ function OptionDropdown<T extends string>({
 }
 
 export function SettingsPage() {
+  const t = useT();
   const settings = useAppStore((state) => state.settings);
   const syncState = useAppStore((state) => state.syncState);
   const busy = useAppStore((state) => state.busy);
@@ -297,13 +299,13 @@ export function SettingsPage() {
         )}
       >
         <div className="mb-4 grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-zinc-950/40 p-1 text-xs md:grid-cols-5">
-          {[
-            { id: "general", label: "General" },
-            { id: "sftp", label: "SFTP" },
-            { id: "terminal", label: "Terminal" },
-            { id: "sync", label: "Synchronization" },
-            { id: "security", label: "Security" },
-          ].map((tab) => (
+          {([
+            { id: "general", label: t.settings.tabs.general },
+            { id: "sftp", label: t.settings.tabs.sftp },
+            { id: "terminal", label: t.settings.tabs.terminal },
+            { id: "sync", label: t.settings.tabs.sync },
+            { id: "security", label: t.settings.tabs.security },
+          ] as const).map((tab) => (
             <button
               key={tab.id}
               type="button"
@@ -321,10 +323,10 @@ export function SettingsPage() {
 
         {settingsTab === "general" ? (
         <section>
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Aplicacao</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.sections.application}</h3>
           <SettingsRow
-            title="Editor padrao"
-            description="Defina se o arquivo abre no editor interno, VS Code ou no sistema."
+            title={t.settings.editor.title}
+            description={t.settings.editor.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -340,13 +342,13 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Comando externo"
-            description="Comando custom para abrir editor externo. Use {filename} no comando."
-            control={<Input placeholder="ex: kitty -e nvim {filename}" {...settingsForm.register("external_editor_command")} />}
+            title={t.settings.externalCommand.title}
+            description={t.settings.externalCommand.description}
+            control={<Input placeholder={t.settings.externalCommand.placeholder} {...settingsForm.register("external_editor_command")} />}
           />
           <SettingsRow
-            title="Bloqueio por inatividade"
-            description="Tempo em minutos para bloquear o vault automaticamente."
+            title={t.settings.inactivityLock.title}
+            description={t.settings.inactivityLock.description}
             control={<Input type="number" min={1} {...settingsForm.register("inactivity_lock_minutes", { valueAsNumber: true })} />}
           />
         </section>
@@ -354,10 +356,10 @@ export function SettingsPage() {
 
         {settingsTab === "sync" ? (
         <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Synchronization</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.sections.sync}</h3>
           <SettingsRow
-            title="Sync automatico"
-            description="Sincroniza periodicamente quando conectado ao Google Drive."
+            title={t.settings.syncAuto.title}
+            description={t.settings.syncAuto.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -367,8 +369,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Sync no startup"
-            description="Executa pull automaticamente ao desbloquear o vault."
+            title={t.settings.syncStartup.title}
+            description={t.settings.syncStartup.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -378,8 +380,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Sync ao salvar configuracoes"
-            description="Quando configuracoes mudarem, executa push automaticamente."
+            title={t.settings.syncOnSave.title}
+            description={t.settings.syncOnSave.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -389,8 +391,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Intervalo de sync"
-            description="Frequencia em minutos da sincronizacao automatica."
+            title={t.settings.syncInterval.title}
+            description={t.settings.syncInterval.description}
             control={<Input type="number" min={1} {...settingsForm.register("sync_interval_minutes", { valueAsNumber: true })} />}
           />
         </section>
@@ -398,10 +400,10 @@ export function SettingsPage() {
 
         {settingsTab === "sftp" ? (
         <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">SFTP</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.sections.sftp}</h3>
           <SettingsRow
-            title="Chunk SFTP (KB)"
-            description="Tamanho do bloco usado em leituras/escritas e transferencias SFTP."
+            title={t.settings.sftpChunk.title}
+            description={t.settings.sftpChunk.description}
             control={
               <Input
                 type="number"
@@ -416,10 +418,10 @@ export function SettingsPage() {
 
         {settingsTab === "terminal" ? (
         <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Terminal</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.sections.terminal}</h3>
           <SettingsRow
-            title="Auto reconnect SSH"
-            description="Tenta reconectar sessoes SSH desconectadas automaticamente."
+            title={t.settings.autoReconnect.title}
+            description={t.settings.autoReconnect.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -429,13 +431,13 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Delay de reconnect"
-            description="Tempo de espera em segundos antes de tentar reconectar."
+            title={t.settings.reconnectDelay.title}
+            description={t.settings.reconnectDelay.description}
             control={<Input type="number" min={1} {...settingsForm.register("reconnect_delay_seconds", { valueAsNumber: true })} />}
           />
           <SettingsRow
-            title="Copy on select"
-            description="Copia automaticamente o texto selecionado no terminal."
+            title={t.settings.copyOnSelect.title}
+            description={t.settings.copyOnSelect.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -445,8 +447,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Paste no clique direito"
-            description="Permite colar com botao direito dentro do bloco de terminal."
+            title={t.settings.rightClickPaste.title}
+            description={t.settings.rightClickPaste.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -456,8 +458,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Atalhos Ctrl+Shift"
-            description="Ativa Ctrl+Shift+C/V para copiar e colar no terminal."
+            title={t.settings.ctrlShiftShortcuts.title}
+            description={t.settings.ctrlShiftShortcuts.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -467,17 +469,17 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Known Hosts"
-            description="Caminho do arquivo known_hosts usado pelo ambiente SSH."
+            title={t.settings.knownHosts.title}
+            description={t.settings.knownHosts.description}
             control={
               <div className="flex items-center gap-2">
-                <Input className="flex-1" placeholder="~/.ssh/known_hosts" {...settingsForm.register("known_hosts_path")} />
+                <Input className="flex-1" placeholder={t.settings.knownHosts.placeholder} {...settingsForm.register("known_hosts_path")} />
                 <Button
                   type="button"
                   variant="outline"
                   onClick={() =>
                     void open({
-                      title: "Selecionar arquivo known_hosts",
+                      title: t.settings.knownHosts.selectDialog,
                       multiple: false,
                       directory: false,
                     }).then((value) => {
@@ -487,7 +489,7 @@ export function SettingsPage() {
                     })
                   }
                 >
-                  Selecionar
+                  {t.settings.knownHosts.selectButton}
                 </Button>
               </div>
             }
@@ -497,10 +499,10 @@ export function SettingsPage() {
 
         {settingsTab === "general" ? (
         <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Arquivos Modificados</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.sections.modifiedFiles}</h3>
           <SettingsRow
-            title="Upload de alteracoes"
-            description="Define como arquivos alterados no editor interno devem ser enviados."
+            title={t.settings.uploadPolicy.title}
+            description={t.settings.uploadPolicy.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -520,7 +522,7 @@ export function SettingsPage() {
 
         {settingsTab === "sync" ? (
         <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Google Drive</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.sections.googleDrive}</h3>
           <div className="border-b border-white/10 py-3">
             <div className="mb-3 flex gap-1 rounded-md bg-zinc-900/50 p-0.5">
               <button
@@ -532,7 +534,7 @@ export function SettingsPage() {
                 }`}
                 onClick={() => setDriveTab("account")}
               >
-                Conta
+                {t.settings.drive.tabAccount}
               </button>
               <button
                 type="button"
@@ -543,7 +545,7 @@ export function SettingsPage() {
                 }`}
                 onClick={() => setDriveTab("config")}
               >
-                Servidor
+                {t.settings.drive.tabServer}
               </button>
             </div>
 
@@ -555,11 +557,11 @@ export function SettingsPage() {
                       {loggedUser.name?.[0]?.toUpperCase() || loggedUser.email?.[0]?.toUpperCase() || "?"}
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-zinc-100">{loggedUser.name || "Usuario"}</p>
+                      <p className="text-sm font-medium text-zinc-100">{loggedUser.name || t.settings.drive.userLabel}</p>
                       <p className="text-xs text-zinc-500">{loggedUser.email}</p>
                     </div>
                     <span className="ml-auto rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-400">
-                      Conectado
+                      {t.settings.drive.connected}
                     </span>
                   </div>
                 ) : null}
@@ -568,17 +570,17 @@ export function SettingsPage() {
                 </p>
                 {syncState.last_sync_at ? (
                   <p className="mt-1 text-xs text-zinc-500">
-                    Ultimo sync: {new Date(syncState.last_sync_at).toLocaleString("pt-BR")}
+                    {t.settings.drive.lastSync.replace("{date}", new Date(syncState.last_sync_at).toLocaleString())}
                   </p>
                 ) : null}
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Button type="button" onClick={() => void handleRunSync("login")} disabled={syncBusy}>
                     <Cloud className={`mr-2 h-4 w-4 ${syncBusy ? "animate-pulse" : ""}`} />
                     {syncBusy && syncAction === "login"
-                      ? "Conectando..."
+                      ? t.settings.drive.connecting
                       : loggedUser
-                        ? "Reconectar"
-                        : "Conectar"}
+                        ? t.settings.drive.reconnect
+                        : t.settings.drive.connect}
                   </Button>
                   {syncBusy ? (
                     <Button type="button" variant="outline" onClick={() => void handleCancelSync()}>
@@ -601,8 +603,8 @@ export function SettingsPage() {
               <div>
                 <div className="mb-3 flex items-center justify-between rounded-md border border-white/10 bg-zinc-900/30 px-3 py-2">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Local Server</p>
-                    <p className="text-xs text-zinc-500">Adicione ou edite servidores locais em uma modal dedicada.</p>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.localServer.title}</p>
+                    <p className="text-xs text-zinc-500">{t.settings.localServer.description}</p>
                   </div>
                   <Button
                     type="button"
@@ -612,13 +614,13 @@ export function SettingsPage() {
                       setShowLocalServerModal(true);
                     }}
                   >
-                    <Server className="mr-2 h-4 w-4" /> Novo Local Server
+                    <Server className="mr-2 h-4 w-4" /> {t.settings.localServer.newButton}
                   </Button>
                 </div>
 
                 <div className="mb-2 flex items-center gap-2">
                   <Input
-                    placeholder="Buscar servidor..."
+                    placeholder={t.settings.drive.serverSearch}
                     className="h-8 flex-1 text-xs"
                     value={serverFilter}
                     onChange={(e) => { setServerFilter(e.target.value); setServerPage(0); }}
@@ -683,7 +685,7 @@ export function SettingsPage() {
                                   {server.label}
                                   {server.official ? (
                                     <span className="ml-1.5 inline-block rounded bg-blue-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold text-blue-400">
-                                      Oficial
+                                      {t.settings.drive.official}
                                     </span>
                                   ) : null}
                                 </p>
@@ -710,13 +712,13 @@ export function SettingsPage() {
                                       {ping}ms
                                     </span>
                                   ) : (
-                                    <span className="text-xs font-mono text-red-400">offline</span>
+                                    <span className="text-xs font-mono text-red-400">{t.settings.drive.offline}</span>
                                   )
                                 ) : (
                                   <span className="text-xs text-zinc-600">...</span>
                                 )}
                                 {isSelected ? (
-                                  <span className="text-xs font-medium text-emerald-400">Ativo</span>
+                                  <span className="text-xs font-medium text-emerald-400">{t.settings.drive.active}</span>
                                 ) : null}
                                 {isUserManagedServer(server) ? (
                                   <>
@@ -757,13 +759,13 @@ export function SettingsPage() {
                           );
                         })}
                         {paged.length === 0 ? (
-                          <p className="py-4 text-center text-xs text-zinc-500">Nenhum servidor encontrado.</p>
+                          <p className="py-4 text-center text-xs text-zinc-500">{t.settings.drive.serverEmpty}</p>
                         ) : null}
                       </div>
 
                       {totalPages > 1 ? (
                         <div className="mt-2 flex items-center justify-between">
-                          <p className="text-xs text-zinc-500">{filtered.length} servidor{filtered.length !== 1 ? "es" : ""}</p>
+                          <p className="text-xs text-zinc-500">{t.settings.drive.serverCount.replace("{count}", String(filtered.length))}</p>
                           <div className="flex gap-1">
                             <Button
                               type="button"
@@ -773,7 +775,7 @@ export function SettingsPage() {
                               disabled={page === 0}
                               onClick={() => setServerPage(page - 1)}
                             >
-                              Anterior
+                              {t.settings.drive.serverPrev}
                             </Button>
                             <span className="flex items-center px-2 text-xs text-zinc-500">
                               {page + 1}/{totalPages}
@@ -786,7 +788,7 @@ export function SettingsPage() {
                               disabled={page >= totalPages - 1}
                               onClick={() => setServerPage(page + 1)}
                             >
-                              Proximo
+                              {t.settings.drive.serverNext}
                             </Button>
                           </div>
                         </div>
@@ -802,11 +804,11 @@ export function SettingsPage() {
 
         {settingsTab === "security" ? (
         <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Senha Mestre</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.settings.sections.masterPassword}</h3>
           <div className="grid gap-2 border-b border-white/10 py-3 md:grid-cols-3">
-            <Input type="password" placeholder="Senha atual" {...passwordForm.register("oldPassword")} />
-            <Input type="password" placeholder="Nova senha" {...passwordForm.register("newPassword")} />
-            <Input type="password" placeholder="Confirmar" {...passwordForm.register("confirmPassword")} />
+            <Input type="password" placeholder={t.settings.password.currentPlaceholder} {...passwordForm.register("oldPassword")} />
+            <Input type="password" placeholder={t.settings.password.newPlaceholder} {...passwordForm.register("newPassword")} />
+            <Input type="password" placeholder={t.settings.password.confirmPlaceholder} {...passwordForm.register("confirmPassword")} />
             <div className="md:col-span-3 md:flex md:justify-end">
               <Button
                 type="button"
@@ -820,7 +822,7 @@ export function SettingsPage() {
                   )()
                 }
               >
-                <Lock className="mr-2 h-4 w-4" /> Atualizar Senha
+                <Lock className="mr-2 h-4 w-4" /> {t.settings.password.updateButton}
               </Button>
             </div>
           </div>
@@ -829,15 +831,15 @@ export function SettingsPage() {
 
         <div className="flex justify-end py-4">
           <Button type="submit" disabled={busy}>
-            <Save className="mr-2 h-4 w-4" /> Salvar Configuracoes
+            <Save className="mr-2 h-4 w-4" /> {t.settings.save}
           </Button>
         </div>
       </form>
 
       <Dialog
         open={showLocalServerModal}
-        title={serverDraft.id ? "Editar Local Server" : "Novo Local Server"}
-        description="Configure label, endereco e autor para o servidor local."
+        title={serverDraft.id ? t.settings.localServer.editTitle : t.settings.localServer.newTitle}
+        description={t.settings.localServer.modalDescription}
         onClose={() => {
           setShowLocalServerModal(false);
           setServerDraft({ id: "", label: "", address: "", author: "" });
@@ -859,7 +861,7 @@ export function SettingsPage() {
               onClick={() => void handleSaveServer()}
               disabled={!serverDraft.label.trim() || !serverDraft.address.trim()}
             >
-              {serverDraft.id ? "Salvar alteracoes" : "Adicionar servidor"}
+              {serverDraft.id ? t.settings.localServer.saveChanges : t.settings.localServer.addServer}
             </Button>
           </div>
         }
@@ -893,19 +895,19 @@ export function SettingsPage() {
       {showUploadPolicyModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-lg rounded-lg border border-white/10 bg-zinc-950 p-4">
-            <h3 className="text-sm font-semibold text-zinc-100">Upload de arquivos modificados</h3>
+            <h3 className="text-sm font-semibold text-zinc-100">{t.settings.uploadPolicy.modalTitle}</h3>
             <p className="mt-2 text-sm text-zinc-300">
-              Como o TermOpen deve tratar arquivos modificados no workspace remoto?
+              {t.settings.uploadPolicy.modalDescription}
             </p>
             <div className="mt-4 flex flex-col gap-2">
               <Button type="button" onClick={() => applyUploadPolicy("auto")}>
-                Enviar automaticamente
+                {t.settings.uploadPolicy.auto}
               </Button>
               <Button type="button" variant="outline" onClick={() => applyUploadPolicy("ask")}>
-                Perguntar sempre
+                {t.settings.uploadPolicy.ask}
               </Button>
               <Button type="button" variant="outline" onClick={() => applyUploadPolicy("manual")}>
-                Somente manual
+                {t.settings.uploadPolicy.manual}
               </Button>
             </div>
           </div>

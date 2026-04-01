@@ -4,9 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
 
 export function KeychainPage() {
+  const t = useT();
   const entries = useAppStore((state) => state.keychainEntries);
   const openKeychainDrawer = useAppStore((state) => state.openKeychainDrawer);
   const deleteKeychain = useAppStore((state) => state.deleteKeychain);
@@ -30,9 +32,9 @@ export function KeychainPage() {
   return (
     <div ref={rootRef} className="h-full overflow-auto px-3 py-2">
       <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-100">Keychain</h2>
+        <h2 className="text-sm font-semibold text-zinc-100">{t.keychain.title}</h2>
         <Button size="sm" onClick={() => openKeychainDrawer()}>
-          <Plus className="mr-1 h-4 w-4" /> Nova Chave
+          <Plus className="mr-1 h-4 w-4" /> {t.keychain.newKey}
         </Button>
       </div>
 
@@ -65,7 +67,7 @@ export function KeychainPage() {
                             setMenuOpenId(null);
                           }}
                         >
-                          Editar
+                          {t.keychain.edit}
                         </button>
                         <button
                           type="button"
@@ -75,7 +77,7 @@ export function KeychainPage() {
                             setMenuOpenId(null);
                           }}
                         >
-                          Remover
+                          {t.keychain.remove}
                         </button>
                       </div>
                     ) : null}
@@ -85,9 +87,9 @@ export function KeychainPage() {
               </CardHeader>
               <CardContent className="pt-0">
                 <div className="flex gap-1">
-                  {entry.private_key ? <Badge variant="secondary">Chave Privada</Badge> : null}
-                  {entry.public_key ? <Badge variant="secondary">Chave Publica</Badge> : null}
-                  {entry.passphrase ? <Badge variant="secondary">Passphrase</Badge> : null}
+                  {entry.private_key ? <Badge variant="secondary">{t.keychain.privateKey}</Badge> : null}
+                  {entry.public_key ? <Badge variant="secondary">{t.keychain.publicKey}</Badge> : null}
+                  {entry.passphrase ? <Badge variant="secondary">{t.keychain.passphrase}</Badge> : null}
                 </div>
               </CardContent>
             </Card>

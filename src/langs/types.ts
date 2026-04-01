@@ -115,6 +115,13 @@ export interface AppDictionary {
   };
   settings: {
     save: string;
+    tabs: {
+      general: string;
+      sftp: string;
+      terminal: string;
+      sync: string;
+      security: string;
+    };
     sections: {
       application: string;
       sync: string;
@@ -123,6 +130,21 @@ export interface AppDictionary {
       modifiedFiles: string;
       googleDrive: string;
       masterPassword: string;
+    };
+    localServer: {
+      title: string;
+      description: string;
+      newButton: string;
+      editTitle: string;
+      newTitle: string;
+      modalDescription: string;
+      saveChanges: string;
+      addServer: string;
+      labelPlaceholder: string;
+      addressPlaceholder: string;
+      authorPlaceholder: string;
+      edit: string;
+      delete: string;
     };
     editor: {
       title: string;

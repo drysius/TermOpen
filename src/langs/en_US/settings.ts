@@ -2,6 +2,13 @@ import type { AppDictionary } from "../types";
 
 export const settings: AppDictionary["settings"] = {
   save: "Save Settings",
+  tabs: {
+    general: "General",
+    sftp: "SFTP",
+    terminal: "Terminal",
+    sync: "Synchronization",
+    security: "Security",
+  },
   sections: {
     application: "Application",
     sync: "Sync & Connectivity",
@@ -10,6 +17,21 @@ export const settings: AppDictionary["settings"] = {
     modifiedFiles: "Modified Files",
     googleDrive: "Google Drive",
     masterPassword: "Master Password",
+  },
+  localServer: {
+    title: "Local Server",
+    description: "Add or edit local servers in a dedicated modal.",
+    newButton: "New Local Server",
+    editTitle: "Edit Local Server",
+    newTitle: "New Local Server",
+    modalDescription: "Configure label, address and author for the local server.",
+    saveChanges: "Save changes",
+    addServer: "Add server",
+    labelPlaceholder: "Server label",
+    addressPlaceholder: "https://my-worker.example.com",
+    authorPlaceholder: "Author URL (optional)",
+    edit: "Edit",
+    delete: "Delete",
   },
   editor: {
     title: "Default editor",
