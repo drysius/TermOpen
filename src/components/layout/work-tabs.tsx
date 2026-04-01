@@ -1,6 +1,7 @@
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useT } from "@/langs";
 import type { WorkTab } from "@/types/workspace";
 
 interface WorkTabsProps {
@@ -36,6 +37,7 @@ function renderTabTitle(tab: WorkTab, mode: TabLabelMode, index: number): string
 }
 
 export function WorkTabs({ tabs, activeId, onSelect, onClose, onCreateWorkspace }: WorkTabsProps) {
+  const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [rootWidth, setRootWidth] = useState(720);
 
@@ -117,7 +119,7 @@ export function WorkTabs({ tabs, activeId, onSelect, onClose, onCreateWorkspace 
         data-tauri-drag-region="false"
         className="inline-flex h-full w-9 items-center justify-center border-r border-white/10 text-zinc-300 transition hover:bg-zinc-900 hover:text-zinc-100"
         onClick={onCreateWorkspace}
-        title="Novo workspace"
+        title={t.workspace.addBlock}
       >
         <Plus className="h-3.5 w-3.5" />
       </button>

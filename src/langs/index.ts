@@ -45,4 +45,9 @@ export function useT(): AppDictionary {
   return useI18n((s) => s.t);
 }
 
+/** Non-hook accessor for use outside React components (store actions, utils). */
+export function getT(): AppDictionary {
+  return useI18n.getState().t;
+}
+
 export type { AppDictionary };

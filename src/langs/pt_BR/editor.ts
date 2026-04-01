@@ -5,4 +5,6 @@ export const editor: AppDictionary["editor"] = {
   openExternal: "Abrir Externo",
   imageError: "Nao foi possivel carregar o preview da imagem.",
   videoError: "Nao foi possivel carregar o preview do video.",
+  binaryNoPreview: "Arquivo binario sem preview interno.",
+  binarySize: "Tamanho: {size}.",
 };

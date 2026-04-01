@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { baseName, getError, joinPath, slug } from "@/functions/common";
 import { detectEditorFileMeta, formatBytes } from "@/functions/editor-file-utils";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
+import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions, PaneSide } from "@/store/app-store.types";
 import type { ConnectionProfile, SftpEntry } from "@/types/termopen";
@@ -160,7 +161,7 @@ export function createSftpEditorActions(
       const targetSide: PaneSide = direction === "left_to_right" ? "right" : "left";
 
       if (!source.selectedFile) {
-        toast.error("Selecione um arquivo de origem.");
+        toast.error(getT().toasts.selectSourceFile);
         return;
       }
 
@@ -181,7 +182,7 @@ export function createSftpEditorActions(
         return;
       }
       if (editor.view !== "text") {
-        toast.warning("Somente arquivos texto podem ser salvos no editor interno.");
+        toast.warning(getT().toasts.textOnlyEditor);
         return;
       }
       try {
@@ -192,7 +193,7 @@ export function createSftpEditorActions(
             [tabId]: { ...state.editorTabs[tabId], dirty: false },
           },
         }));
-        toast.success("Arquivo salvo.");
+        toast.success(getT().toasts.fileSaved);
       } catch (error) {
         toast.error(getError(error));
       }
@@ -204,7 +205,7 @@ export function createSftpEditorActions(
         return;
       }
       if (editor.view !== "text") {
-        toast.warning("Preview de midia/binario nao exporta para editor externo por texto.");
+        toast.warning(getT().toasts.mediaCantExport);
         return;
       }
       try {

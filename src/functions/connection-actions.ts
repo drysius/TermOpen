@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { BLANK_KEYCHAIN_ENTRY, BLANK_PROFILE } from "@/constants";
 import { getError } from "@/functions/common";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
+import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions } from "@/store/app-store.types";
 import type {
@@ -164,7 +165,7 @@ export function createConnectionActions(
             a.name.localeCompare(b.name),
           ),
         });
-        toast.success("Conexao salva.");
+        toast.success(getT().toasts.connectionSaved);
       } catch (error) {
         toast.error(getError(error));
       } finally {
@@ -178,7 +179,7 @@ export function createConnectionActions(
         set((state) => ({
           connections: state.connections.filter((item) => item.id !== id),
         }));
-        toast.success("Conexao removida.");
+        toast.success(getT().toasts.connectionRemoved);
       } catch (error) {
         toast.error(getError(error));
       }
@@ -205,7 +206,7 @@ export function createConnectionActions(
             a.name.localeCompare(b.name),
           ),
         });
-        toast.success("Keychain salva.");
+        toast.success(getT().toasts.keychainSaved);
       } catch (error) {
         toast.error(getError(error));
       } finally {
@@ -219,7 +220,7 @@ export function createConnectionActions(
         set((state) => ({
           keychainEntries: state.keychainEntries.filter((item) => item.id !== id),
         }));
-        toast.success("Entrada removida.");
+        toast.success(getT().toasts.keychainRemoved);
       } catch (error) {
         toast.error(getError(error));
       }
@@ -237,7 +238,7 @@ export function createConnectionActions(
           const synced = await api.syncPush();
           set({ syncState: synced });
         }
-        toast.success("Configuracoes salvas.");
+        toast.success(getT().toasts.settingsSaved);
       } catch (error) {
         toast.error(getError(error));
       } finally {
@@ -247,17 +248,17 @@ export function createConnectionActions(
 
     changeMasterPassword: async (oldPassword, newPassword, confirmPassword) => {
       if (!newPassword) {
-        toast.error("Informe a nova senha.");
+        toast.error(getT().toasts.enterNewPassword);
         return;
       }
       if (newPassword !== confirmPassword) {
-        toast.error("A confirmacao da senha nova nao confere.");
+        toast.error(getT().toasts.passwordMismatch);
         return;
       }
 
       try {
         await api.vaultChangeMasterPassword(oldPassword || null, newPassword);
-        toast.success("Senha mestre atualizada.");
+        toast.success(getT().toasts.passwordUpdated);
       } catch (error) {
         toast.error(getError(error));
       }
@@ -308,7 +309,7 @@ export function createConnectionActions(
         await api.knownHostsRemove(lineRaw, path ?? null);
         const entries = await api.knownHostsList(path ?? null);
         set({ knownHosts: entries });
-        toast.success("Known host removido.");
+        toast.success(getT().toasts.knownHostRemoved);
       } catch (error) {
         toast.error(getError(error));
       }

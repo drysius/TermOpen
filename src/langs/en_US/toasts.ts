@@ -25,4 +25,5 @@ export const toasts: AppDictionary["toasts"] = {
   fileSaved: "File saved.",
   mediaCantExport: "Media/binary preview cannot be exported to external editor as text.",
   fileTooLarge: "File too large for preview ({size} > {limit}).",
+  knownHostRemoved: "Known host removed.",
 };

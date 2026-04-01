@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { DEFAULT_PANE, INITIAL_SYNC_STATE } from "@/constants";
 import { getError } from "@/functions/common";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
+import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions } from "@/store/app-store.types";
 import type { SyncConflictDecision } from "@/types/termopen";
@@ -101,7 +102,7 @@ export function createVaultActions(
         set({ startupConflicts: [], syncState });
         await hydrateWorkspace();
         await api.windowStateRestore().catch(() => undefined);
-        toast.success("Conflitos resolvidos com sucesso.");
+        toast.success(getT().vault.toasts.conflictsResolved);
       } catch (error) {
         toast.error(getError(error));
       } finally {
@@ -115,7 +116,7 @@ export function createVaultActions(
         const status = await api.vaultInit(password);
         set({ vaultStatus: status });
         await get().loadWorkspace();
-        toast.success("Vault inicializado.");
+        toast.success(getT().vault.toasts.initialized);
       } catch (error) {
         toast.error(getError(error));
         await get().bootstrap().catch(() => undefined);
@@ -130,7 +131,7 @@ export function createVaultActions(
         const status = await api.vaultUnlock(password);
         set({ vaultStatus: status });
         await get().loadWorkspace();
-        toast.success("Vault desbloqueado.");
+        toast.success(getT().vault.toasts.unlocked);
       } catch (error) {
         toast.error(getError(error));
         await get().bootstrap().catch(() => undefined);
@@ -162,7 +163,7 @@ export function createVaultActions(
           startupSyncBusy: false,
         }));
         if (fromInactivity) {
-          toast.warning("Aplicacao bloqueada por inatividade.");
+          toast.warning(getT().vault.toasts.lockedInactivity);
         }
         await get().bootstrap();
       } catch (error) {

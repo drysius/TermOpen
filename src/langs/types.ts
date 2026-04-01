@@ -404,6 +404,8 @@ export interface AppDictionary {
     openExternal: string;
     imageError: string;
     videoError: string;
+    binaryNoPreview: string;
+    binarySize: string;
   };
   conflicts: {
     title: string;
@@ -440,6 +442,7 @@ export interface AppDictionary {
     fileSaved: string;
     mediaCantExport: string;
     fileTooLarge: string;
+    knownHostRemoved: string;
   };
   common: {
     cancel: string;

@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import { getError } from "@/functions/common";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
+import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions } from "@/store/app-store.types";
 import type { ConnectionProfile } from "@/types/termopen";
@@ -35,7 +36,7 @@ export function createSessionActions(
     }
 
     const delayMs = Math.max(1, state.settings.reconnect_delay_seconds) * 1000;
-    toast.warning(`Sessao desconectada. Tentando reconectar em ${Math.floor(delayMs / 1000)}s...`);
+    toast.warning(getT().toasts.sessionReconnecting.replace("{seconds}", String(Math.floor(delayMs / 1000))));
 
     if (reconnectTimers[sessionId]) {
       window.clearTimeout(reconnectTimers[sessionId]);
@@ -74,7 +75,7 @@ export function createSessionActions(
           };
         });
 
-        toast.success("Sessao reconectada automaticamente.");
+        toast.success(getT().toasts.sessionReconnected);
       } catch (error) {
         toast.error(getError(error));
       } finally {
@@ -171,7 +172,7 @@ export function createSessionActions(
 
       const stopExit = await listen<string>(`terminal:exit:${sessionId}`, (event) => {
         get().appendSessionBuffer(sessionId, `\r\n[${sessionId}] ${event.payload}`);
-        toast.warning(`Sessao ${sessionId.slice(0, 8)} desconectada.`);
+        toast.warning(getT().toasts.sessionDisconnected.replace("{sessionId}", sessionId.slice(0, 8)));
       });
 
       listenersBySession[sessionId] = [stopOut, stopExit];
@@ -197,10 +198,14 @@ export function createSessionActions(
 
       if (result.status === "unknown_host_challenge") {
         const accepted = window.confirm(
-          `Host desconhecido: ${result.host}:${result.port}\n${result.key_type} ${result.fingerprint}\n\nDeseja confiar neste host e conectar?`,
+          getT().toasts.unknownHostConfirm
+            .replace("{host}", result.host)
+            .replace("{port}", String(result.port))
+            .replace("{keyType}", result.key_type)
+            .replace("{fingerprint}", result.fingerprint),
         );
         if (!accepted) {
-          throw new Error("Conexao cancelada pelo usuario (host desconhecido).");
+          throw new Error(getT().toasts.connectionCancelledHost);
         }
         result = await api.sshConnectEx(profile.id, {
           acceptUnknownHost: true,
@@ -209,12 +214,12 @@ export function createSessionActions(
 
       if (result.status === "auth_required") {
         const password = window.prompt(
-          `${result.message}\n\nDigite a senha para tentar novamente:`,
+          getT().toasts.passwordPrompt.replace("{message}", result.message),
         );
         if (!password) {
-          throw new Error("Conexao cancelada: senha nao informada.");
+          throw new Error(getT().toasts.connectionCancelledPassword);
         }
-        const save = window.confirm("Deseja salvar a senha neste perfil?");
+        const save = window.confirm(getT().toasts.savePasswordConfirm);
         result = await api.sshConnectEx(profile.id, {
           acceptUnknownHost: true,
           passwordOverride: password,
@@ -227,7 +232,7 @@ export function createSessionActions(
       }
 
       if (result.status !== "connected") {
-        throw new Error("Nao foi possivel conectar a sessao SSH.");
+        throw new Error(getT().toasts.connectionFailed);
       }
 
       const session = result.session;

@@ -3,6 +3,7 @@ import Editor from "@monaco-editor/react";
 import { Button } from "@/components/ui/button";
 import { formatBytes, type EditorViewMode, toDataUrl } from "@/functions/editor-file-utils";
 import { Input } from "@/components/ui/input";
+import { useT } from "@/langs";
 
 interface EditorTabPageProps {
   path: string;
@@ -31,6 +32,7 @@ export function EditorTabPage({
   onSave,
   onOpenExternal,
 }: EditorTabPageProps) {
+  const t = useT();
   const canSave = view === "text";
   const previewUrl = mimeType && mediaBase64 ? toDataUrl(mimeType, mediaBase64) : null;
 
@@ -39,10 +41,10 @@ export function EditorTabPage({
       <div className="flex gap-2 border-b border-white/10 p-2">
         <Input value={path} readOnly />
         <Button onClick={onSave} disabled={!canSave}>
-          Salvar
+          {t.editor.save}
         </Button>
         <Button variant="outline" onClick={onOpenExternal}>
-          Abrir Externo
+          {t.editor.openExternal}
         </Button>
       </div>
       <div className="min-h-0 flex-1">
@@ -63,7 +65,7 @@ export function EditorTabPage({
               <img src={previewUrl} alt={path} className="max-h-full max-w-full object-contain" />
             ) : (
               <p className="text-sm text-zinc-400">
-                {previewError ?? "Nao foi possivel carregar o preview da imagem."}
+                {previewError ?? t.editor.imageError}
               </p>
             )}
           </div>
@@ -75,7 +77,7 @@ export function EditorTabPage({
               <video controls className="max-h-full max-w-full" src={previewUrl} />
             ) : (
               <p className="text-sm text-zinc-400">
-                {previewError ?? "Nao foi possivel carregar o preview do video."}
+                {previewError ?? t.editor.videoError}
               </p>
             )}
           </div>
@@ -84,8 +86,8 @@ export function EditorTabPage({
         {view === "binary" ? (
           <div className="flex h-full items-center justify-center bg-zinc-950 p-4">
             <p className="text-center text-sm text-zinc-400">
-              Arquivo binario sem preview interno.
-              {sizeBytes ? ` Tamanho: ${formatBytes(sizeBytes)}.` : ""}
+              {t.editor.binaryNoPreview}
+              {sizeBytes ? ` ${t.editor.binarySize.replace("{size}", formatBytes(sizeBytes))}` : ""}
             </p>
           </div>
         ) : null}
