@@ -20,7 +20,14 @@ import { EditorTabPage } from "@/pages/tabs/editor-tab-page";
 import { SftpWorkspaceTabPage } from "@/pages/tabs/sftp-workspace-tab-page";
 import { VaultGatePage } from "@/pages/vault-gate-page";
 import { useAppStore } from "@/store/app-store";
-import type { SyncConflictDecision, SyncKeepSide, SyncLoggedUser, SyncProgressState, SyncState } from "@/types/termopen";
+import type {
+  ConnectionProfile,
+  SyncConflictDecision,
+  SyncKeepSide,
+  SyncLoggedUser,
+  SyncProgressState,
+  SyncState,
+} from "@/types/termopen";
 import type { SidebarSection } from "@/types/workspace";
 
 function sectionFromPath(pathname: string): SidebarSection {
@@ -57,12 +64,100 @@ function pathFromSection(section: SidebarSection): string {
 
 function formatSettingValue(value: unknown): string {
   if (value === null || value === undefined || value === "") {
-    return "—";
+    return "-";
   }
   if (typeof value === "boolean") {
     return value ? "true" : "false";
   }
   return String(value);
+}
+
+type DeepLinkProtocol = "ssh" | "sftp";
+
+interface ParsedConnectionDeepLink {
+  protocol: DeepLinkProtocol;
+  host: string;
+  port: number;
+  username: string;
+  remotePath: string;
+}
+
+function normalizeDeepLinkInput(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^"+|"+$/g, "")
+    .replace("termopen:://", "termopen://")
+    .replace("openterm:://", "openterm://");
+}
+
+function parseDirectConnectionUrl(url: URL): ParsedConnectionDeepLink | null {
+  const protocol = url.protocol.replace(":", "").toLowerCase();
+  if (protocol !== "ssh" && protocol !== "sftp") {
+    return null;
+  }
+
+  const host = url.hostname.trim();
+  if (!host) {
+    return null;
+  }
+
+  const parsedPort = url.port ? Number(url.port) : 22;
+  if (!Number.isFinite(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    return null;
+  }
+
+  const username = decodeURIComponent(url.username || "").trim();
+  const pathname = decodeURIComponent(url.pathname || "/").trim();
+  const remotePath = protocol === "sftp" ? (pathname.length ? pathname : "/") : "/";
+
+  return {
+    protocol,
+    host,
+    port: parsedPort,
+    username,
+    remotePath,
+  };
+}
+
+function parseConnectionDeepLink(raw: string): ParsedConnectionDeepLink | null {
+  const normalized = normalizeDeepLinkInput(raw);
+  if (!normalized.includes("://")) {
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    return null;
+  }
+
+  const direct = parseDirectConnectionUrl(parsed);
+  if (direct) {
+    return direct;
+  }
+
+  const protocol = parsed.protocol.replace(":", "").toLowerCase();
+  if (protocol !== "termopen" && protocol !== "openterm") {
+    return null;
+  }
+
+  const embedded =
+    parsed.searchParams.get("url") ??
+    parsed.searchParams.get("target") ??
+    parsed.searchParams.get("uri") ??
+    parsed.searchParams.get("link");
+  if (embedded) {
+    return parseConnectionDeepLink(decodeURIComponent(embedded));
+  }
+
+  const hostBasedProtocol = parsed.hostname.toLowerCase();
+  if (hostBasedProtocol === "ssh" || hostBasedProtocol === "sftp") {
+    const rebuilt = `${hostBasedProtocol}://${parsed.pathname.replace(/^\/+/, "")}${parsed.search}`;
+    return parseConnectionDeepLink(rebuilt);
+  }
+
+  return null;
 }
 
 function App() {
@@ -80,6 +175,9 @@ function App() {
   const startupConflicts = useAppStore((state) => state.startupConflicts);
   const startupSyncBusy = useAppStore((state) => state.startupSyncBusy);
   const settingsUnsavedDraft = useAppStore((state) => state.settingsUnsavedDraft);
+  const openSsh = useAppStore((state) => state.openSsh);
+  const openSftpWorkspace = useAppStore((state) => state.openSftpWorkspace);
+  const openHostDrawer = useAppStore((state) => state.openHostDrawer);
 
   const bootstrap = useAppStore((state) => state.bootstrap);
   const resolveStartupConflicts = useAppStore((state) => state.resolveStartupConflicts);
@@ -96,6 +194,7 @@ function App() {
   const setSettingsUnsavedDraft = useAppStore((state) => state.setSettingsUnsavedDraft);
 
   const lastActivityRef = useRef<number>(Date.now());
+  const deepLinkProcessingRef = useRef(false);
   const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
   const [closingWorkspace, setClosingWorkspace] = useState(false);
   const [booting, setBooting] = useState(true);
@@ -107,6 +206,7 @@ function App() {
   const [headerSyncBusy, setHeaderSyncBusy] = useState(false);
   const [pendingSettingsNavigation, setPendingSettingsNavigation] = useState<SidebarSection | null>(null);
   const [leavingSettingsBusy, setLeavingSettingsBusy] = useState(false);
+  const [pendingDeepLinks, setPendingDeepLinks] = useState<string[]>([]);
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId]);
   const pendingCloseTab = useMemo(
     () => tabs.find((tab) => tab.id === pendingCloseTabId) ?? null,
@@ -155,6 +255,89 @@ function App() {
     } finally {
       setHeaderSyncBusy(false);
     }
+  }
+
+  function enqueueDeepLink(rawUrl: string) {
+    const normalized = normalizeDeepLinkInput(rawUrl);
+    if (!normalized) {
+      return;
+    }
+    setPendingDeepLinks((current) => (current.includes(normalized) ? current : [...current, normalized]));
+  }
+
+  async function openConnectionFromDeepLink(rawUrl: string): Promise<boolean> {
+    const parsed = parseConnectionDeepLink(rawUrl);
+    if (!parsed) {
+      return false;
+    }
+
+    const protocolList = parsed.protocol === "ssh" ? (["ssh"] as const) : (["sftp"] as const);
+    const fallbackName = `${parsed.protocol.toUpperCase()} ${parsed.host}`;
+
+    if (!parsed.username) {
+      openHostDrawer(
+        {
+          id: "",
+          name: fallbackName,
+          host: parsed.host,
+          port: parsed.port,
+          username: "",
+          password: "",
+          private_key: "",
+          keychain_id: null,
+          remote_path: parsed.remotePath,
+          protocols: [...protocolList],
+          kind: parsed.protocol === "ssh" ? "host" : "sftp",
+        },
+        parsed.protocol,
+      );
+      return true;
+    }
+
+    const stateConnections = useAppStore.getState().connections;
+    const existing = stateConnections.find((item) => {
+      const hasProtocol = item.protocols.includes(parsed.protocol);
+      if (!hasProtocol) {
+        return false;
+      }
+      return (
+        item.host === parsed.host &&
+        item.port === parsed.port &&
+        item.username === parsed.username
+      );
+    });
+
+    let profile: ConnectionProfile;
+    if (existing) {
+      profile = existing;
+    } else {
+      const created = await api.connectionSave({
+        id: "",
+        name: fallbackName,
+        host: parsed.host,
+        port: parsed.port,
+        username: parsed.username,
+        password: "",
+        private_key: "",
+        keychain_id: null,
+        remote_path: parsed.remotePath,
+        protocols: [...protocolList],
+        kind: parsed.protocol === "ssh" ? "host" : "sftp",
+      });
+      profile = created;
+      useAppStore.setState((current) => ({
+        connections: [...current.connections.filter((item) => item.id !== created.id), created].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
+      }));
+    }
+
+    if (parsed.protocol === "ssh") {
+      await openSsh(profile);
+    } else {
+      await openSftpWorkspace(profile);
+    }
+    return true;
   }
 
   useEffect(() => {
@@ -309,6 +492,45 @@ function App() {
       stopSyncProgress?.();
     };
   }, []);
+
+  useEffect(() => {
+    let stopDeepLinkListener: (() => void) | null = null;
+
+    void api
+      .deeplinkTakePending()
+      .then((urls) => {
+        urls.forEach((url) => enqueueDeepLink(url));
+      })
+      .catch(() => undefined);
+
+    void listen<string>("app:deeplink", (event) => {
+      enqueueDeepLink(event.payload);
+    }).then((unlisten) => {
+      stopDeepLinkListener = unlisten;
+    });
+
+    return () => {
+      stopDeepLinkListener?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
+      return;
+    }
+    if (pendingDeepLinks.length === 0 || deepLinkProcessingRef.current) {
+      return;
+    }
+
+    const nextUrl = pendingDeepLinks[0];
+    deepLinkProcessingRef.current = true;
+    void openConnectionFromDeepLink(nextUrl)
+      .catch(() => undefined)
+      .finally(() => {
+        setPendingDeepLinks((current) => current.slice(1));
+        deepLinkProcessingRef.current = false;
+      });
+  }, [openHostDrawer, openSftpWorkspace, openSsh, pendingDeepLinks, vaultStatus]);
 
   async function handleResolveStartupConflicts() {
     const decisions: SyncConflictDecision[] = startupConflicts.map((item) => ({

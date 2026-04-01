@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
 import { api } from "@/lib/tauri";
 import type { AppSettings, AuthServer, ModifiedUploadPolicy, SyncLoggedUser } from "@/types/termopen";
@@ -31,7 +32,7 @@ function SettingsRow({
   control: ReactNode;
 }) {
   return (
-    <div className="grid gap-2 border-b border-white/10 py-3 xl:grid-cols-3 xl:items-center">
+    <div className="grid gap-3 rounded-xl border border-white/10 bg-zinc-950/45 p-3 xl:grid-cols-3 xl:items-center">
       <div className="xl:col-span-1">
         <p className="text-sm font-medium text-zinc-100">{title}</p>
         <p className="text-xs text-zinc-400">{description}</p>
@@ -68,7 +69,7 @@ function OptionDropdown<T extends string>({
     <div ref={rootRef} className="relative">
       <button
         type="button"
-        className="flex h-10 w-full items-center justify-between rounded-md border border-white/15 bg-zinc-900 px-3 text-left text-sm text-zinc-100"
+        className="flex h-10 w-full items-center justify-between rounded-lg border border-white/15 bg-zinc-900/85 px-3 text-left text-sm text-zinc-100 transition hover:border-cyan-400/45"
         onClick={() => setOpen((current) => !current)}
       >
         <span>{selected?.label}</span>
@@ -78,13 +79,13 @@ function OptionDropdown<T extends string>({
         <p className="mt-1 text-xs text-zinc-500">{selected.description}</p>
       ) : null}
       {open ? (
-        <div className="absolute z-20 mt-1 w-full rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
+        <div className="absolute z-[260] mt-1 w-full rounded-lg border border-white/10 bg-zinc-950/95 p-1 shadow-2xl">
           {options.map((option) => (
             <button
               key={option.value}
               type="button"
               className={`w-full rounded px-2 py-2 text-left transition ${
-                option.value === value ? "bg-purple-600/20 text-purple-100" : "text-zinc-300 hover:bg-zinc-900"
+                option.value === value ? "bg-cyan-500/20 text-cyan-100" : "text-zinc-300 hover:bg-zinc-900"
               }`}
               onClick={() => {
                 onChange(option.value);
@@ -115,6 +116,7 @@ function normalizeSettingsValues(values: SettingsFormValues): AppSettings {
 }
 
 export function SettingsPage() {
+  const t = useT();
   const settings = useAppStore((state) => state.settings);
   const syncState = useAppStore((state) => state.syncState);
   const busy = useAppStore((state) => state.busy);
@@ -311,27 +313,48 @@ export function SettingsPage() {
     return server.id.startsWith("local:");
   }
 
+  const tabLabels = {
+    general: t.settings.sections.application,
+    sftp: t.settings.sections.sftp,
+    terminal: t.settings.sections.terminal,
+    sync: t.settings.sections.sync,
+    security: t.settings.sections.masterPassword,
+  } as const;
+
   return (
-    <div className="h-full overflow-auto px-4 py-3">
+    <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top,#0a1626_0%,#09090b_55%)] px-4 py-4">
       <form
+        className="mx-auto max-w-7xl"
         onSubmit={settingsForm.handleSubmit((values) =>
           void saveSettings(normalizeSettingsValues(values)).then(() => setSettingsUnsavedDraft(null)),
         )}
       >
-        <div className="mb-4 grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-zinc-950/40 p-1 text-xs md:grid-cols-5">
+        <div className="mb-4 rounded-2xl border border-white/10 bg-gradient-to-br from-cyan-500/15 via-zinc-950 to-zinc-950 p-4 shadow-2xl shadow-black/30">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-lg font-semibold text-zinc-100">{t.sidebar.settings}</p>
+              <p className="text-xs text-zinc-400">{tabLabels[settingsTab]}</p>
+            </div>
+            <Button type="submit" disabled={busy}>
+              <Save className="mr-2 h-4 w-4" /> {t.settings.save}
+            </Button>
+          </div>
+        </div>
+
+        <div className="mb-4 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-zinc-950/70 p-1 text-xs md:grid-cols-5">
           {[
-            { id: "general", label: "General" },
-            { id: "sftp", label: "SFTP" },
-            { id: "terminal", label: "Terminal" },
-            { id: "sync", label: "Synchronization" },
-            { id: "security", label: "Security" },
+            { id: "general", label: tabLabels.general },
+            { id: "sftp", label: tabLabels.sftp },
+            { id: "terminal", label: tabLabels.terminal },
+            { id: "sync", label: tabLabels.sync },
+            { id: "security", label: tabLabels.security },
           ].map((tab) => (
             <button
               key={tab.id}
               type="button"
-              className={`rounded px-2 py-1.5 transition ${
+              className={`rounded-lg px-2 py-2 transition ${
                 settingsTab === tab.id
-                  ? "bg-zinc-800 text-zinc-100"
+                  ? "bg-zinc-800 text-zinc-100 shadow-inner shadow-black/30"
                   : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
               }`}
               onClick={() => setSettingsTab(tab.id as typeof settingsTab)}
@@ -342,8 +365,8 @@ export function SettingsPage() {
         </div>
 
         {settingsTab === "general" ? (
-        <section>
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Aplicacao</h3>
+        <section className="space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
+          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.application}</h3>
           <SettingsRow
             title="Editor padrao"
             description="Defina se o arquivo abre no editor interno, VS Code ou no sistema."
@@ -375,8 +398,8 @@ export function SettingsPage() {
         ) : null}
 
         {settingsTab === "sync" ? (
-        <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Synchronization</h3>
+        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
+          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.sync}</h3>
           <SettingsRow
             title="Sync automatico"
             description="Sincroniza periodicamente quando conectado ao Google Drive."
@@ -419,8 +442,8 @@ export function SettingsPage() {
         ) : null}
 
         {settingsTab === "sftp" ? (
-        <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">SFTP</h3>
+        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
+          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.sftp}</h3>
           <SettingsRow
             title="Chunk SFTP (KB)"
             description="Tamanho do bloco usado em leituras/escritas e transferencias SFTP."
@@ -448,8 +471,8 @@ export function SettingsPage() {
         ) : null}
 
         {settingsTab === "terminal" ? (
-        <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Terminal</h3>
+        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
+          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.terminal}</h3>
           <SettingsRow
             title="Auto reconnect SSH"
             description="Tenta reconectar sessoes SSH desconectadas automaticamente."
@@ -529,8 +552,8 @@ export function SettingsPage() {
         ) : null}
 
         {settingsTab === "general" ? (
-        <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Arquivos Modificados</h3>
+        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
+          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.modifiedFiles}</h3>
           <SettingsRow
             title="Upload de alteracoes"
             description="Define como arquivos alterados no editor interno devem ser enviados."
@@ -552,13 +575,13 @@ export function SettingsPage() {
         ) : null}
 
         {settingsTab === "sync" ? (
-        <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Google Drive</h3>
-          <div className="border-b border-white/10 py-3">
-            <div className="mb-3 flex gap-1 rounded-md bg-zinc-900/50 p-0.5">
+        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
+          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.googleDrive}</h3>
+          <div className="py-1">
+            <div className="mb-3 flex gap-1 rounded-lg border border-white/10 bg-zinc-900/50 p-1">
               <button
                 type="button"
-                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                   driveTab === "account"
                     ? "bg-zinc-800 text-zinc-100"
                     : "text-zinc-500 hover:text-zinc-300"
@@ -569,7 +592,7 @@ export function SettingsPage() {
               </button>
               <button
                 type="button"
-                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                   driveTab === "config"
                     ? "bg-zinc-800 text-zinc-100"
                     : "text-zinc-500 hover:text-zinc-300"
@@ -583,7 +606,7 @@ export function SettingsPage() {
             {driveTab === "account" ? (
               <div>
                 {loggedUser ? (
-                  <div className="mb-2 flex items-center gap-2">
+                  <div className="mb-2 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3">
                     <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20 text-sm font-semibold text-emerald-400">
                       {loggedUser.name?.[0]?.toUpperCase() || loggedUser.email?.[0]?.toUpperCase() || "?"}
                     </div>
@@ -596,14 +619,16 @@ export function SettingsPage() {
                     </span>
                   </div>
                 ) : null}
-                <p className={`text-sm ${syncState.status === "error" ? "text-red-400" : syncState.status === "ok" ? "text-emerald-400" : "text-zinc-300"}`}>
-                  {syncState.message}
-                </p>
-                {syncState.last_sync_at ? (
-                  <p className="mt-1 text-xs text-zinc-500">
-                    Ultimo sync: {new Date(syncState.last_sync_at).toLocaleString("pt-BR")}
+                <div className="rounded-xl border border-white/10 bg-zinc-950/40 p-3">
+                  <p className={`text-sm ${syncState.status === "error" ? "text-red-400" : syncState.status === "ok" ? "text-emerald-400" : "text-zinc-300"}`}>
+                    {syncState.message}
                   </p>
-                ) : null}
+                  {syncState.last_sync_at ? (
+                    <p className="mt-1 text-xs text-zinc-500">
+                      Ultimo sync: {new Date(syncState.last_sync_at).toLocaleString("pt-BR")}
+                    </p>
+                  ) : null}
+                </div>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Button type="button" onClick={() => void handleRunSync("login")} disabled={syncBusy}>
                     <Cloud className={`mr-2 h-4 w-4 ${syncBusy ? "animate-pulse" : ""}`} />
@@ -632,7 +657,7 @@ export function SettingsPage() {
               </div>
             ) : (
               <div>
-                <div className="mb-3 flex items-center justify-between rounded-md border border-white/10 bg-zinc-900/30 px-3 py-2">
+                <div className="mb-3 flex items-center justify-between rounded-xl border border-white/10 bg-zinc-900/35 px-3 py-2">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Local Server</p>
                     <p className="text-xs text-zinc-500">Adicione ou edite servidores locais em uma modal dedicada.</p>
@@ -649,10 +674,10 @@ export function SettingsPage() {
                   </Button>
                 </div>
 
-                <div className="mb-2 flex items-center gap-2">
+                <div className="mb-3 flex items-center gap-2">
                   <Input
                     placeholder="Buscar servidor..."
-                    className="h-8 flex-1 text-xs"
+                    className="h-9 flex-1 text-xs"
                     value={serverFilter}
                     onChange={(e) => { setServerFilter(e.target.value); setServerPage(0); }}
                   />
@@ -694,17 +719,17 @@ export function SettingsPage() {
 
                   return (
                     <>
-                      <div className="space-y-1">
+                      <div className="space-y-2">
                         {paged.map((server) => {
                           const isSelected = (settings.selected_auth_server_id || "default") === server.id;
                           const ping = serverPings[server.id];
                           return (
                             <div
                               key={server.id}
-                              className={`flex items-center justify-between rounded-md border px-3 py-2 transition-colors cursor-pointer ${
+                              className={`flex items-center justify-between rounded-xl border px-3 py-2 transition-colors cursor-pointer ${
                                 isSelected
-                                  ? "border-emerald-500/50 bg-emerald-500/10"
-                                  : "border-white/10 bg-zinc-900/30 hover:bg-zinc-900/60"
+                                  ? "border-emerald-500/50 bg-emerald-500/12"
+                                  : "border-white/10 bg-zinc-900/35 hover:bg-zinc-900/60"
                               }`}
                               onClick={() => void handleSelectServer(server.id)}
                               onKeyDown={() => {}}
@@ -790,7 +815,7 @@ export function SettingsPage() {
                           );
                         })}
                         {paged.length === 0 ? (
-                          <p className="py-4 text-center text-xs text-zinc-500">Nenhum servidor encontrado.</p>
+                          <p className="rounded-xl border border-dashed border-white/15 bg-zinc-950/45 py-5 text-center text-xs text-zinc-500">Nenhum servidor encontrado.</p>
                         ) : null}
                       </div>
 
@@ -834,9 +859,9 @@ export function SettingsPage() {
         ) : null}
 
         {settingsTab === "security" ? (
-        <section className="mt-5">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Senha Mestre</h3>
-          <div className="grid gap-2 border-b border-white/10 py-3 md:grid-cols-3">
+        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
+          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.masterPassword}</h3>
+          <div className="grid gap-2 py-1 md:grid-cols-3">
             <Input type="password" placeholder="Senha atual" {...passwordForm.register("oldPassword")} />
             <Input type="password" placeholder="Nova senha" {...passwordForm.register("newPassword")} />
             <Input type="password" placeholder="Confirmar" {...passwordForm.register("confirmPassword")} />
@@ -860,10 +885,12 @@ export function SettingsPage() {
         </section>
         ) : null}
 
-        <div className="flex justify-end py-4">
-          <Button type="submit" disabled={busy}>
-            <Save className="mr-2 h-4 w-4" /> Salvar Configuracoes
-          </Button>
+        <div className="sticky bottom-0 z-10 mt-4 rounded-xl border border-white/10 bg-zinc-950/90 p-3 backdrop-blur">
+          <div className="flex justify-end">
+            <Button type="submit" disabled={busy}>
+              <Save className="mr-2 h-4 w-4" /> {t.settings.save}
+            </Button>
+          </div>
         </div>
       </form>
 
@@ -924,8 +951,8 @@ export function SettingsPage() {
       </Dialog>
 
       {showUploadPolicyModal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-lg rounded-lg border border-white/10 bg-zinc-950 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
+          <div className="w-full max-w-lg rounded-xl border border-white/10 bg-zinc-950 p-4 shadow-2xl">
             <h3 className="text-sm font-semibold text-zinc-100">Upload de arquivos modificados</h3>
             <p className="mt-2 text-sm text-zinc-300">
               Como o TermOpen deve tratar arquivos modificados no workspace remoto?

@@ -93,3 +93,21 @@ Backend (Rust/Tauri):
 - PTY-backed SSH channel is required for interactive remote shell.
 - Transfer progress events follow `transfer:progress:{id}` naming.
 - Workspace close must close associated sessions; if no workspace remains, close all active sessions.
+## Portuguese Translation
+
+## Acentuação e UTF-8
+
+Para textos em português do Brasil, prefira escrita normal com acentos, por exemplo `você`, `configuração`, `ação`, `instalação`.
+
+Regra prática para agentes:
+
+- em mensagens visíveis para usuário, documentação interna e textos de UI em PT-BR, use acentuação correta quando o arquivo já suportar UTF-8
+- antes de inspecionar ou editar arquivos com PT-BR via terminal no Windows/PowerShell, prepare o shell para UTF-8
+
+Comando recomendado no PowerShell antes de leituras/edições:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+chcp 65001 > $null
+```

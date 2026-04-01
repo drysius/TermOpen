@@ -146,6 +146,7 @@ export const api = {
   syncRecoveryRestore: (password: string, serverAddress?: string | null) =>
     invoke<VaultStatus>("sync_recovery_restore", { password, serverAddress }),
   releaseCheckLatest: () => invoke<ReleaseCheckResult>("release_check_latest"),
+  deeplinkTakePending: () => invoke<string[]>("deeplink_take_pending"),
 
   openExternalEditor: (filename: string, content: string, command?: string | null) =>
     invoke<void>("open_external_editor", { filename, content, command }),

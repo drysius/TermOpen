@@ -3,6 +3,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex as StdMutex,
     time::UNIX_EPOCH,
 };
 
@@ -23,23 +24,27 @@ use vault::VaultManager;
 mod models;
 mod ssh;
 mod sync;
-mod vault;
 #[cfg(test)]
 mod tests;
+mod vault;
 
 struct AppState {
     vault: Mutex<VaultManager>,
     ssh: Mutex<SshManager>,
     sync: Mutex<SyncManager>,
+    deeplink_queue: StdMutex<Vec<String>>,
 }
 
 const DEFAULT_SFTP_CHUNK_SIZE_KB: u32 = 1024;
 const MIN_SFTP_CHUNK_SIZE_KB: u32 = 64;
 const MAX_SFTP_CHUNK_SIZE_KB: u32 = 8192;
 const DEFAULT_BINARY_PREVIEW_LIMIT_BYTES: u64 = 25 * 1024 * 1024;
-const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/MarcosBrendonDePaula/TermOpen/releases/latest";
+const RELEASES_LATEST_URL: &str =
+    "https://api.github.com/repos/MarcosBrendonDePaula/TermOpen/releases/latest";
 const DEFAULT_WORKSPACE_WIDTH: f64 = 1440.0;
 const DEFAULT_WORKSPACE_HEIGHT: f64 = 900.0;
+const LEGACY_COMPACT_WIDTH: u32 = 380;
+const LEGACY_COMPACT_HEIGHT: u32 = 600;
 
 #[derive(serde::Serialize)]
 struct TextReadChunkPayload {
@@ -51,6 +56,10 @@ struct TextReadChunkPayload {
 
 fn app_error(error: impl ToString) -> String {
     error.to_string()
+}
+
+fn is_legacy_compact_window_state(snapshot: &WindowState) -> bool {
+    snapshot.width == LEGACY_COMPACT_WIDTH && snapshot.height == LEGACY_COMPACT_HEIGHT
 }
 
 fn chunk_size_from_kb(kb: u32) -> usize {
@@ -1039,9 +1048,7 @@ async fn sync_pull(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-async fn sync_startup_preview(
-    state: State<'_, AppState>,
-) -> Result<SyncConflictPreview, String> {
+async fn sync_startup_preview(state: State<'_, AppState>) -> Result<SyncConflictPreview, String> {
     let (server_address, fallbacks) = {
         let vault = state.vault.lock().await;
         resolve_server_addresses(&vault)?
@@ -1067,15 +1074,9 @@ async fn sync_startup_resolve(
 
     let mut sync = state.sync.lock().await;
     let mut vault = state.vault.lock().await;
-    sync.resolve_startup_conflicts(
-        &app,
-        &mut vault,
-        &server_address,
-        &fallbacks,
-        decisions,
-    )
-    .await
-    .map_err(app_error)
+    sync.resolve_startup_conflicts(&app, &mut vault, &server_address, &fallbacks, decisions)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -1108,15 +1109,9 @@ async fn sync_recovery_restore(
 
     let mut sync = state.sync.lock().await;
     let mut vault = state.vault.lock().await;
-    sync.recovery_restore(
-        &app,
-        &mut vault,
-        &server_address,
-        &fallbacks,
-        password,
-    )
-    .await
-    .map_err(app_error)
+    sync.recovery_restore(&app, &mut vault, &server_address, &fallbacks, password)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -1193,6 +1188,16 @@ async fn window_state_restore(
         let _ = window.center();
         return Ok(());
     };
+
+    if is_legacy_compact_window_state(&snapshot) {
+        let _ = window.unmaximize();
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            DEFAULT_WORKSPACE_WIDTH,
+            DEFAULT_WORKSPACE_HEIGHT,
+        )));
+        let _ = window.center();
+        return Ok(());
+    }
 
     if !snapshot.maximized {
         let _ = window.unmaximize();
@@ -1384,33 +1389,98 @@ fn focus_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn sanitize_deep_link_input(input: &str) -> String {
+    input
+        .trim()
+        .trim_matches('"')
+        .replace("termopen:://", "termopen://")
+        .replace("openterm:://", "openterm://")
+}
+
+fn deep_link_scheme(payload: &str) -> Option<&str> {
+    payload.split_once("://").map(|(scheme, _)| scheme)
+}
+
+fn is_supported_deep_link(payload: &str) -> bool {
+    let Some(scheme) = deep_link_scheme(payload) else {
+        return false;
+    };
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "termopen" | "openterm" | "ssh" | "sftp"
+    )
+}
+
+fn queue_deep_link(app: &tauri::AppHandle, payload: &str) {
+    let state = app.state::<AppState>();
+    if let Ok(mut queue) = state.deeplink_queue.lock() {
+        if queue.len() >= 64 {
+            let overflow = queue.len().saturating_sub(63);
+            queue.drain(0..overflow);
+        }
+        queue.push(payload.to_string());
+    }
+
+    let _ = app.emit("app:deeplink", payload.to_string());
+}
+
 fn handle_deep_link_url(app: &tauri::AppHandle, input: &str) {
-    let payload = input.trim().trim_matches('"');
+    let payload = sanitize_deep_link_input(input);
     if payload.is_empty() {
         focus_main_window(app);
         return;
     }
 
-    match handle_auth_callback_deeplink(payload) {
+    if !is_supported_deep_link(&payload) {
+        return;
+    }
+
+    match handle_auth_callback_deeplink(payload.as_str()) {
         Ok(true) => {}
-        Ok(false) => {}
+        Ok(false) => {
+            queue_deep_link(app, payload.as_str());
+        }
         Err(error) => {
             eprintln!("Falha ao processar deep link {}: {}", payload, error);
+            queue_deep_link(app, payload.as_str());
         }
     }
 
     focus_main_window(app);
 }
 
+#[tauri::command]
+fn deeplink_take_pending(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let mut queue = state
+        .deeplink_queue
+        .lock()
+        .map_err(|_| "Falha ao acessar fila de deeplinks.".to_string())?;
+    Ok(queue.drain(..).collect())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let vault = VaultManager::new().expect("failed to initialize vault manager");
-    tauri::Builder::default()
-        .manage(AppState {
-            vault: Mutex::new(vault),
-            ssh: Mutex::new(SshManager::new()),
-            sync: Mutex::new(SyncManager::new()),
-        })
+    let mut builder = tauri::Builder::default().manage(AppState {
+        vault: Mutex::new(vault),
+        ssh: Mutex::new(SshManager::new()),
+        sync: Mutex::new(SyncManager::new()),
+        deeplink_queue: StdMutex::new(Vec::new()),
+    });
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            for argument in argv {
+                let payload = sanitize_deep_link_input(&argument);
+                if is_supported_deep_link(&payload) {
+                    handle_deep_link_url(app, payload.as_str());
+                }
+            }
+        }));
+    }
+
+    builder
         .setup(|app| {
             let app_handle = app.handle().clone();
             if let Ok(Some(urls)) = app.deep_link().get_current() {
@@ -1432,6 +1502,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            deeplink_take_pending,
             vault_status,
             vault_init,
             vault_unlock,
