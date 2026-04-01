@@ -1,6 +1,7 @@
 use core::time::Duration;
 use std::io::{Cursor, Write as _};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs as _};
+use std::sync::Once;
 
 use anyhow::{Context as _, Result};
 use ironrdp::connector;
@@ -35,8 +36,17 @@ pub struct RdpCaptureImage {
 }
 
 type UpgradedFramed = ironrdp_blocking::Framed<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
+static RUSTLS_PROVIDER_INIT: Once = Once::new();
+
+fn ensure_rustls_crypto_provider() {
+    RUSTLS_PROVIDER_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 pub fn capture_png_once(options: RdpCaptureOptions) -> Result<RdpCaptureImage> {
+    ensure_rustls_crypto_provider();
+
     let config = build_config(
         options.username.clone(),
         options.password.clone(),

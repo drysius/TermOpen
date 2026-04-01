@@ -14,8 +14,11 @@ import type {
 
 function normalizeProtocols(protocols: ConnectionProtocol[]): ConnectionProtocol[] {
   const next = Array.from(new Set(protocols));
+  if (next.includes("rdp")) {
+    return ["rdp"];
+  }
   if (next.length === 0) {
-    return ["ssh", "sftp"];
+    return ["ssh"];
   }
   return next;
 }

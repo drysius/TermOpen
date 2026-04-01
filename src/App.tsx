@@ -19,7 +19,6 @@ import { KeychainPage } from "@/pages/sections/keychain-page";
 import { KnownHostsPage } from "@/pages/sections/known-hosts-page";
 import { SettingsPage } from "@/pages/sections/settings-page";
 import { EditorTabPage } from "@/pages/tabs/editor-tab-page";
-import { RdpWorkspaceTabPage } from "@/pages/tabs/rdp-workspace-tab-page";
 import { SftpWorkspaceTabPage } from "@/pages/tabs/sftp-workspace-tab-page";
 import { VaultGatePage } from "@/pages/vault-gate-page";
 import { useAppStore } from "@/store/app-store";
@@ -852,20 +851,12 @@ function App() {
                 />
               ) : null}
               {tab.type === "workspace" ? (
-                tab.initialBlock === "rdp" ? (
-                  <RdpWorkspaceTabPage
-                    key={`rdp-workspace:${tab.id}`}
-                    tabId={tab.id}
-                    initialSourceId={tab.initialSourceId ?? tab.profileId ?? undefined}
-                  />
-                ) : (
-                  <SftpWorkspaceTabPage
-                    key={`workspace:${tab.id}`}
-                    tabId={tab.id}
-                    initialBlock={tab.initialBlock}
-                    initialSourceId={tab.initialSourceId ?? tab.sessionId ?? undefined}
-                  />
-                )
+                <SftpWorkspaceTabPage
+                  key={`workspace:${tab.id}`}
+                  tabId={tab.id}
+                  initialBlock={tab.initialBlock}
+                  initialSourceId={tab.initialSourceId ?? tab.sessionId ?? undefined}
+                />
               ) : null}
             </div>
           ))}

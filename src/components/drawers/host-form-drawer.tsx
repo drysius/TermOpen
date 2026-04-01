@@ -25,6 +25,16 @@ interface HostFormValues {
   remote_path: string;
 }
 
+const RDP_DEFAULT_PORT = 3389;
+
+function normalizeProtocolList(protocols: ConnectionProtocol[]): ConnectionProtocol[] {
+  const unique = Array.from(new Set(protocols));
+  if (unique.includes("rdp")) {
+    return ["rdp"];
+  }
+  return unique.length > 0 ? unique : ["ssh"];
+}
+
 function protocolLabel(protocol: ConnectionProtocol): string {
   if (protocol === "ssh") {
     return "SSH";
@@ -37,7 +47,7 @@ function protocolLabel(protocol: ConnectionProtocol): string {
 
 function normalizeProtocols(profile: ConnectionProfile): ConnectionProtocol[] {
   if (profile.protocols?.length) {
-    return profile.protocols;
+    return normalizeProtocolList(profile.protocols);
   }
   if (profile.kind === "host") {
     return ["ssh"];
@@ -100,6 +110,7 @@ export function HostFormDrawer() {
   const [privateKeyPath, setPrivateKeyPath] = useState("");
   const protocolMenuRef = useRef<HTMLDivElement | null>(null);
   const keychainMenuRef = useRef<HTMLDivElement | null>(null);
+  const previousHasRdpRef = useRef(false);
 
   const { register, handleSubmit, reset, watch, setValue, control } = useForm<HostFormValues>({
     defaultValues: {
@@ -107,7 +118,7 @@ export function HostFormDrawer() {
       name: initialProfile.name ?? "",
       protocols: normalizeProtocols(initialProfile),
       host: initialProfile.host ?? "",
-      port: initialProfile.port ?? 22,
+      port: initialProfile.port ?? (normalizeProtocols(initialProfile).includes("rdp") ? RDP_DEFAULT_PORT : 22),
       username: initialProfile.username ?? "",
       password: initialProfile.password ?? "",
       private_key: initialProfile.private_key ?? "",
@@ -119,6 +130,7 @@ export function HostFormDrawer() {
   const watchedHost = watch("host");
   const watchedUser = watch("username");
   const watchedProtocols = watch("protocols");
+  const watchedPort = watch("port");
   const hasSftp = watchedProtocols.includes("sftp");
 
   useEffect(() => {
@@ -141,7 +153,7 @@ export function HostFormDrawer() {
       name: initialProfile.name ?? "",
       protocols: normalizeProtocols(initialProfile),
       host: initialProfile.host ?? "",
-      port: initialProfile.port ?? 22,
+      port: initialProfile.port ?? (normalizeProtocols(initialProfile).includes("rdp") ? RDP_DEFAULT_PORT : 22),
       username: initialProfile.username ?? "",
       password: initialProfile.password ?? "",
       private_key: initialProfile.private_key ?? "",
@@ -153,19 +165,39 @@ export function HostFormDrawer() {
     setKeychainMenuOpen(false);
   }, [initialProfile, openState, reset]);
 
+  useEffect(() => {
+    const normalized = normalizeProtocolList(watchedProtocols);
+    const protocolsChanged =
+      normalized.length !== watchedProtocols.length ||
+      normalized.some((protocol, index) => watchedProtocols[index] !== protocol);
+    if (protocolsChanged) {
+      setValue("protocols", normalized, { shouldDirty: true, shouldTouch: true });
+      return;
+    }
+
+    const currentHasRdp = normalized.includes("rdp");
+    if (currentHasRdp && (!previousHasRdpRef.current || !Number.isFinite(watchedPort) || watchedPort <= 0)) {
+      setValue("port", RDP_DEFAULT_PORT, { shouldDirty: true, shouldTouch: true });
+    }
+    if (!currentHasRdp && previousHasRdpRef.current && watchedPort === RDP_DEFAULT_PORT) {
+      setValue("port", 22, { shouldDirty: true, shouldTouch: true });
+    }
+    previousHasRdpRef.current = currentHasRdp;
+  }, [setValue, watchedPort, watchedProtocols]);
+
   const onSubmit = (values: HostFormValues) => {
     const profile: ConnectionProfile = {
       ...initialProfile,
       id: values.id,
       name: values.name.trim(),
-      protocols: values.protocols.length ? values.protocols : ["ssh", "sftp"],
+      protocols: normalizeProtocolList(values.protocols),
       host: values.host.trim(),
-      port: values.port || 22,
+      port: normalizeProtocolList(values.protocols).includes("rdp") ? values.port || RDP_DEFAULT_PORT : values.port || 22,
       username: values.username.trim(),
       password: values.password.trim() ? values.password : null,
       private_key: values.private_key.trim() ? values.private_key : null,
       keychain_id: values.keychain_id || null,
-      remote_path: hasSftp ? values.remote_path.trim() || "/" : null,
+      remote_path: normalizeProtocolList(values.protocols).includes("sftp") ? values.remote_path.trim() || "/" : null,
       kind: undefined,
     };
     void saveHost(profile);
@@ -230,10 +262,16 @@ export function HostFormDrawer() {
                           type="button"
                           className="flex w-full items-start gap-2 rounded px-2 py-2 text-left hover:bg-zinc-900"
                           onClick={() => {
+                            if (protocol === "rdp") {
+                              field.onChange(active ? ["ssh"] : ["rdp"]);
+                              return;
+                            }
+
+                            const withoutRdp = field.value.filter((item) => item !== "rdp");
                             const next = active
-                              ? field.value.filter((item) => item !== protocol)
-                              : [...field.value, protocol];
-                            field.onChange(next.length ? next : field.value);
+                              ? withoutRdp.filter((item) => item !== protocol)
+                              : [...withoutRdp, protocol];
+                            field.onChange(next.length ? next : [protocol]);
                           }}
                         >
                           <span className="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded border border-white/20 text-cyan-300">

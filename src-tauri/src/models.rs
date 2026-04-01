@@ -77,6 +77,9 @@ impl ConnectionProfile {
                 ordered.push(protocol.clone());
             }
         }
+        if ordered.iter().any(|protocol| matches!(protocol, ConnectionProtocol::Rdp)) {
+            ordered = vec![ConnectionProtocol::Rdp];
+        }
         self.protocols = ordered;
 
         if self.protocols.is_empty() {
