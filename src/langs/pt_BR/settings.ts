@@ -1,0 +1,116 @@
+import type { AppDictionary } from "../types";
+
+export const settings: AppDictionary["settings"] = {
+  save: "Salvar Configuracoes",
+  sections: {
+    application: "Aplicacao",
+    sync: "Sync e Conectividade",
+    sftp: "SFTP",
+    terminal: "Terminal",
+    modifiedFiles: "Arquivos Modificados",
+    googleDrive: "Google Drive",
+    masterPassword: "Senha Mestre",
+  },
+  editor: {
+    title: "Editor padrao",
+    description: "Defina se o arquivo abre no editor interno, VS Code ou no sistema.",
+    internal: "Interno (Monaco)",
+    vscode: "VS Code",
+    system: "Sistema",
+  },
+  externalCommand: {
+    title: "Comando externo",
+    description: "Comando custom para abrir editor externo. Use {filename} no comando.",
+    placeholder: "ex: kitty -e nvim {filename}",
+  },
+  inactivityLock: {
+    title: "Bloqueio por inatividade",
+    description: "Tempo em minutos para bloquear o vault automaticamente.",
+  },
+  syncAuto: {
+    title: "Sync automatico",
+    description: "Sincroniza periodicamente quando conectado ao Google Drive.",
+  },
+  syncStartup: {
+    title: "Sync no startup",
+    description: "Executa pull automaticamente ao desbloquear o vault.",
+  },
+  syncOnSave: {
+    title: "Sync ao salvar configuracoes",
+    description: "Quando configuracoes mudarem, executa push automaticamente.",
+  },
+  syncInterval: {
+    title: "Intervalo de sync",
+    description: "Frequencia em minutos da sincronizacao automatica.",
+  },
+  sftpChunk: {
+    title: "Chunk SFTP (KB)",
+    description: "Tamanho do bloco usado em leituras/escritas e transferencias SFTP.",
+  },
+  autoReconnect: {
+    title: "Auto reconnect SSH",
+    description: "Tenta reconectar sessoes SSH desconectadas automaticamente.",
+  },
+  reconnectDelay: {
+    title: "Delay de reconnect",
+    description: "Tempo de espera em segundos antes de tentar reconectar.",
+  },
+  copyOnSelect: {
+    title: "Copy on select",
+    description: "Copia automaticamente o texto selecionado no terminal.",
+  },
+  rightClickPaste: {
+    title: "Paste no clique direito",
+    description: "Permite colar com botao direito dentro do bloco de terminal.",
+  },
+  ctrlShiftShortcuts: {
+    title: "Atalhos Ctrl+Shift",
+    description: "Ativa Ctrl+Shift+C/V para copiar e colar no terminal.",
+  },
+  knownHosts: {
+    title: "Known Hosts",
+    description: "Caminho do arquivo known_hosts usado pelo ambiente SSH.",
+    placeholder: "~/.ssh/known_hosts",
+    selectButton: "Selecionar",
+    selectDialog: "Selecionar arquivo known_hosts",
+  },
+  uploadPolicy: {
+    title: "Upload de alteracoes",
+    description: "Define como arquivos alterados no editor interno devem ser enviados.",
+    auto: "Enviar automaticamente",
+    ask: "Perguntar sempre",
+    manual: "Somente manual",
+    modalTitle: "Upload de arquivos modificados",
+    modalDescription: "Como o TermOpen deve tratar arquivos modificados no workspace remoto?",
+  },
+  drive: {
+    tabAccount: "Conta",
+    tabServer: "Servidor",
+    connected: "Conectado",
+    userLabel: "Usuario",
+    lastSync: "Ultimo sync: {date}",
+    connecting: "Conectando...",
+    reconnect: "Reconectar",
+    connect: "Conectar",
+    cancel: "Cancelar",
+    push: "Push",
+    pull: "Pull",
+    serverSearch: "Buscar servidor...",
+    serverFilterAll: "Todos",
+    serverFilterOnline: "Online",
+    serverFilterOffline: "Offline",
+    serverEmpty: "Nenhum servidor encontrado.",
+    serverCount: "{count} servidor(es)",
+    serverPrev: "Anterior",
+    serverNext: "Proximo",
+    official: "Oficial",
+    active: "Ativo",
+    offline: "offline",
+  },
+  password: {
+    currentPlaceholder: "Senha atual",
+    newPlaceholder: "Nova senha",
+    confirmPlaceholder: "Confirmar",
+    updateButton: "Atualizar Senha",
+  },
+};

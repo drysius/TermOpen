@@ -1,0 +1,57 @@
+import type { AppDictionary } from "../types";
+
+export const vault: AppDictionary["vault"] = {
+  init: {
+    passwordPlaceholder: "Senha mestre",
+    confirmPlaceholder: "Confirmar senha",
+    submit: "Inicializar",
+    mismatch: "A confirmacao da senha nao confere.",
+  },
+  unlock: {
+    passwordPlaceholder: "Senha mestre",
+    submit: "Desbloquear",
+    forgotPassword: "Esqueci a senha?",
+  },
+  forgot: {
+    title: "Esqueci a senha",
+    description: "Sem a senha mestre nao existe recuperacao possivel.",
+    warning: "Nao e possivel recuperar dados sem a senha mestre.",
+    explanation:
+      "Todos os dados do TermOpen sao criptografados localmente. Se voce perdeu a senha, a unica opcao e apagar os dados atuais e iniciar uma conta zerada.",
+    confirmLabel: "Digite 'DELETAR DADOS' para continuar",
+    confirmPlaceholder: 'Digite "DELETAR DADOS"',
+    confirmPhrase: "DELETAR DADOS",
+    confirmError: 'Digite exatamente "DELETAR DADOS" para continuar.',
+    deleting: "Deletando...",
+    deleteButton: "Deletar dados",
+    deleteSuccess: "Dados locais removidos. Voce pode iniciar do zero.",
+  },
+  recovery: {
+    loginButton: "Logar para recuperar login",
+    title: "Recuperar Login",
+    description: "Selecione o servidor e recupere seus arquivos da nuvem.",
+    serverLabel: "Servidor",
+    selectServer: "Selecione um servidor para continuar.",
+    invalidServer: "Servidor invalido.",
+    enterPassword: "Informe a senha mestre.",
+    connecting: "Conectando...",
+    loginGoogle: "Login Google",
+    validating: "Validando...",
+    restoreButton: "Restaurar",
+    downloading: "Baixando...",
+    backupFound: "Backup encontrado. Informe a senha mestre para validar e baixar os arquivos.",
+    downloadingInfo: "Baixando arquivos da nuvem...",
+    downloadingWait: "Isso pode levar alguns segundos.",
+    restoreSuccess: "Backup restaurado com sucesso.",
+    limitReached: "Limite de 5 tentativas atingido. Recuperacao cancelada.",
+    attempts: "Tentativas: {count}/5",
+  },
+  toasts: {
+    initialized: "Vault inicializado.",
+    unlocked: "Vault desbloqueado.",
+    lockedInactivity: "Aplicacao bloqueada por inatividade.",
+    syncStartup: "Sincronizando no startup...",
+    syncConflicts: "Conflitos de sincronizacao detectados no startup.",
+    conflictsResolved: "Conflitos resolvidos com sucesso.",
+  },
+};

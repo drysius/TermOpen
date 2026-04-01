@@ -1,0 +1,116 @@
+import type { AppDictionary } from "../types";
+
+export const settings: AppDictionary["settings"] = {
+  save: "Save Settings",
+  sections: {
+    application: "Application",
+    sync: "Sync & Connectivity",
+    sftp: "SFTP",
+    terminal: "Terminal",
+    modifiedFiles: "Modified Files",
+    googleDrive: "Google Drive",
+    masterPassword: "Master Password",
+  },
+  editor: {
+    title: "Default editor",
+    description: "Choose whether files open in the internal editor, VS Code or system default.",
+    internal: "Internal (Monaco)",
+    vscode: "VS Code",
+    system: "System",
+  },
+  externalCommand: {
+    title: "External command",
+    description: "Custom command to open external editor. Use {filename} in the command.",
+    placeholder: "e.g.: kitty -e nvim {filename}",
+  },
+  inactivityLock: {
+    title: "Inactivity lock",
+    description: "Time in minutes to automatically lock the vault.",
+  },
+  syncAuto: {
+    title: "Auto sync",
+    description: "Sync periodically when connected to Google Drive.",
+  },
+  syncStartup: {
+    title: "Sync on startup",
+    description: "Automatically pull when unlocking the vault.",
+  },
+  syncOnSave: {
+    title: "Sync on settings save",
+    description: "When settings change, automatically push.",
+  },
+  syncInterval: {
+    title: "Sync interval",
+    description: "Frequency in minutes for automatic sync.",
+  },
+  sftpChunk: {
+    title: "SFTP Chunk (KB)",
+    description: "Block size used for SFTP read/write and transfers.",
+  },
+  autoReconnect: {
+    title: "Auto reconnect SSH",
+    description: "Try to reconnect disconnected SSH sessions automatically.",
+  },
+  reconnectDelay: {
+    title: "Reconnect delay",
+    description: "Wait time in seconds before trying to reconnect.",
+  },
+  copyOnSelect: {
+    title: "Copy on select",
+    description: "Automatically copy selected text in the terminal.",
+  },
+  rightClickPaste: {
+    title: "Right-click paste",
+    description: "Allow pasting with right-click inside the terminal block.",
+  },
+  ctrlShiftShortcuts: {
+    title: "Ctrl+Shift shortcuts",
+    description: "Enable Ctrl+Shift+C/V to copy and paste in the terminal.",
+  },
+  knownHosts: {
+    title: "Known Hosts",
+    description: "Path to the known_hosts file used by the SSH environment.",
+    placeholder: "~/.ssh/known_hosts",
+    selectButton: "Select",
+    selectDialog: "Select known_hosts file",
+  },
+  uploadPolicy: {
+    title: "Upload changes",
+    description: "Define how modified files in the internal editor should be sent.",
+    auto: "Send automatically",
+    ask: "Always ask",
+    manual: "Manual only",
+    modalTitle: "Modified file upload",
+    modalDescription: "How should TermOpen handle modified files in the remote workspace?",
+  },
+  drive: {
+    tabAccount: "Account",
+    tabServer: "Server",
+    connected: "Connected",
+    userLabel: "User",
+    lastSync: "Last sync: {date}",
+    connecting: "Connecting...",
+    reconnect: "Reconnect",
+    connect: "Connect",
+    cancel: "Cancel",
+    push: "Push",
+    pull: "Pull",
+    serverSearch: "Search server...",
+    serverFilterAll: "All",
+    serverFilterOnline: "Online",
+    serverFilterOffline: "Offline",
+    serverEmpty: "No servers found.",
+    serverCount: "{count} server(s)",
+    serverPrev: "Previous",
+    serverNext: "Next",
+    official: "Official",
+    active: "Active",
+    offline: "offline",
+  },
+  password: {
+    currentPlaceholder: "Current password",
+    newPlaceholder: "New password",
+    confirmPlaceholder: "Confirm",
+    updateButton: "Update Password",
+  },
+};
