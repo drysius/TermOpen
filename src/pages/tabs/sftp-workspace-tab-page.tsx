@@ -16,7 +16,6 @@ import {
   MonitorUp,
   Plus,
   RefreshCw,
-  Rows3,
   TerminalSquare,
   X,
 } from "lucide-react";
@@ -38,7 +37,7 @@ import { useAppStore } from "@/store/app-store";
 import type { SftpEntry } from "@/types/termopen";
 
 type WorkspaceKind = "terminal" | "sftp" | "editor" | "logs";
-type WorkspaceMode = "free" | "grid";
+type WorkspaceMode = "free";
 type SortKey = "name" | "size" | "permissions" | "modified_at";
 type SortDirection = "asc" | "desc";
 
@@ -333,20 +332,54 @@ function sortSftpEntries(entries: SftpEntry[], sortKey: SortKey, sortDirection: 
   return sorted;
 }
 
-function computeGridLayout(index: number, total: number, width: number, height: number): WorkspaceBlockLayout {
-  const cols = Math.ceil(Math.sqrt(total));
-  const rows = Math.ceil(total / cols);
-  const col = index % cols;
-  const row = Math.floor(index / cols);
+function snapLayoutToWorkspace(layout: WorkspaceBlockLayout, workspace: { width: number; height: number }): WorkspaceBlockLayout {
   const gap = 8;
-  const cellWidth = Math.floor((width - gap * (cols + 1)) / cols);
-  const cellHeight = Math.floor((height - gap * (rows + 1)) / rows);
-  return {
-    x: gap + col * (cellWidth + gap),
-    y: gap + row * (cellHeight + gap),
-    width: Math.max(320, cellWidth),
-    height: Math.max(220, cellHeight),
-  };
+  const threshold = 32;
+  const maxX = Math.max(gap, workspace.width - layout.width - gap);
+  const maxY = Math.max(gap, workspace.height - layout.height - gap);
+  const x = Math.max(gap, Math.min(layout.x, maxX));
+  const y = Math.max(gap, Math.min(layout.y, maxY));
+  const nearLeft = x <= threshold;
+  const nearTop = y <= threshold;
+  const nearRight = x + layout.width >= workspace.width - threshold;
+  const nearBottom = y + layout.height >= workspace.height - threshold;
+
+  const halfWidth = Math.max(320, Math.floor((workspace.width - gap * 3) / 2));
+  const halfHeight = Math.max(220, Math.floor((workspace.height - gap * 3) / 2));
+  const fullWidth = Math.max(320, workspace.width - gap * 2);
+  const fullHeight = Math.max(220, workspace.height - gap * 2);
+
+  if (nearLeft && nearTop) {
+    return { x: gap, y: gap, width: halfWidth, height: halfHeight };
+  }
+  if (nearRight && nearTop) {
+    return { x: workspace.width - gap - halfWidth, y: gap, width: halfWidth, height: halfHeight };
+  }
+  if (nearLeft && nearBottom) {
+    return { x: gap, y: workspace.height - gap - halfHeight, width: halfWidth, height: halfHeight };
+  }
+  if (nearRight && nearBottom) {
+    return {
+      x: workspace.width - gap - halfWidth,
+      y: workspace.height - gap - halfHeight,
+      width: halfWidth,
+      height: halfHeight,
+    };
+  }
+  if (nearLeft) {
+    return { x: gap, y: gap, width: halfWidth, height: fullHeight };
+  }
+  if (nearRight) {
+    return { x: workspace.width - gap - halfWidth, y: gap, width: halfWidth, height: fullHeight };
+  }
+  if (nearTop) {
+    return { x: gap, y: gap, width: fullWidth, height: halfHeight };
+  }
+  if (nearBottom) {
+    return { x: gap, y: workspace.height - gap - halfHeight, width: fullWidth, height: halfHeight };
+  }
+
+  return { ...layout, x, y };
 }
 
 function workspaceDefaultLayout(
@@ -459,9 +492,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const cached = workspaceCache.get(tabId);
   const initializedRef = useRef(Boolean(cached && cached.blocks.length > 0));
 
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(
-    cached?.workspaceMode ?? "free",
-  );
+  const [workspaceMode] = useState<WorkspaceMode>("free");
   const [workspaceSize, setWorkspaceSize] = useState({ width: 1200, height: 740 });
   const [blocks, setBlocks] = useState<WorkspaceBlock[]>(cached?.blocks ?? []);
   const [workspaceLogs, setWorkspaceLogs] = useState<WorkspaceLogEntry[]>(cached?.logs ?? []);
@@ -751,9 +782,25 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
 
   const onLayoutChange = useCallback((id: string, nextLayout: WorkspaceBlockLayout) => {
     setBlocks((current) =>
-      current.map((block) => (block.id === id ? { ...block, layout: nextLayout } : block)),
+      current.map((block) => {
+        if (block.id !== id) {
+          return block;
+        }
+        // Drag updates keep width/height; use this to apply edge/corner snap assist.
+        const dragged =
+          Math.round(block.layout.width) === Math.round(nextLayout.width) &&
+          Math.round(block.layout.height) === Math.round(nextLayout.height);
+        const snapped = dragged
+          ? snapLayoutToWorkspace(nextLayout, workspaceSize)
+          : {
+              ...nextLayout,
+              x: Math.max(8, Math.min(nextLayout.x, Math.max(8, workspaceSize.width - nextLayout.width - 8))),
+              y: Math.max(8, Math.min(nextLayout.y, Math.max(8, workspaceSize.height - nextLayout.height - 8))),
+            };
+        return { ...block, layout: snapped };
+      }),
     );
-  }, []);
+  }, [workspaceSize]);
 
   const refreshSftpBlock = useCallback(
     async (blockId: string, pathOverride?: string, sourceOverride?: string) => {
@@ -2403,25 +2450,17 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     return map;
   }, [transfers]);
 
-  const renderedBlocks = useMemo(() => {
-    if (workspaceMode === "free") {
-      return blocks.map((block) => ({
+  const renderedBlocks = useMemo(
+    () =>
+      blocks.map((block) => ({
         block,
         layout: block.maximized
           ? { x: 0, y: 0, width: workspaceSize.width, height: workspaceSize.height }
           : block.layout,
         interactive: !block.maximized,
-      }));
-    }
-
-    return blocks.map((block, index) => ({
-      block,
-      layout: block.maximized
-        ? { x: 0, y: 0, width: workspaceSize.width, height: workspaceSize.height }
-        : computeGridLayout(index, blocks.length, workspaceSize.width, workspaceSize.height),
-      interactive: false,
-    }));
-  }, [blocks, workspaceMode, workspaceSize.height, workspaceSize.width]);
+      })),
+    [blocks, workspaceSize.height, workspaceSize.width],
+  );
 
   const activeTransfers = transfers.filter((item) => item.status === "running").length;
 
@@ -2440,30 +2479,9 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           <Plus className="h-4 w-4" />
         </button>
 
-        <button
-          type="button"
-          className={cn(
-            "flex h-7 items-center gap-1 rounded border px-2 text-xs transition",
-            workspaceMode === "free"
-              ? "border-purple-400/60 bg-purple-600/20 text-purple-200"
-              : "border-white/10 text-zinc-300 hover:border-white/20 hover:bg-zinc-900",
-          )}
-          onClick={() => setWorkspaceMode("free")}
-        >
+        <div className="flex h-7 items-center gap-1 rounded border border-purple-400/60 bg-purple-600/20 px-2 text-xs text-purple-200">
           <Columns2 className="h-3.5 w-3.5" /> Livre
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "flex h-7 items-center gap-1 rounded border px-2 text-xs transition",
-            workspaceMode === "grid"
-              ? "border-purple-400/60 bg-purple-600/20 text-purple-200"
-              : "border-white/10 text-zinc-300 hover:border-white/20 hover:bg-zinc-900",
-          )}
-          onClick={() => setWorkspaceMode("grid")}
-        >
-          <Rows3 className="h-3.5 w-3.5" /> Grid
-        </button>
+        </div>
         <button
           type="button"
           className="flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-zinc-900"
