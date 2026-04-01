@@ -37,6 +37,32 @@ export function WorkspaceBlockController({
   onLayoutChange,
   children,
 }: WorkspaceBlockControllerProps) {
+  const enabledResizeHandles = interactive
+    ? {
+        top: true,
+        right: true,
+        bottom: true,
+        left: true,
+        topRight: true,
+        bottomRight: true,
+        bottomLeft: true,
+        topLeft: true,
+      }
+    : false;
+
+  const resizeHandleStyles = interactive
+    ? {
+        top: { height: 8, top: -4, cursor: "ns-resize" },
+        right: { width: 8, right: -4, cursor: "ew-resize" },
+        bottom: { height: 8, bottom: -4, cursor: "ns-resize" },
+        left: { width: 8, left: -4, cursor: "ew-resize" },
+        topRight: { width: 12, height: 12, top: -6, right: -6, cursor: "nesw-resize" },
+        bottomRight: { width: 12, height: 12, bottom: -6, right: -6, cursor: "nwse-resize" },
+        bottomLeft: { width: 12, height: 12, bottom: -6, left: -6, cursor: "nesw-resize" },
+        topLeft: { width: 12, height: 12, top: -6, left: -6, cursor: "nwse-resize" },
+      }
+    : undefined;
+
   return (
     <Rnd
       bounds="parent"
@@ -45,7 +71,8 @@ export function WorkspaceBlockController({
       size={{ width: layout.width, height: layout.height }}
       position={{ x: layout.x, y: layout.y }}
       disableDragging={!interactive}
-      enableResizing={interactive}
+      enableResizing={enabledResizeHandles}
+      resizeHandleStyles={resizeHandleStyles}
       onDragStop={(_, data) =>
         onLayoutChange(id, {
           ...layout,
