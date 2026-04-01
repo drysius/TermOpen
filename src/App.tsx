@@ -19,7 +19,7 @@ import { KeychainPage } from "@/pages/sections/keychain-page";
 import { KnownHostsPage } from "@/pages/sections/known-hosts-page";
 import { SettingsPage } from "@/pages/sections/settings-page";
 import { EditorTabPage } from "@/pages/tabs/editor-tab-page";
-import { SftpWorkspaceTabPage } from "@/pages/tabs/sftp-workspace-tab-page";
+import { WorkspaceTabPage } from "@/pages/tabs/workspace-tab-page";
 import { VaultGatePage } from "@/pages/vault-gate-page";
 import { useAppStore } from "@/store/app-store";
 import type {
@@ -851,7 +851,7 @@ function App() {
                 />
               ) : null}
               {tab.type === "workspace" ? (
-                <SftpWorkspaceTabPage
+                <WorkspaceTabPage
                   key={`workspace:${tab.id}`}
                   tabId={tab.id}
                   initialBlock={tab.initialBlock}
