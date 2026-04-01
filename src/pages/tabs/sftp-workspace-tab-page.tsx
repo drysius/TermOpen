@@ -310,6 +310,39 @@ function parentDirectory(path: string): string {
   return normalized.slice(0, idx);
 }
 
+function parentPathBySource(sourceId: string, path: string): string | null {
+  if (sourceId === "local") {
+    const originalHasBackslash = path.includes("\\");
+    const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!normalized) {
+      return null;
+    }
+    if (/^[A-Za-z]:$/.test(normalized) || normalized === "/") {
+      return null;
+    }
+    const idx = normalized.lastIndexOf("/");
+    if (idx < 0) {
+      return null;
+    }
+    const parentRaw = normalized.slice(0, idx);
+    let parent = parentRaw;
+    if (/^[A-Za-z]:$/.test(parentRaw)) {
+      parent = `${parentRaw}/`;
+    }
+    if (!parent) {
+      return null;
+    }
+    return originalHasBackslash ? parent.replace(/\//g, "\\") : parent;
+  }
+
+  const normalized = normalizeRemotePath(path);
+  if (normalized === "/") {
+    return null;
+  }
+  const parent = parentDirectory(normalized);
+  return parent || "/";
+}
+
 function shellQuote(path: string): string {
   return `"${path.replace(/(["\\$])/g, "\\$1")}"`;
 }
@@ -3333,6 +3366,25 @@ function SftpBlockView({
     () => sortSftpEntries(block.entries, block.sortKey, block.sortDirection),
     [block.entries, block.sortDirection, block.sortKey],
   );
+  const parentEntry = useMemo(() => {
+    const parentPath = parentPathBySource(block.sourceId, block.path);
+    if (!parentPath) {
+      return null;
+    }
+    const entry: SftpEntry = {
+      name: "..",
+      path: parentPath,
+      is_dir: true,
+      size: 0,
+      permissions: null,
+      modified_at: null,
+    };
+    return entry;
+  }, [block.path, block.sourceId]);
+  const displayEntries = useMemo(
+    () => (parentEntry ? [parentEntry, ...sortedEntries] : sortedEntries),
+    [parentEntry, sortedEntries],
+  );
   const pathListId = useMemo(() => `path-history-${block.id}`, [block.id]);
   const showPermissions = containerWidth >= 860;
   const showSize = containerWidth >= 640;
@@ -3718,7 +3770,7 @@ function SftpBlockView({
             </tr>
           </thead>
           <tbody>
-            {sortedEntries.map((entry) => {
+            {displayEntries.map((entry) => {
               const selected = block.selectedPath === entry.path;
               return (
                 <tr
@@ -3731,8 +3783,19 @@ function SftpBlockView({
                   draggable
                   onClick={() => onSelectEntry(entry.path)}
                   onDoubleClick={() => onOpenEntry(entry)}
-                  onContextMenu={(event) => openContextMenu(event, entry)}
-                  onDragStart={(event) => handleEntryDragStart(event, entry)}
+                  onContextMenu={(event) => {
+                    if (entry.name === "..") {
+                      return;
+                    }
+                    openContextMenu(event, entry);
+                  }}
+                  onDragStart={(event) => {
+                    if (entry.name === "..") {
+                      event.preventDefault();
+                      return;
+                    }
+                    handleEntryDragStart(event, entry);
+                  }}
                   onDragOver={(event) => {
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "copy";
@@ -3754,7 +3817,9 @@ function SftpBlockView({
                       data-entry-drag="true"
                       className="inline-flex items-center gap-2"
                     >
-                      {entry.is_dir ? (
+                      {entry.name === ".." ? (
+                        <Folder className="h-3.5 w-3.5 text-cyan-300" />
+                      ) : entry.is_dir ? (
                         <Folder className="h-3.5 w-3.5 text-purple-300" />
                       ) : (
                         <FileText className="h-3.5 w-3.5 text-zinc-400" />
@@ -3774,7 +3839,7 @@ function SftpBlockView({
                 </tr>
               );
             })}
-            {sortedEntries.length === 0 ? (
+            {displayEntries.length === 0 ? (
               <tr>
                 <td
                   className="px-2 py-6 text-center text-zinc-500"
