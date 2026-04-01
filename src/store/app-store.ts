@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
 
 import { BLANK_KEYCHAIN_ENTRY, BLANK_PROFILE, DEFAULT_PANE, DEFAULT_SETTINGS, INITIAL_SYNC_STATE } from "@/constants";
 import { createConnectionActions } from "@/functions/connection-actions";
@@ -18,6 +19,8 @@ const initialState: Omit<
   | "appendSessionBuffer"
   | "setWorkspaceSessions"
   | "setWorkspaceBlockCount"
+  | "setWorkspaceSnapshot"
+  | "clearWorkspaceSnapshot"
   | "bootstrap"
   | "loadWorkspace"
   | "vaultInit"
@@ -74,22 +77,38 @@ const initialState: Omit<
   sessionBuffers: {},
   workspaceSessionsByTab: {},
   workspaceBlockCountByTab: {},
+  workspaceSnapshotsByTab: {},
   commandInput: "whoami",
   busy: false,
   startupConflicts: [],
   startupSyncBusy: false,
 };
 
-export const useAppStore = create<AppStore>((set, get) => {
-  const setPartial = (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => {
-    set(partial as never);
-  };
+export const useAppStore = create<AppStore>()(
+  persist(
+    (set, get) => {
+      const setPartial = (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => {
+        set(partial as never);
+      };
 
-  return {
-    ...initialState,
-    ...createConnectionActions(setPartial, get),
-    ...createSessionActions(setPartial, get),
-    ...createSftpEditorActions(setPartial, get),
-    ...createVaultActions(setPartial, get),
-  };
-});
+      return {
+        ...initialState,
+        ...createConnectionActions(setPartial, get),
+        ...createSessionActions(setPartial, get),
+        ...createSftpEditorActions(setPartial, get),
+        ...createVaultActions(setPartial, get),
+      };
+    },
+    {
+      name: "termopen.app.session",
+      storage: createJSONStorage(() => sessionStorage),
+      partialize: (state) => ({
+        tabs: state.tabs,
+        activeTabId: state.activeTabId,
+        workspaceSessionsByTab: state.workspaceSessionsByTab,
+        workspaceBlockCountByTab: state.workspaceBlockCountByTab,
+        workspaceSnapshotsByTab: state.workspaceSnapshotsByTab,
+      }),
+    },
+  ),
+);

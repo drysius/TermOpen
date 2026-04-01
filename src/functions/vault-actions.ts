@@ -152,6 +152,7 @@ export function createVaultActions(
           sessionBuffers: {},
           workspaceSessionsByTab: {},
           workspaceBlockCountByTab: {},
+          workspaceSnapshotsByTab: {},
           knownHosts: [],
           leftPane: DEFAULT_PANE,
           rightPane: { ...DEFAULT_PANE, path: "/" },

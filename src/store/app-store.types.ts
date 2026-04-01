@@ -12,7 +12,7 @@ import type {
   SyncState,
   VaultStatus,
 } from "@/types/termopen";
-import type { WorkTab } from "@/types/workspace";
+import type { WorkTab, WorkspaceSnapshot } from "@/types/workspace";
 
 export type PaneSide = "left" | "right";
 export type SyncAction = "login" | "push" | "pull";
@@ -38,6 +38,7 @@ export interface AppState {
   sessionBuffers: Record<string, string>;
   workspaceSessionsByTab: Record<string, string[]>;
   workspaceBlockCountByTab: Record<string, number>;
+  workspaceSnapshotsByTab: Record<string, WorkspaceSnapshot>;
   commandInput: string;
   busy: boolean;
   startupConflicts: SyncConflictItem[];
@@ -54,6 +55,8 @@ export interface AppActions {
   appendSessionBuffer: (sessionId: string, chunk: string) => void;
   setWorkspaceSessions: (tabId: string, sessionIds: string[]) => void;
   setWorkspaceBlockCount: (tabId: string, count: number) => void;
+  setWorkspaceSnapshot: (tabId: string, snapshot: WorkspaceSnapshot) => void;
+  clearWorkspaceSnapshot: (tabId: string) => void;
 
   bootstrap: () => Promise<void>;
   loadWorkspace: () => Promise<void>;

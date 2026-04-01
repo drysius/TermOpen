@@ -188,10 +188,6 @@ interface SftpContextMenuState {
   pointerY: number;
 }
 
-const workspaceCache = new Map<
-  string,
-  { blocks: WorkspaceBlock[]; workspaceMode: WorkspaceMode; logs: WorkspaceLogEntry[] }
->();
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 const DRAG_ENTRY_MIME = "application/x-termopen-entry";
 const MAX_CONNECT_RETRY_ATTEMPTS = 3;
@@ -541,16 +537,24 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const disconnectSession = useAppStore((state) => state.disconnectSession);
   const setWorkspaceSessions = useAppStore((state) => state.setWorkspaceSessions);
   const setWorkspaceBlockCount = useAppStore((state) => state.setWorkspaceBlockCount);
+  const setWorkspaceSnapshot = useAppStore((state) => state.setWorkspaceSnapshot);
+  const workspaceSnapshot = useAppStore((state) => state.workspaceSnapshotsByTab[tabId]);
 
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const blocksRef = useRef<WorkspaceBlock[]>([]);
-  const cached = workspaceCache.get(tabId);
-  const initializedRef = useRef(Boolean(cached && cached.blocks.length > 0));
+  const initialBlocks =
+    workspaceSnapshot?.workspaceMode === "free" && Array.isArray(workspaceSnapshot.blocks)
+      ? (workspaceSnapshot.blocks as WorkspaceBlock[])
+      : [];
+  const initialLogs = Array.isArray(workspaceSnapshot?.logs)
+    ? (workspaceSnapshot.logs as WorkspaceLogEntry[])
+    : [];
+  const initializedRef = useRef(initialBlocks.length > 0);
 
   const [workspaceMode] = useState<WorkspaceMode>("free");
   const [workspaceSize, setWorkspaceSize] = useState({ width: 1200, height: 740 });
-  const [blocks, setBlocks] = useState<WorkspaceBlock[]>(cached?.blocks ?? []);
-  const [workspaceLogs, setWorkspaceLogs] = useState<WorkspaceLogEntry[]>(cached?.logs ?? []);
+  const [blocks, setBlocks] = useState<WorkspaceBlock[]>(initialBlocks);
+  const [workspaceLogs, setWorkspaceLogs] = useState<WorkspaceLogEntry[]>(initialLogs);
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [createBlockModalOpen, setCreateBlockModalOpen] = useState(false);
   const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "editor" | "logs">("terminal");
@@ -647,8 +651,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   }, [blocks]);
 
   useEffect(() => {
-    workspaceCache.set(tabId, { blocks, workspaceMode, logs: workspaceLogs });
-  }, [blocks, tabId, workspaceLogs, workspaceMode]);
+    setWorkspaceSnapshot(tabId, { blocks, workspaceMode, logs: workspaceLogs });
+  }, [blocks, setWorkspaceSnapshot, tabId, workspaceLogs, workspaceMode]);
 
   useEffect(() => {
     const sessionIds = Array.from(

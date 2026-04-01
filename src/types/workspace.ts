@@ -14,6 +14,12 @@ export interface WorkTab {
   initialSourceId?: string;
 }
 
+export interface WorkspaceSnapshot {
+  blocks: unknown[];
+  logs: unknown[];
+  workspaceMode: "free";
+}
+
 export type PaneSource =
   | {
       kind: "local";

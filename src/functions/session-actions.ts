@@ -141,8 +141,10 @@ export function createSessionActions(
         const nextEditors = { ...nextState.editorTabs };
         const nextWorkspaceSessions = { ...nextState.workspaceSessionsByTab };
         const nextWorkspaceBlocks = { ...nextState.workspaceBlockCountByTab };
+        const nextWorkspaceSnapshots = { ...nextState.workspaceSnapshotsByTab };
         delete nextWorkspaceSessions[tabId];
         delete nextWorkspaceBlocks[tabId];
+        delete nextWorkspaceSnapshots[tabId];
         if (closing.type === "editor") {
           delete nextEditors[tabId];
         }
@@ -152,6 +154,7 @@ export function createSessionActions(
           editorTabs: nextEditors,
           workspaceSessionsByTab: nextWorkspaceSessions,
           workspaceBlockCountByTab: nextWorkspaceBlocks,
+          workspaceSnapshotsByTab: nextWorkspaceSnapshots,
         };
       });
     },

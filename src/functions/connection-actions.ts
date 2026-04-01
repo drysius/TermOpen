@@ -45,6 +45,8 @@ export function createConnectionActions(
   | "setEditorContent"
   | "setWorkspaceSessions"
   | "setWorkspaceBlockCount"
+  | "setWorkspaceSnapshot"
+  | "clearWorkspaceSnapshot"
   | "setActiveTab"
   | "setCommandInput"
   | "setBusy"
@@ -103,6 +105,21 @@ export function createConnectionActions(
           [tabId]: Math.max(0, count),
         },
       })),
+
+    setWorkspaceSnapshot: (tabId, snapshot) =>
+      set((state) => ({
+        workspaceSnapshotsByTab: {
+          ...state.workspaceSnapshotsByTab,
+          [tabId]: snapshot,
+        },
+      })),
+
+    clearWorkspaceSnapshot: (tabId) =>
+      set((state) => {
+        const next = { ...state.workspaceSnapshotsByTab };
+        delete next[tabId];
+        return { workspaceSnapshotsByTab: next };
+      }),
 
     openHostDrawer: (profile, protocol: ConnectionProtocol = "ssh") => {
       const draft: ConnectionProfile = profile
