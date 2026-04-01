@@ -200,6 +200,17 @@ export interface AppDictionary {
       title: string;
       description: string;
     };
+    sftpReconnectDelay: {
+      title: string;
+      description: string;
+    };
+    localServer: {
+      editTitle: string;
+      newTitle: string;
+      modalDescription: string;
+      saveChanges: string;
+      addServer: string;
+    };
     autoReconnect: {
       title: string;
       description: string;

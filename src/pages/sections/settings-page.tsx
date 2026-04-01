@@ -368,8 +368,8 @@ export function SettingsPage() {
         <section className="space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
           <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.application}</h3>
           <SettingsRow
-            title="Editor padrao"
-            description="Defina se o arquivo abre no editor interno, VS Code ou no sistema."
+            title={t.settings.editor.title}
+            description={t.settings.editor.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -385,13 +385,13 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Comando externo"
-            description="Comando custom para abrir editor externo. Use {filename} no comando."
-            control={<Input placeholder="ex: kitty -e nvim {filename}" {...settingsForm.register("external_editor_command")} />}
+            title={t.settings.externalCommand.title}
+            description={t.settings.externalCommand.description}
+            control={<Input placeholder={t.settings.externalCommand.placeholder} {...settingsForm.register("external_editor_command")} />}
           />
           <SettingsRow
-            title="Bloqueio por inatividade"
-            description="Tempo em minutos para bloquear o vault automaticamente."
+            title={t.settings.inactivityLock.title}
+            description={t.settings.inactivityLock.description}
             control={<Input type="number" min={1} {...settingsForm.register("inactivity_lock_minutes", { valueAsNumber: true })} />}
           />
         </section>
@@ -401,8 +401,8 @@ export function SettingsPage() {
         <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
           <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.sync}</h3>
           <SettingsRow
-            title="Sync automatico"
-            description="Sincroniza periodicamente quando conectado ao Google Drive."
+            title={t.settings.syncAuto.title}
+            description={t.settings.syncAuto.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -412,8 +412,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Sync no startup"
-            description="Executa pull automaticamente ao desbloquear o vault."
+            title={t.settings.syncStartup.title}
+            description={t.settings.syncStartup.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -423,8 +423,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Sync ao salvar configuracoes"
-            description="Quando configuracoes mudarem, executa push automaticamente."
+            title={t.settings.syncOnSave.title}
+            description={t.settings.syncOnSave.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -434,8 +434,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Intervalo de sync"
-            description="Frequencia em minutos da sincronizacao automatica."
+            title={t.settings.syncInterval.title}
+            description={t.settings.syncInterval.description}
             control={<Input type="number" min={1} {...settingsForm.register("sync_interval_minutes", { valueAsNumber: true })} />}
           />
         </section>
@@ -445,8 +445,8 @@ export function SettingsPage() {
         <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
           <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.sftp}</h3>
           <SettingsRow
-            title="Chunk SFTP (KB)"
-            description="Tamanho do bloco usado em leituras/escritas e transferencias SFTP."
+            title={t.settings.sftpChunk.title}
+            description={t.settings.sftpChunk.description}
             control={
               <Input
                 type="number"
@@ -457,8 +457,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Delay de reconnect SFTP"
-            description="Tempo em segundos para tentar novamente em timeout de conexao/listagem inicial."
+            title={t.settings.sftpReconnectDelay.title}
+            description={t.settings.sftpReconnectDelay.description}
             control={
               <Input
                 type="number"
@@ -474,8 +474,8 @@ export function SettingsPage() {
         <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
           <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.terminal}</h3>
           <SettingsRow
-            title="Auto reconnect SSH"
-            description="Tenta reconectar sessoes SSH desconectadas automaticamente."
+            title={t.settings.autoReconnect.title}
+            description={t.settings.autoReconnect.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -485,13 +485,13 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Delay de reconnect"
-            description="Tempo de espera em segundos antes de tentar reconectar."
+            title={t.settings.reconnectDelay.title}
+            description={t.settings.reconnectDelay.description}
             control={<Input type="number" min={1} {...settingsForm.register("reconnect_delay_seconds", { valueAsNumber: true })} />}
           />
           <SettingsRow
-            title="Copy on select"
-            description="Copia automaticamente o texto selecionado no terminal."
+            title={t.settings.copyOnSelect.title}
+            description={t.settings.copyOnSelect.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -501,8 +501,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Paste no clique direito"
-            description="Permite colar com botao direito dentro do bloco de terminal."
+            title={t.settings.rightClickPaste.title}
+            description={t.settings.rightClickPaste.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -512,8 +512,8 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Atalhos Ctrl+Shift"
-            description="Ativa Ctrl+Shift+C/V para copiar e colar no terminal."
+            title={t.settings.ctrlShiftShortcuts.title}
+            description={t.settings.ctrlShiftShortcuts.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -523,17 +523,17 @@ export function SettingsPage() {
             }
           />
           <SettingsRow
-            title="Known Hosts"
-            description="Caminho do arquivo known_hosts usado pelo ambiente SSH."
+            title={t.settings.knownHosts.title}
+            description={t.settings.knownHosts.description}
             control={
               <div className="flex items-center gap-2">
-                <Input className="flex-1" placeholder="~/.ssh/known_hosts" {...settingsForm.register("known_hosts_path")} />
+                <Input className="flex-1" placeholder={t.settings.knownHosts.placeholder} {...settingsForm.register("known_hosts_path")} />
                 <Button
                   type="button"
                   variant="outline"
                   onClick={() =>
                     void open({
-                      title: "Selecionar arquivo known_hosts",
+                      title: t.settings.knownHosts.selectDialog,
                       multiple: false,
                       directory: false,
                     }).then((value) => {
@@ -543,7 +543,7 @@ export function SettingsPage() {
                     })
                   }
                 >
-                  Selecionar
+                  {t.settings.knownHosts.selectButton}
                 </Button>
               </div>
             }
@@ -555,8 +555,8 @@ export function SettingsPage() {
         <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
           <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.modifiedFiles}</h3>
           <SettingsRow
-            title="Upload de alteracoes"
-            description="Define como arquivos alterados no editor interno devem ser enviados."
+            title={t.settings.uploadPolicy.title}
+            description={t.settings.uploadPolicy.description}
             control={
               <Controller
                 control={settingsForm.control}
@@ -896,8 +896,8 @@ export function SettingsPage() {
 
       <Dialog
         open={showLocalServerModal}
-        title={serverDraft.id ? "Editar Local Server" : "Novo Local Server"}
-        description="Configure label, endereco e autor para o servidor local."
+        title={serverDraft.id ? t.settings.localServer.editTitle : t.settings.localServer.newTitle}
+        description={t.settings.localServer.modalDescription}
         onClose={() => {
           setShowLocalServerModal(false);
           setServerDraft({ id: "", label: "", address: "", author: "" });
@@ -919,7 +919,7 @@ export function SettingsPage() {
               onClick={() => void handleSaveServer()}
               disabled={!serverDraft.label.trim() || !serverDraft.address.trim()}
             >
-              {serverDraft.id ? "Salvar alteracoes" : "Adicionar servidor"}
+              {serverDraft.id ? t.settings.localServer.saveChanges : t.settings.localServer.addServer}
             </Button>
           </div>
         }

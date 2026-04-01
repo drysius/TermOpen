@@ -47,6 +47,17 @@ export const settings: AppDictionary["settings"] = {
     title: "Chunk SFTP (KB)",
     description: "Tamanho do bloco usado em leituras/escritas e transferencias SFTP.",
   },
+  sftpReconnectDelay: {
+    title: "Delay de reconnect SFTP",
+    description: "Tempo em segundos para tentar novamente em timeout de conexao/listagem inicial.",
+  },
+  localServer: {
+    editTitle: "Editar Local Server",
+    newTitle: "Novo Local Server",
+    modalDescription: "Configure label, endereco e autor para o servidor local.",
+    saveChanges: "Salvar alteracoes",
+    addServer: "Adicionar servidor",
+  },
   autoReconnect: {
     title: "Auto reconnect SSH",
     description: "Tenta reconectar sessoes SSH desconectadas automaticamente.",
