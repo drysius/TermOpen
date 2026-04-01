@@ -1,6 +1,6 @@
 export type KeyMode = "password" | "keychain";
-export type ConnectionKind = "host" | "sftp" | "both";
-export type ConnectionProtocol = "ssh" | "sftp";
+export type ConnectionKind = "host" | "sftp" | "rdp" | "both";
+export type ConnectionProtocol = "ssh" | "sftp" | "rdp";
 export type KeychainEntryType = "password" | "ssh_key" | "secret";
 export type EditorPreference = "internal" | "vscode" | "system";
 export type ModifiedUploadPolicy = "auto" | "ask" | "manual";
@@ -71,6 +71,48 @@ export interface SshSessionInfo {
   connected_at: number;
   session_kind: "ssh" | "local";
 }
+
+export type RdpMouseButton = "left" | "right" | "middle";
+
+export type RdpInputAction =
+  | {
+      kind: "mouse_move";
+      x: number;
+      y: number;
+    }
+  | {
+      kind: "mouse_click";
+      x: number;
+      y: number;
+      button: RdpMouseButton;
+      double_click?: boolean;
+    }
+  | {
+      kind: "key_press";
+      code: string;
+      text?: string | null;
+      ctrl?: boolean;
+      alt?: boolean;
+      shift?: boolean;
+      meta?: boolean;
+    };
+
+export type RdpCaptureResult =
+  | {
+      status: "ready";
+      image_base64: string;
+      width: number;
+      height: number;
+      captured_at: number;
+    }
+  | {
+      status: "auth_required";
+      message: string;
+    }
+  | {
+      status: "error";
+      message: string;
+    };
 
 export interface SftpEntry {
   name: string;

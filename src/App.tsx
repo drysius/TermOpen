@@ -3,12 +3,14 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { Toaster, toast } from "sonner";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
 import { HostFormDrawer } from "@/components/drawers/host-form-drawer";
 import { KeychainFormDrawer } from "@/components/drawers/keychain-form-drawer";
 import { AppHeader } from "@/components/layout/app-header";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
+import { getError } from "@/functions/common";
 import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { AboutPage } from "@/pages/sections/about-page";
@@ -20,7 +22,15 @@ import { EditorTabPage } from "@/pages/tabs/editor-tab-page";
 import { SftpWorkspaceTabPage } from "@/pages/tabs/sftp-workspace-tab-page";
 import { VaultGatePage } from "@/pages/vault-gate-page";
 import { useAppStore } from "@/store/app-store";
-import type { SyncConflictDecision, SyncKeepSide, SyncLoggedUser, SyncProgressState, SyncState } from "@/types/termopen";
+import type {
+  AuthServer,
+  ConnectionProfile,
+  SyncConflictDecision,
+  SyncKeepSide,
+  SyncLoggedUser,
+  SyncProgressState,
+  SyncState,
+} from "@/types/termopen";
 import type { SidebarSection } from "@/types/workspace";
 
 function sectionFromPath(pathname: string): SidebarSection {
@@ -57,12 +67,129 @@ function pathFromSection(section: SidebarSection): string {
 
 function formatSettingValue(value: unknown): string {
   if (value === null || value === undefined || value === "") {
-    return "—";
+    return "-";
   }
   if (typeof value === "boolean") {
     return value ? "true" : "false";
   }
   return String(value);
+}
+
+type DeepLinkProtocol = "ssh" | "sftp" | "rdp";
+
+interface ParsedConnectionDeepLink {
+  protocol: DeepLinkProtocol;
+  host: string;
+  port: number;
+  username: string;
+  remotePath: string;
+}
+
+type PingMap = Record<string, number | null>;
+
+function normalizeDeepLinkInput(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^"+|"+$/g, "")
+    .replace("termopen:://", "termopen://")
+    .replace("openterm:://", "openterm://");
+}
+
+function parseDirectConnectionUrl(url: URL): ParsedConnectionDeepLink | null {
+  const protocol = url.protocol.replace(":", "").toLowerCase();
+  if (protocol !== "ssh" && protocol !== "sftp" && protocol !== "rdp") {
+    return null;
+  }
+
+  const host = url.hostname.trim();
+  if (!host) {
+    return null;
+  }
+
+  const parsedPort = url.port ? Number(url.port) : protocol === "rdp" ? 3389 : 22;
+  if (!Number.isFinite(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    return null;
+  }
+
+  const username = decodeURIComponent(url.username || "").trim();
+  const pathname = decodeURIComponent(url.pathname || "/").trim();
+  const remotePath = protocol === "sftp" ? (pathname.length ? pathname : "/") : "/";
+
+  return {
+    protocol,
+    host,
+    port: parsedPort,
+    username,
+    remotePath,
+  };
+}
+
+function parseConnectionDeepLink(raw: string): ParsedConnectionDeepLink | null {
+  const normalized = normalizeDeepLinkInput(raw);
+  if (!normalized.includes("://")) {
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    return null;
+  }
+
+  const direct = parseDirectConnectionUrl(parsed);
+  if (direct) {
+    return direct;
+  }
+
+  const protocol = parsed.protocol.replace(":", "").toLowerCase();
+  if (protocol !== "termopen" && protocol !== "openterm") {
+    return null;
+  }
+
+  const embedded =
+    parsed.searchParams.get("url") ??
+    parsed.searchParams.get("target") ??
+    parsed.searchParams.get("uri") ??
+    parsed.searchParams.get("link");
+  if (embedded) {
+    return parseConnectionDeepLink(decodeURIComponent(embedded));
+  }
+
+  const hostBasedProtocol = parsed.hostname.toLowerCase();
+  if (hostBasedProtocol === "ssh" || hostBasedProtocol === "sftp" || hostBasedProtocol === "rdp") {
+    const rebuilt = `${hostBasedProtocol}://${parsed.pathname.replace(/^\/+/, "")}${parsed.search}`;
+    return parseConnectionDeepLink(rebuilt);
+  }
+
+  return null;
+}
+
+function pickRecommendedAuthServer(servers: AuthServer[], pings: PingMap): string | null {
+  if (servers.length === 0) {
+    return null;
+  }
+
+  const onlineOfficials = servers
+    .filter((server) => server.official && typeof pings[server.id] === "number")
+    .sort((left, right) => (pings[left.id] ?? Number.POSITIVE_INFINITY) - (pings[right.id] ?? Number.POSITIVE_INFINITY));
+  if (onlineOfficials.length > 0) {
+    return onlineOfficials[0].id;
+  }
+
+  const officials = servers.filter((server) => server.official);
+  if (officials.length > 0) {
+    return officials[0].id;
+  }
+
+  const online = servers
+    .filter((server) => typeof pings[server.id] === "number")
+    .sort((left, right) => (pings[left.id] ?? Number.POSITIVE_INFINITY) - (pings[right.id] ?? Number.POSITIVE_INFINITY));
+  if (online.length > 0) {
+    return online[0].id;
+  }
+
+  return servers[0].id;
 }
 
 function App() {
@@ -80,6 +207,10 @@ function App() {
   const startupConflicts = useAppStore((state) => state.startupConflicts);
   const startupSyncBusy = useAppStore((state) => state.startupSyncBusy);
   const settingsUnsavedDraft = useAppStore((state) => state.settingsUnsavedDraft);
+  const openSsh = useAppStore((state) => state.openSsh);
+  const openSftpWorkspace = useAppStore((state) => state.openSftpWorkspace);
+  const openRdp = useAppStore((state) => state.openRdp);
+  const openHostDrawer = useAppStore((state) => state.openHostDrawer);
 
   const bootstrap = useAppStore((state) => state.bootstrap);
   const resolveStartupConflicts = useAppStore((state) => state.resolveStartupConflicts);
@@ -96,6 +227,7 @@ function App() {
   const setSettingsUnsavedDraft = useAppStore((state) => state.setSettingsUnsavedDraft);
 
   const lastActivityRef = useRef<number>(Date.now());
+  const deepLinkProcessingRef = useRef(false);
   const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
   const [closingWorkspace, setClosingWorkspace] = useState(false);
   const [booting, setBooting] = useState(true);
@@ -107,6 +239,13 @@ function App() {
   const [headerSyncBusy, setHeaderSyncBusy] = useState(false);
   const [pendingSettingsNavigation, setPendingSettingsNavigation] = useState<SidebarSection | null>(null);
   const [leavingSettingsBusy, setLeavingSettingsBusy] = useState(false);
+  const [pendingDeepLinks, setPendingDeepLinks] = useState<string[]>([]);
+  const [loginServerModalOpen, setLoginServerModalOpen] = useState(false);
+  const [loginServerLoading, setLoginServerLoading] = useState(false);
+  const [loginServerBusy, setLoginServerBusy] = useState(false);
+  const [loginServers, setLoginServers] = useState<AuthServer[]>([]);
+  const [loginServerPings, setLoginServerPings] = useState<PingMap>({});
+  const [selectedLoginServerId, setSelectedLoginServerId] = useState<string | null>(null);
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId]);
   const pendingCloseTab = useMemo(
     () => tabs.find((tab) => tab.id === pendingCloseTabId) ?? null,
@@ -124,6 +263,27 @@ function App() {
         to: formatSettingValue(settingsUnsavedDraft[key]),
       }));
   }, [settings, settingsUnsavedDraft]);
+  const recommendedLoginServerId = useMemo(
+    () => pickRecommendedAuthServer(loginServers, loginServerPings),
+    [loginServerPings, loginServers],
+  );
+  const loginServersSorted = useMemo(
+    () =>
+      [...loginServers].sort((left, right) => {
+        const leftPing = loginServerPings[left.id];
+        const rightPing = loginServerPings[right.id];
+        const leftRank = typeof leftPing === "number" ? 0 : leftPing === null ? 2 : 1;
+        const rightRank = typeof rightPing === "number" ? 0 : rightPing === null ? 2 : 1;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        if (leftRank === 0 && rightRank === 0) {
+          return (leftPing ?? Number.POSITIVE_INFINITY) - (rightPing ?? Number.POSITIVE_INFINITY);
+        }
+        return left.label.localeCompare(right.label);
+      }),
+    [loginServerPings, loginServers],
+  );
   const currentSection = activeTabId ? "home" : sectionFromPath(location.pathname);
   const shellClass = isWindowMaximized
     ? "flex h-full w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100"
@@ -144,7 +304,89 @@ function App() {
     setLoggedUser(user);
   }
 
+  async function loadLoginServers() {
+    setLoginServerLoading(true);
+    setLoginServerPings({});
+    try {
+      const servers = await api.authServersFetchRemote().catch(() => api.authServersList());
+      setLoginServers(servers);
+      if (servers.length === 0) {
+        setSelectedLoginServerId(null);
+        return;
+      }
+
+      const pingEntries = await Promise.all(
+        servers.map(async (server) => {
+          const startedAt = performance.now();
+          try {
+            const response = await tauriFetch(server.address, { method: "GET" });
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            return [server.id, Math.round(performance.now() - startedAt)] as const;
+          } catch {
+            return [server.id, null] as const;
+          }
+        }),
+      );
+      const nextPings: PingMap = {};
+      pingEntries.forEach(([id, value]) => {
+        nextPings[id] = value;
+      });
+      setLoginServerPings(nextPings);
+      setSelectedLoginServerId((current) => {
+        if (current && servers.some((server) => server.id === current)) {
+          return current;
+        }
+        return pickRecommendedAuthServer(servers, nextPings);
+      });
+    } catch (error) {
+      setLoginServers([]);
+      setSelectedLoginServerId(null);
+      toast.error(getError(error));
+    } finally {
+      setLoginServerLoading(false);
+    }
+  }
+
+  async function openLoginServerModal() {
+    if (syncState.status === "running" || headerSyncBusy) {
+      return;
+    }
+    setLoginServerModalOpen(true);
+    await loadLoginServers();
+  }
+
+  async function handleLoginWithSelectedServer() {
+    if (loginServerBusy || headerSyncBusy) {
+      return;
+    }
+    const selected =
+      loginServers.find((server) => server.id === selectedLoginServerId) ??
+      loginServers.find((server) => server.id === recommendedLoginServerId) ??
+      loginServers[0];
+    if (!selected) {
+      return;
+    }
+
+    setLoginServerBusy(true);
+    setHeaderSyncBusy(true);
+    try {
+      await runSync("login", selected.address);
+      await refreshLoggedUser();
+      setLoginServerModalOpen(false);
+    } finally {
+      setHeaderSyncBusy(false);
+      setLoginServerBusy(false);
+    }
+  }
+
   async function handleHeaderSync(action: "login" | "push") {
+    if (action === "login") {
+      await openLoginServerModal();
+      return;
+    }
+
     if (syncState.status === "running" || headerSyncBusy) {
       return;
     }
@@ -155,6 +397,96 @@ function App() {
     } finally {
       setHeaderSyncBusy(false);
     }
+  }
+
+  function enqueueDeepLink(rawUrl: string) {
+    const normalized = normalizeDeepLinkInput(rawUrl);
+    if (!normalized) {
+      return;
+    }
+    setPendingDeepLinks((current) => (current.includes(normalized) ? current : [...current, normalized]));
+  }
+
+  async function openConnectionFromDeepLink(rawUrl: string): Promise<boolean> {
+    const parsed = parseConnectionDeepLink(rawUrl);
+    if (!parsed) {
+      return false;
+    }
+
+    const protocolList =
+      parsed.protocol === "ssh"
+        ? (["ssh"] as const)
+        : parsed.protocol === "sftp"
+          ? (["sftp"] as const)
+          : (["rdp"] as const);
+    const fallbackName = `${parsed.protocol.toUpperCase()} ${parsed.host}`;
+
+    if (!parsed.username) {
+      openHostDrawer(
+        {
+          id: "",
+          name: fallbackName,
+          host: parsed.host,
+          port: parsed.port,
+          username: "",
+          password: "",
+          private_key: "",
+          keychain_id: null,
+          remote_path: parsed.remotePath,
+          protocols: [...protocolList],
+          kind: parsed.protocol === "ssh" ? "host" : parsed.protocol === "sftp" ? "sftp" : "rdp",
+        },
+        parsed.protocol,
+      );
+      return true;
+    }
+
+    const stateConnections = useAppStore.getState().connections;
+    const existing = stateConnections.find((item) => {
+      const hasProtocol = item.protocols.includes(parsed.protocol);
+      if (!hasProtocol) {
+        return false;
+      }
+      return (
+        item.host === parsed.host &&
+        item.port === parsed.port &&
+        item.username === parsed.username
+      );
+    });
+
+    let profile: ConnectionProfile;
+    if (existing) {
+      profile = existing;
+    } else {
+      const created = await api.connectionSave({
+        id: "",
+        name: fallbackName,
+        host: parsed.host,
+        port: parsed.port,
+        username: parsed.username,
+        password: "",
+        private_key: "",
+        keychain_id: null,
+        remote_path: parsed.remotePath,
+        protocols: [...protocolList],
+        kind: parsed.protocol === "ssh" ? "host" : parsed.protocol === "sftp" ? "sftp" : "rdp",
+      });
+      profile = created;
+      useAppStore.setState((current) => ({
+        connections: [...current.connections.filter((item) => item.id !== created.id), created].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
+      }));
+    }
+
+    if (parsed.protocol === "ssh") {
+      await openSsh(profile);
+    } else if (parsed.protocol === "sftp") {
+      await openSftpWorkspace(profile);
+    } else {
+      await openRdp(profile);
+    }
+    return true;
   }
 
   useEffect(() => {
@@ -309,6 +641,45 @@ function App() {
       stopSyncProgress?.();
     };
   }, []);
+
+  useEffect(() => {
+    let stopDeepLinkListener: (() => void) | null = null;
+
+    void api
+      .deeplinkTakePending()
+      .then((urls) => {
+        urls.forEach((url) => enqueueDeepLink(url));
+      })
+      .catch(() => undefined);
+
+    void listen<string>("app:deeplink", (event) => {
+      enqueueDeepLink(event.payload);
+    }).then((unlisten) => {
+      stopDeepLinkListener = unlisten;
+    });
+
+    return () => {
+      stopDeepLinkListener?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
+      return;
+    }
+    if (pendingDeepLinks.length === 0 || deepLinkProcessingRef.current) {
+      return;
+    }
+
+    const nextUrl = pendingDeepLinks[0];
+    deepLinkProcessingRef.current = true;
+    void openConnectionFromDeepLink(nextUrl)
+      .catch(() => undefined)
+      .finally(() => {
+        setPendingDeepLinks((current) => current.slice(1));
+        deepLinkProcessingRef.current = false;
+      });
+  }, [openHostDrawer, openRdp, openSftpWorkspace, openSsh, pendingDeepLinks, vaultStatus]);
 
   async function handleResolveStartupConflicts() {
     const decisions: SyncConflictDecision[] = startupConflicts.map((item) => ({
@@ -508,6 +879,90 @@ function App() {
 
       <HostFormDrawer />
       <KeychainFormDrawer />
+      <Dialog
+        open={loginServerModalOpen}
+        title={t.app.header.loginServerTitle}
+        description={t.app.header.loginServerDescription}
+        onClose={() => {
+          if (loginServerBusy) {
+            return;
+          }
+          setLoginServerModalOpen(false);
+        }}
+        footer={
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-white/20 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
+              onClick={() => void loadLoginServers()}
+              disabled={loginServerBusy || loginServerLoading}
+            >
+              {t.app.header.loginServerRefresh}
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-white/20 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
+                onClick={() => setLoginServerModalOpen(false)}
+                disabled={loginServerBusy}
+              >
+                {t.common.cancel}
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-cyan-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
+                onClick={() => void handleLoginWithSelectedServer()}
+                disabled={loginServerBusy || loginServerLoading || !selectedLoginServerId}
+              >
+                {loginServerBusy ? t.app.header.syncing : t.app.header.loginServerAction}
+              </button>
+            </div>
+          </div>
+        }
+      >
+        {loginServerLoading ? (
+          <p className="text-sm text-zinc-300">{t.app.header.loginServerLoading}</p>
+        ) : loginServersSorted.length === 0 ? (
+          <p className="text-sm text-zinc-400">{t.app.header.loginServerEmpty}</p>
+        ) : (
+          <div className="space-y-2">
+            {loginServersSorted.map((server) => {
+              const ping = loginServerPings[server.id];
+              const selected = selectedLoginServerId === server.id;
+              const recommended = recommendedLoginServerId === server.id;
+              return (
+                <button
+                  key={server.id}
+                  type="button"
+                  className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                    selected
+                      ? "border-cyan-400/70 bg-cyan-500/15 text-cyan-100"
+                      : "border-white/10 bg-zinc-900/50 text-zinc-200 hover:border-cyan-400/50"
+                  }`}
+                  onClick={() => setSelectedLoginServerId(server.id)}
+                >
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm font-medium">{server.label}</p>
+                    {recommended ? (
+                      <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">
+                        {t.app.header.loginServerRecommended}
+                      </span>
+                    ) : null}
+                    <span className="ml-auto text-xs font-mono text-zinc-400">
+                      {typeof ping === "number"
+                        ? `${ping}ms`
+                        : ping === null
+                          ? t.app.header.loginServerOffline
+                          : t.app.header.loginServerUnknownMs}
+                    </span>
+                  </div>
+                  <p className="mt-1 truncate text-xs text-zinc-500">{server.address}</p>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </Dialog>
       <Dialog
         open={startupConflicts.length > 0}
         title="Conflitos de Sincronizacao"

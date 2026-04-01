@@ -14,8 +14,11 @@ import type {
 
 function normalizeProtocols(protocols: ConnectionProtocol[]): ConnectionProtocol[] {
   const next = Array.from(new Set(protocols));
+  if (next.includes("rdp")) {
+    return ["rdp"];
+  }
   if (next.length === 0) {
-    return ["ssh", "sftp"];
+    return ["ssh"];
   }
   return next;
 }
@@ -135,7 +138,8 @@ export function createConnectionActions(
           }
         : {
             ...BLANK_PROFILE,
-            protocols: protocol === "ssh" ? ["ssh"] : ["sftp"],
+            protocols: protocol === "ssh" ? ["ssh"] : protocol === "sftp" ? ["sftp"] : ["rdp"],
+            port: protocol === "rdp" ? 3389 : BLANK_PROFILE.port,
             remote_path: protocol === "sftp" ? "/" : BLANK_PROFILE.remote_path,
           };
       set({
@@ -259,14 +263,14 @@ export function createConnectionActions(
       }
     },
 
-    runSync: async (action) => {
+    runSync: async (action, serverAddress) => {
       try {
         set((state) => ({
           syncState: { ...state.syncState, status: "running", message: "Sincronizando..." },
         }));
         const nextState =
           action === "login"
-            ? await api.syncGoogleLogin()
+            ? await api.syncGoogleLogin(serverAddress ?? null)
             : action === "push"
               ? await api.syncPush()
               : await api.syncPull();

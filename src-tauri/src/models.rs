@@ -18,6 +18,7 @@ fn default_connection_kind() -> Option<ConnectionKind> {
 pub enum ConnectionKind {
     Host,
     Sftp,
+    Rdp,
     Both,
 }
 
@@ -32,6 +33,7 @@ impl Default for ConnectionKind {
 pub enum ConnectionProtocol {
     Ssh,
     Sftp,
+    Rdp,
 }
 
 impl Default for ConnectionProtocol {
@@ -64,6 +66,7 @@ impl ConnectionProfile {
             self.protocols = match self.kind.clone().unwrap_or(ConnectionKind::Both) {
                 ConnectionKind::Host => vec![ConnectionProtocol::Ssh],
                 ConnectionKind::Sftp => vec![ConnectionProtocol::Sftp],
+                ConnectionKind::Rdp => vec![ConnectionProtocol::Rdp],
                 ConnectionKind::Both => vec![ConnectionProtocol::Ssh, ConnectionProtocol::Sftp],
             };
         }
@@ -73,6 +76,9 @@ impl ConnectionProfile {
             if !ordered.contains(protocol) {
                 ordered.push(protocol.clone());
             }
+        }
+        if ordered.iter().any(|protocol| matches!(protocol, ConnectionProtocol::Rdp)) {
+            ordered = vec![ConnectionProtocol::Rdp];
         }
         self.protocols = ordered;
 
@@ -413,6 +419,23 @@ pub struct SyncState {
     pub last_sync_at: Option<String>,
     pub pending_user_code: Option<String>,
     pub verification_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RdpCaptureResult {
+    Ready {
+        image_base64: String,
+        width: u16,
+        height: u16,
+        captured_at: i64,
+    },
+    AuthRequired {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

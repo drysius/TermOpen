@@ -43,13 +43,16 @@ export function normalizeRemotePath(path: string): string {
 }
 
 export function supportsProtocol(profile: ConnectionProfile, protocol: ConnectionProtocol): boolean {
-  const protocols = profile.protocols?.length
+  const rawProtocols = profile.protocols?.length
     ? profile.protocols
     : profile.kind === "host"
       ? ["ssh"]
       : profile.kind === "sftp"
         ? ["sftp"]
+        : profile.kind === "rdp"
+          ? ["rdp"]
         : ["ssh", "sftp"];
+  const protocols = rawProtocols.includes("rdp") ? (["rdp"] as ConnectionProtocol[]) : rawProtocols;
   return protocols.includes(protocol);
 }
 

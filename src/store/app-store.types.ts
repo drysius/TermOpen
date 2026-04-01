@@ -79,7 +79,7 @@ export interface AppActions {
 
   saveSettings: (next: AppSettings) => Promise<void>;
   changeMasterPassword: (oldPassword: string, newPassword: string, confirmPassword: string) => Promise<void>;
-  runSync: (action: SyncAction) => Promise<void>;
+  runSync: (action: SyncAction, serverAddress?: string | null) => Promise<void>;
   syncCancel: () => Promise<void>;
   refreshKnownHosts: (path?: string | null) => Promise<void>;
   removeKnownHost: (lineRaw: string, path?: string | null) => Promise<void>;
@@ -92,6 +92,7 @@ export interface AppActions {
   clearSessionListeners: (sessionId?: string) => void;
   getOrCreateSession: (profile: ConnectionProfile) => Promise<SshSessionInfo>;
   openSsh: (profile: ConnectionProfile) => Promise<void>;
+  openRdp: (profile: ConnectionProfile) => Promise<void>;
   sshWrite: (sessionId: string, data: string) => Promise<void>;
   disconnectSession: (sessionId: string) => Promise<void>;
 

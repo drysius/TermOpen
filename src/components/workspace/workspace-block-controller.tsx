@@ -14,11 +14,15 @@ interface WorkspaceBlockControllerProps {
   subtitle?: string;
   layout: WorkspaceBlockLayout;
   zIndex?: number;
+  active?: boolean;
   interactive?: boolean;
   minWidth?: number;
   minHeight?: number;
   headerRight?: ReactNode;
   onFocus?: (id: string) => void;
+  onDragStart?: (id: string) => void;
+  onDragPreview?: (id: string, nextLayout: WorkspaceBlockLayout) => void;
+  onDragEnd?: (id: string) => void;
   onLayoutChange: (id: string, nextLayout: WorkspaceBlockLayout) => void;
   children: ReactNode;
 }
@@ -29,11 +33,15 @@ export function WorkspaceBlockController({
   subtitle,
   layout,
   zIndex = 1,
+  active = false,
   interactive = true,
   minWidth = 320,
   minHeight = 220,
   headerRight,
   onFocus,
+  onDragStart,
+  onDragPreview,
+  onDragEnd,
   onLayoutChange,
   children,
 }: WorkspaceBlockControllerProps) {
@@ -73,12 +81,26 @@ export function WorkspaceBlockController({
       disableDragging={!interactive}
       enableResizing={enabledResizeHandles}
       resizeHandleStyles={resizeHandleStyles}
-      onDragStop={(_, data) =>
-        onLayoutChange(id, {
+      onDragStart={() => {
+        onFocus?.(id);
+        onDragStart?.(id);
+      }}
+      onDrag={(_, data) =>
+        onDragPreview?.(id, {
           ...layout,
           x: data.x,
           y: data.y,
         })
+      }
+      onDragStop={(_, data) =>
+        {
+          onLayoutChange(id, {
+            ...layout,
+            x: data.x,
+            y: data.y,
+          });
+          onDragEnd?.(id);
+        }
       }
       onResizeStop={(_, __, ref, ___, position) =>
         onLayoutChange(id, {
@@ -89,7 +111,11 @@ export function WorkspaceBlockController({
         })
       }
       dragHandleClassName="workspace-block-handle"
-      className="overflow-hidden rounded-md border border-white/10 bg-zinc-950 shadow-2xl"
+      className={
+        active
+          ? "overflow-hidden rounded-md border border-cyan-400/45 bg-zinc-950 shadow-[0_0_18px_rgba(34,211,238,0.22)]"
+          : "overflow-hidden rounded-md border border-white/10 bg-zinc-950 shadow-2xl"
+      }
       style={{ zIndex }}
       onMouseDown={() => onFocus?.(id)}
     >

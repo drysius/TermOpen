@@ -10,7 +10,7 @@ export interface WorkTab {
   sessionId?: string;
   profileId?: string;
   path?: string;
-  initialBlock?: "terminal" | "sftp";
+  initialBlock?: "terminal" | "sftp" | "rdp";
   initialSourceId?: string;
 }
 

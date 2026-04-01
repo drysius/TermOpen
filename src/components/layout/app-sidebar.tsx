@@ -41,7 +41,7 @@ export function AppSidebar({ current, onSelect }: AppSidebarProps) {
           <button
             className={`mb-2 flex h-10 w-10 items-center justify-center rounded-md border transition ${
               current === id
-                ? "border-purple-400/60 bg-purple-600/20 text-purple-200"
+                ? "border-cyan-400/60 bg-cyan-500/20 text-cyan-200"
                 : "border-transparent text-zinc-300 hover:border-white/15 hover:bg-zinc-900"
             }`}
             onClick={() => onSelect(id)}

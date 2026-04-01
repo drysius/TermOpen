@@ -38,7 +38,18 @@ rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 ssh2 = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ironrdp = { version = "0.14.0", features = ["connector", "session", "graphics", "core"] }
+ironrdp-blocking = "0.8.0"
+ironrdp-graphics = "0.7.0"
+ironrdp-pdu = "0.7.0"
+sspi = { version = "0.18.7", features = ["network_client"] }
 tempfile = "3"
 tokio = { version = "1", features = ["time", "net", "io-util", "macros"] }
+tokio-rustls = "0.26.4"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

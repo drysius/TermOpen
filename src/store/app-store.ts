@@ -49,6 +49,7 @@ const initialState: Omit<
   | "clearSessionListeners"
   | "getOrCreateSession"
   | "openSsh"
+  | "openRdp"
   | "sshWrite"
   | "disconnectSession"
   | "refreshPane"

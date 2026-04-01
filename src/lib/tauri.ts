@@ -9,6 +9,8 @@ import type {
   KeychainEntry,
   RecoveryProbeResult,
   ReleaseCheckResult,
+  RdpCaptureResult,
+  RdpInputAction,
   SftpEntry,
   SyncLoggedUser,
   SyncConflictDecision,
@@ -61,6 +63,26 @@ export const api = {
       passwordOverride: options?.passwordOverride,
       keychainIdOverride: options?.keychainIdOverride,
       saveAuthChoice: options?.saveAuthChoice,
+    }),
+  rdpCapture: (
+    profileId: string,
+    options?: {
+      width?: number;
+      height?: number;
+      passwordOverride?: string | null;
+      keychainIdOverride?: string | null;
+      saveAuthChoice?: boolean;
+      inputActions?: RdpInputAction[];
+    },
+  ) =>
+    invoke<RdpCaptureResult>("rdp_capture", {
+      profileId,
+      width: options?.width,
+      height: options?.height,
+      passwordOverride: options?.passwordOverride,
+      keychainIdOverride: options?.keychainIdOverride,
+      saveAuthChoice: options?.saveAuthChoice,
+      inputActions: options?.inputActions,
     }),
   sshWrite: (sessionId: string, data: string) => invoke<string>("ssh_write", { sessionId, data }),
   sshResize: (sessionId: string, cols: number, rows: number) => invoke<void>("ssh_resize", { sessionId, cols, rows }),
@@ -146,6 +168,7 @@ export const api = {
   syncRecoveryRestore: (password: string, serverAddress?: string | null) =>
     invoke<VaultStatus>("sync_recovery_restore", { password, serverAddress }),
   releaseCheckLatest: () => invoke<ReleaseCheckResult>("release_check_latest"),
+  deeplinkTakePending: () => invoke<string[]>("deeplink_take_pending"),
 
   openExternalEditor: (filename: string, content: string, command?: string | null) =>
     invoke<void>("open_external_editor", { filename, content, command }),
