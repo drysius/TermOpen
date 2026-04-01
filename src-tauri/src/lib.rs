@@ -14,7 +14,11 @@ use models::{
     SshSessionInfo, SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState,
     VaultStatus, WindowState,
 };
-use rdp::{capture_png_once, RdpCaptureOptions, RdpInputAction};
+use protocol_stream::{StreamControlInput, StreamControlState, StreamViewport};
+use rdp::{
+    capture_png_once, RdpCaptureOptions, RdpInputAction, RdpStreamEvent, RdpStreamManager,
+    RdpStreamStartResult,
+};
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
 use tauri::{Emitter, Manager, State};
@@ -24,6 +28,7 @@ use tokio::sync::Mutex;
 use vault::VaultManager;
 
 mod models;
+mod protocol_stream;
 mod rdp;
 mod ssh;
 mod sync;
@@ -34,6 +39,7 @@ mod vault;
 struct AppState {
     vault: Mutex<VaultManager>,
     ssh: Mutex<SshManager>,
+    rdp_streams: Mutex<RdpStreamManager>,
     sync: Mutex<SyncManager>,
     deeplink_queue: StdMutex<Vec<String>>,
 }
@@ -105,6 +111,105 @@ fn looks_like_rdp_auth_error(message: &str) -> bool {
         || lower.contains("access denied")
         || lower.contains("password")
         || lower.contains("account restriction")
+}
+
+struct ResolvedRdpProfile {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    domain: Option<String>,
+}
+
+async fn resolve_rdp_profile(
+    state: &State<'_, AppState>,
+    profile_id: String,
+    password_override: Option<String>,
+    keychain_id_override: Option<String>,
+    save_auth_choice: Option<bool>,
+) -> Result<ResolvedRdpProfile, RdpStreamStartResult> {
+    let profile = {
+        let mut vault = state.vault.lock().await;
+        let mut profile = match vault.profile_by_id(&profile_id) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(RdpStreamStartResult::Error {
+                    message: app_error(error),
+                });
+            }
+        };
+
+        let selected_keychain = normalize_optional_input(keychain_id_override.clone())
+            .or_else(|| profile.keychain_id.clone());
+
+        if let Some(keychain_id) = selected_keychain.clone() {
+            let key = match vault.keychain_by_id(&keychain_id) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(RdpStreamStartResult::Error {
+                        message: app_error(error),
+                    });
+                }
+            };
+            if profile.password.is_none() {
+                profile.password = key.password.or(key.passphrase);
+            }
+            profile.keychain_id = Some(keychain_id);
+        }
+
+        if let Some(password) = normalize_optional_input(password_override.clone()) {
+            profile.password = Some(password.clone());
+            if save_auth_choice.unwrap_or(false) {
+                let mut profile_to_save = profile.clone();
+                profile_to_save.password = Some(password);
+                let _ = vault.connection_save(profile_to_save);
+            }
+        }
+
+        if save_auth_choice.unwrap_or(false)
+            && keychain_id_override
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            let mut profile_to_save = profile.clone();
+            profile_to_save.keychain_id = normalize_optional_input(keychain_id_override.clone());
+            let _ = vault.connection_save(profile_to_save);
+        }
+
+        profile
+    };
+
+    let host = profile.host.trim().to_string();
+    if host.is_empty() {
+        return Err(RdpStreamStartResult::Error {
+            message: "Host RDP invalido.".to_string(),
+        });
+    }
+
+    let (domain_from_user, username) = split_domain_username(profile.username.as_str());
+    if username.trim().is_empty() {
+        return Err(RdpStreamStartResult::AuthRequired {
+            message: "Usuario RDP nao informado.".to_string(),
+        });
+    }
+
+    let Some(password) = normalize_optional_input(profile.password.clone()) else {
+        return Err(RdpStreamStartResult::AuthRequired {
+            message: "Senha RDP necessaria para conectar.".to_string(),
+        });
+    };
+
+    Ok(ResolvedRdpProfile {
+        host,
+        port: if profile.port == 0 {
+            DEFAULT_RDP_PORT
+        } else {
+            profile.port
+        },
+        username,
+        password,
+        domain: domain_from_user,
+    })
 }
 
 fn is_legacy_compact_window_state(snapshot: &WindowState) -> bool {
@@ -364,61 +469,27 @@ async fn rdp_capture(
     save_auth_choice: Option<bool>,
     input_actions: Option<Vec<RdpInputAction>>,
 ) -> Result<RdpCaptureResult, String> {
-    let profile = {
-        let mut vault = state.vault.lock().await;
-        let mut profile = vault.profile_by_id(&profile_id).map_err(app_error)?;
-
-        let selected_keychain = normalize_optional_input(keychain_id_override.clone())
-            .or_else(|| profile.keychain_id.clone());
-
-        if let Some(keychain_id) = selected_keychain.clone() {
-            let key = vault.keychain_by_id(&keychain_id).map_err(app_error)?;
-            if profile.password.is_none() {
-                profile.password = key.password.or(key.passphrase);
-            }
-            profile.keychain_id = Some(keychain_id);
+    let resolved = match resolve_rdp_profile(
+        &state,
+        profile_id,
+        password_override,
+        keychain_id_override,
+        save_auth_choice,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(RdpStreamStartResult::AuthRequired { message }) => {
+            return Ok(RdpCaptureResult::AuthRequired { message });
         }
-
-        if let Some(password) = normalize_optional_input(password_override.clone()) {
-            profile.password = Some(password.clone());
-            if save_auth_choice.unwrap_or(false) {
-                let mut profile_to_save = profile.clone();
-                profile_to_save.password = Some(password);
-                let _ = vault.connection_save(profile_to_save);
-            }
+        Err(RdpStreamStartResult::Error { message }) => {
+            return Ok(RdpCaptureResult::Error { message });
         }
-
-        if save_auth_choice.unwrap_or(false)
-            && keychain_id_override
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
-        {
-            let mut profile_to_save = profile.clone();
-            profile_to_save.keychain_id = normalize_optional_input(keychain_id_override.clone());
-            let _ = vault.connection_save(profile_to_save);
+        Err(RdpStreamStartResult::Started { .. }) => {
+            return Ok(RdpCaptureResult::Error {
+                message: "Estado de stream RDP invalido.".to_string(),
+            });
         }
-
-        profile
-    };
-
-    let host = profile.host.trim().to_string();
-    if host.is_empty() {
-        return Ok(RdpCaptureResult::Error {
-            message: "Host RDP invalido.".to_string(),
-        });
-    }
-
-    let (domain_from_user, username) = split_domain_username(profile.username.as_str());
-    if username.trim().is_empty() {
-        return Ok(RdpCaptureResult::AuthRequired {
-            message: "Usuario RDP nao informado.".to_string(),
-        });
-    }
-
-    let Some(password) = normalize_optional_input(profile.password.clone()) else {
-        return Ok(RdpCaptureResult::AuthRequired {
-            message: "Senha RDP necessaria para conectar.".to_string(),
-        });
     };
 
     let target_width = width
@@ -433,15 +504,11 @@ async fn rdp_capture(
         .is_some_and(|actions| !actions.is_empty());
 
     let options = RdpCaptureOptions {
-        host,
-        port: if profile.port == 0 {
-            DEFAULT_RDP_PORT
-        } else {
-            profile.port
-        },
-        username,
-        password,
-        domain: domain_from_user,
+        host: resolved.host,
+        port: resolved.port,
+        username: resolved.username,
+        password: resolved.password,
+        domain: resolved.domain,
         width: target_width,
         height: target_height,
         timeout_seconds: if has_input_actions { 6 } else { 20 },
@@ -471,6 +538,92 @@ async fn rdp_capture(
             Ok(RdpCaptureResult::Error { message })
         }
     }
+}
+
+#[tauri::command]
+async fn rdp_stream_start(
+    state: State<'_, AppState>,
+    profile_id: String,
+    width: Option<u16>,
+    height: Option<u16>,
+    password_override: Option<String>,
+    keychain_id_override: Option<String>,
+    save_auth_choice: Option<bool>,
+    channel: tauri::ipc::Channel<RdpStreamEvent>,
+    frame_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<RdpStreamStartResult, String> {
+    let resolved = match resolve_rdp_profile(
+        &state,
+        profile_id,
+        password_override,
+        keychain_id_override,
+        save_auth_choice,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(result) => return Ok(result),
+    };
+
+    let target_width = width
+        .unwrap_or(DEFAULT_RDP_WIDTH)
+        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
+    let target_height = height
+        .unwrap_or(DEFAULT_RDP_HEIGHT)
+        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
+
+    let options = RdpCaptureOptions {
+        host: resolved.host,
+        port: resolved.port,
+        username: resolved.username,
+        password: resolved.password,
+        domain: resolved.domain,
+        width: target_width,
+        height: target_height,
+        timeout_seconds: 20,
+        input_actions: Vec::new(),
+    };
+
+    let control_state = StreamControlState::new(StreamViewport {
+        width: target_width,
+        height: target_height,
+    });
+
+    let mut manager = state.rdp_streams.lock().await;
+    Ok(manager.start(options, control_state, channel, frame_channel))
+}
+
+#[tauri::command]
+async fn rdp_stream_input(
+    state: State<'_, AppState>,
+    session_id: String,
+    input_actions: Vec<RdpInputAction>,
+) -> Result<(), String> {
+    let mut manager = state.rdp_streams.lock().await;
+    manager
+        .input(
+            session_id.as_str(),
+            input_actions.into_iter().take(64).collect(),
+        )
+        .map_err(app_error)
+}
+
+#[tauri::command]
+async fn rdp_stream_control(
+    state: State<'_, AppState>,
+    session_id: String,
+    control: StreamControlInput,
+) -> Result<(), String> {
+    let mut manager = state.rdp_streams.lock().await;
+    manager
+        .control(session_id.as_str(), control)
+        .map_err(app_error)
+}
+
+#[tauri::command]
+async fn rdp_stream_stop(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let mut manager = state.rdp_streams.lock().await;
+    manager.stop(session_id.as_str()).map_err(app_error)
 }
 
 #[tauri::command]
@@ -1633,6 +1786,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default().manage(AppState {
         vault: Mutex::new(vault),
         ssh: Mutex::new(SshManager::new()),
+        rdp_streams: Mutex::new(RdpStreamManager::default()),
         sync: Mutex::new(SyncManager::new()),
         deeplink_queue: StdMutex::new(Vec::new()),
     });
@@ -1689,6 +1843,10 @@ pub fn run() {
             ssh_connect,
             ssh_connect_ex,
             rdp_capture,
+            rdp_stream_start,
+            rdp_stream_input,
+            rdp_stream_control,
+            rdp_stream_stop,
             ssh_write,
             ssh_resize,
             ssh_disconnect,

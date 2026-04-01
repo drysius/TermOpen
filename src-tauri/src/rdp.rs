@@ -1,7 +1,10 @@
 use core::time::Duration;
+use std::collections::HashMap;
 use std::io::{Cursor, Write as _};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs as _};
-use std::sync::Once;
+use std::sync::{mpsc, Arc, Once};
+use std::thread::JoinHandle;
+use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use ironrdp::connector;
@@ -21,7 +24,11 @@ use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use sspi::network_client::reqwest_network_client::ReqwestNetworkClient;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio_rustls::rustls;
+use uuid::Uuid;
+
+use crate::protocol_stream::{StreamControlInput, StreamControlState};
 
 #[derive(Debug, Clone)]
 pub struct RdpCaptureOptions {
@@ -41,6 +48,39 @@ pub struct RdpCaptureImage {
     pub png_bytes: Vec<u8>,
     pub width: u16,
     pub height: u16,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
+pub enum RdpStreamEvent {
+    Connecting {
+        session_id: String,
+        message: String,
+    },
+    Ready {
+        session_id: String,
+        width: u16,
+        height: u16,
+    },
+    AuthRequired {
+        session_id: String,
+        message: String,
+    },
+    Error {
+        session_id: String,
+        message: String,
+    },
+    Stopped {
+        session_id: String,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RdpStreamStartResult {
+    Started { session_id: String },
+    AuthRequired { message: String },
+    Error { message: String },
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -80,6 +120,111 @@ pub enum RdpInputAction {
     },
 }
 
+#[derive(Debug)]
+enum RdpStreamWorkerMessage {
+    Input(Vec<RdpInputAction>),
+    Control(StreamControlInput),
+    Stop,
+}
+
+struct RdpStreamSession {
+    tx: mpsc::Sender<RdpStreamWorkerMessage>,
+    _join: JoinHandle<()>,
+}
+
+#[derive(Default)]
+pub struct RdpStreamManager {
+    sessions: HashMap<String, RdpStreamSession>,
+}
+
+impl RdpStreamManager {
+    pub fn start(
+        &mut self,
+        options: RdpCaptureOptions,
+        control_state: StreamControlState,
+        event_channel: Channel<RdpStreamEvent>,
+        frame_channel: Channel<InvokeResponseBody>,
+    ) -> RdpStreamStartResult {
+        let session_id = Uuid::new_v4().to_string();
+        let (tx, rx) = mpsc::channel::<RdpStreamWorkerMessage>();
+        let event_channel = Arc::new(event_channel);
+        let frame_channel = Arc::new(frame_channel);
+        let worker_session_id = session_id.clone();
+        let worker_event_channel = event_channel.clone();
+        let worker_frame_channel = frame_channel.clone();
+        let join = std::thread::Builder::new()
+            .name(format!("rdp-stream-{}", &session_id[..8]))
+            .spawn(move || {
+                run_rdp_stream_worker(
+                    worker_session_id.clone(),
+                    options,
+                    control_state,
+                    worker_event_channel,
+                    worker_frame_channel,
+                    rx,
+                );
+            });
+
+        let Ok(join) = join else {
+            return RdpStreamStartResult::Error {
+                message: "Nao foi possivel iniciar worker RDP.".to_string(),
+            };
+        };
+
+        self.sessions.insert(
+            session_id.clone(),
+            RdpStreamSession {
+                tx,
+                _join: join,
+            },
+        );
+        RdpStreamStartResult::Started { session_id }
+    }
+
+    pub fn input(
+        &mut self,
+        session_id: &str,
+        input_actions: Vec<RdpInputAction>,
+    ) -> Result<()> {
+        let Some(session) = self.sessions.get(session_id) else {
+            anyhow::bail!("Sessao de stream RDP nao encontrada.");
+        };
+
+        if let Err(error) = session
+            .tx
+            .send(RdpStreamWorkerMessage::Input(input_actions))
+        {
+            self.sessions.remove(session_id);
+            return Err(anyhow::Error::new(error).context("stream input send"));
+        }
+        Ok(())
+    }
+
+    pub fn control(&mut self, session_id: &str, control: StreamControlInput) -> Result<()> {
+        let Some(session) = self.sessions.get(session_id) else {
+            anyhow::bail!("Sessao de stream RDP nao encontrada.");
+        };
+
+        if let Err(error) = session
+            .tx
+            .send(RdpStreamWorkerMessage::Control(control))
+        {
+            self.sessions.remove(session_id);
+            return Err(anyhow::Error::new(error).context("stream control send"));
+        }
+        Ok(())
+    }
+
+    pub fn stop(&mut self, session_id: &str) -> Result<()> {
+        let Some(session) = self.sessions.remove(session_id) else {
+            anyhow::bail!("Sessao de stream RDP nao encontrada.");
+        };
+
+        let _ = session.tx.send(RdpStreamWorkerMessage::Stop);
+        Ok(())
+    }
+}
+
 type UpgradedFramed =
     ironrdp_blocking::Framed<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 static RUSTLS_PROVIDER_INIT: Once = Once::new();
@@ -88,6 +233,225 @@ fn ensure_rustls_crypto_provider() {
     RUSTLS_PROVIDER_INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
+}
+
+fn emit_stream_event(channel: &Arc<Channel<RdpStreamEvent>>, event: RdpStreamEvent) -> bool {
+    channel.send(event).is_ok()
+}
+
+fn emit_stream_frame(channel: &Arc<Channel<InvokeResponseBody>>, frame_bytes: Vec<u8>) -> bool {
+    channel.send(InvokeResponseBody::Raw(frame_bytes)).is_ok()
+}
+
+fn looks_like_auth_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("logon")
+        || lower.contains("logon failure")
+        || lower.contains("authentication")
+        || lower.contains("credssp")
+        || lower.contains("sec_e_logon_denied")
+        || lower.contains("status_logon_failure")
+        || lower.contains("nla")
+        || lower.contains("access denied")
+        || lower.contains("password")
+        || lower.contains("account restriction")
+}
+
+fn run_rdp_stream_worker(
+    session_id: String,
+    options: RdpCaptureOptions,
+    mut control_state: StreamControlState,
+    event_channel: Arc<Channel<RdpStreamEvent>>,
+    frame_channel: Arc<Channel<InvokeResponseBody>>,
+    rx: mpsc::Receiver<RdpStreamWorkerMessage>,
+) {
+    let _ = emit_stream_event(
+        &event_channel,
+        RdpStreamEvent::Connecting {
+            session_id: session_id.clone(),
+            message: "Conectando via RDP...".to_string(),
+        },
+    );
+
+    let worker_result = run_rdp_stream_worker_inner(
+        &session_id,
+        options,
+        &mut control_state,
+        &event_channel,
+        &frame_channel,
+        rx,
+    );
+    if let Err(error) = worker_result {
+        let message = format!("{error:#}");
+        let _ = if looks_like_auth_error(&message) {
+            emit_stream_event(
+                &event_channel,
+                RdpStreamEvent::AuthRequired {
+                    session_id: session_id.clone(),
+                    message,
+                },
+            )
+        } else {
+            emit_stream_event(
+                &event_channel,
+                RdpStreamEvent::Error {
+                    session_id: session_id.clone(),
+                    message,
+                },
+            )
+        };
+    }
+
+    let _ = emit_stream_event(
+        &event_channel,
+        RdpStreamEvent::Stopped {
+            session_id: session_id.clone(),
+        },
+    );
+}
+
+fn run_rdp_stream_worker_inner(
+    session_id: &str,
+    options: RdpCaptureOptions,
+    control_state: &mut StreamControlState,
+    event_channel: &Arc<Channel<RdpStreamEvent>>,
+    frame_channel: &Arc<Channel<InvokeResponseBody>>,
+    rx: mpsc::Receiver<RdpStreamWorkerMessage>,
+) -> Result<()> {
+    ensure_rustls_crypto_provider();
+
+    let config = build_config(
+        options.username.clone(),
+        options.password.clone(),
+        options.domain.clone(),
+        options.width,
+        options.height,
+    )?;
+
+    let connect_timeout = Duration::from_secs(options.timeout_seconds.clamp(3, 30));
+    let read_timeout = Duration::from_millis(130);
+    let (connection_result, mut framed) = connect(config, options.host, options.port, connect_timeout, read_timeout)
+        .context("connect")?;
+
+    let mut image = DecodedImage::new(
+        PixelFormat::RgbA32,
+        connection_result.desktop_size.width,
+        connection_result.desktop_size.height,
+    );
+    let mut active_stage = ActiveStage::new(connection_result);
+    let mut pending_inputs = options.input_actions;
+    let mut force_emit = true;
+    let mut last_emit = Instant::now();
+
+    if !emit_stream_event(
+        event_channel,
+        RdpStreamEvent::Ready {
+            session_id: session_id.to_string(),
+            width: image.width(),
+            height: image.height(),
+        },
+    ) {
+        return Ok(());
+    }
+
+    'worker: loop {
+        while let Ok(message) = rx.try_recv() {
+            match message {
+                RdpStreamWorkerMessage::Input(actions) => {
+                    if !actions.is_empty() {
+                        pending_inputs.extend(actions.into_iter().take(48));
+                        if pending_inputs.len() > 96 {
+                            let keep_from = pending_inputs.len() - 96;
+                            pending_inputs = pending_inputs.split_off(keep_from);
+                        }
+                    }
+                }
+                RdpStreamWorkerMessage::Control(update) => {
+                    control_state.apply(update);
+                }
+                RdpStreamWorkerMessage::Stop => break 'worker,
+            }
+        }
+
+        if !pending_inputs.is_empty() {
+            process_input_actions(&mut framed, &mut active_stage, &mut image, &pending_inputs)
+                .context("process stream inputs")?;
+            pending_inputs.clear();
+            force_emit = true;
+        }
+
+        match active_stage_tick(&mut framed, &mut active_stage, &mut image)? {
+            TickOutcome::Idle => {}
+            TickOutcome::Updated => {
+                force_emit = true;
+            }
+            TickOutcome::Terminated => break 'worker,
+        }
+
+        let emit_every = if control_state.active {
+            Duration::from_millis(120)
+        } else {
+            Duration::from_millis(420)
+        };
+        if force_emit || last_emit.elapsed() >= emit_every {
+            let frame_bytes = encode_image_to_png_bytes(&image).context("encode stream frame")?;
+            if !emit_stream_frame(frame_channel, frame_bytes) {
+                break 'worker;
+            }
+            force_emit = false;
+            last_emit = Instant::now();
+        }
+    }
+
+    Ok(())
+}
+
+enum TickOutcome {
+    Idle,
+    Updated,
+    Terminated,
+}
+
+fn active_stage_tick(
+    framed: &mut UpgradedFramed,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+) -> Result<TickOutcome> {
+    let (action, payload) = match framed.read_pdu() {
+        Ok((action, payload)) => (action, payload),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok(TickOutcome::Idle);
+        }
+        Err(error) => return Err(anyhow::Error::new(error).context("read frame")),
+    };
+
+    let outputs = active_stage
+        .process(image, action, &payload)
+        .context("active stage process")?;
+    if process_active_stage_outputs(framed, active_stage, image, outputs)? {
+        return Ok(TickOutcome::Terminated);
+    }
+
+    Ok(TickOutcome::Updated)
+}
+
+fn encode_image_to_png_bytes(image: &DecodedImage) -> Result<Vec<u8>> {
+    let image_data = image.data().to_vec();
+    let img: image::ImageBuffer<image::Rgba<u8>, _> =
+        image::ImageBuffer::from_raw(u32::from(image.width()), u32::from(image.height()), image_data)
+            .context("invalid image")?;
+
+    let mut png_bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .context("encode PNG frame")?;
+
+    Ok(png_bytes)
 }
 
 pub fn capture_png_once(options: RdpCaptureOptions) -> Result<RdpCaptureImage> {
@@ -105,7 +469,8 @@ pub fn capture_png_once(options: RdpCaptureOptions) -> Result<RdpCaptureImage> {
         config,
         options.host.clone(),
         options.port,
-        options.timeout_seconds,
+        Duration::from_secs(options.timeout_seconds.clamp(3, 30)),
+        Duration::from_secs(options.timeout_seconds.clamp(3, 8)),
     )
     .context("connect")?;
 
@@ -201,11 +566,10 @@ fn connect(
     config: connector::Config,
     server_name: String,
     port: u16,
-    timeout_seconds: u64,
+    connect_timeout: Duration,
+    read_timeout: Duration,
 ) -> Result<(ConnectionResult, UpgradedFramed)> {
     let server_addr = lookup_addr(&server_name, port).context("lookup addr")?;
-    let connect_timeout = Duration::from_secs(timeout_seconds.clamp(3, 30));
-    let read_timeout = Duration::from_secs(timeout_seconds.clamp(3, 8));
 
     let tcp_stream =
         TcpStream::connect_timeout(&server_addr, connect_timeout).context("TCP connect")?;

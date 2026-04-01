@@ -114,6 +114,68 @@ export type RdpCaptureResult =
       message: string;
     };
 
+export interface StreamViewport {
+  width: number;
+  height: number;
+}
+
+export interface StreamControlInput {
+  viewport?: StreamViewport | null;
+  active?: boolean | null;
+  pointer_inside?: boolean | null;
+}
+
+export type RdpStreamStartResult =
+  | {
+      status: "started";
+      session_id: string;
+    }
+  | {
+      status: "auth_required";
+      message: string;
+    }
+  | {
+      status: "error";
+      message: string;
+    };
+
+export type RdpStreamEvent =
+  | {
+      event: "connecting";
+      data: {
+        session_id: string;
+        message: string;
+      };
+    }
+  | {
+      event: "ready";
+      data: {
+        session_id: string;
+        width: number;
+        height: number;
+      };
+    }
+  | {
+      event: "auth_required";
+      data: {
+        session_id: string;
+        message: string;
+      };
+    }
+  | {
+      event: "error";
+      data: {
+        session_id: string;
+        message: string;
+      };
+    }
+  | {
+      event: "stopped";
+      data: {
+        session_id: string;
+      };
+    };
+
 export interface SftpEntry {
   name: string;
   path: string;

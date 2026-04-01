@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AppSettings,
@@ -10,8 +10,11 @@ import type {
   RecoveryProbeResult,
   ReleaseCheckResult,
   RdpCaptureResult,
+  RdpStreamEvent,
+  RdpStreamStartResult,
   RdpInputAction,
   SftpEntry,
+  StreamControlInput,
   SyncLoggedUser,
   SyncConflictDecision,
   SyncConflictPreview,
@@ -84,6 +87,33 @@ export const api = {
       saveAuthChoice: options?.saveAuthChoice,
       inputActions: options?.inputActions,
     }),
+  rdpStreamStart: (
+    profileId: string,
+    channel: Channel<RdpStreamEvent>,
+    frameChannel: Channel<ArrayBuffer>,
+    options?: {
+      width?: number;
+      height?: number;
+      passwordOverride?: string | null;
+      keychainIdOverride?: string | null;
+      saveAuthChoice?: boolean;
+    },
+  ) =>
+    invoke<RdpStreamStartResult>("rdp_stream_start", {
+      profileId,
+      width: options?.width,
+      height: options?.height,
+      passwordOverride: options?.passwordOverride,
+      keychainIdOverride: options?.keychainIdOverride,
+      saveAuthChoice: options?.saveAuthChoice,
+      channel,
+      frameChannel,
+    }),
+  rdpStreamInput: (sessionId: string, inputActions: RdpInputAction[]) =>
+    invoke<void>("rdp_stream_input", { sessionId, inputActions }),
+  rdpStreamControl: (sessionId: string, control: StreamControlInput) =>
+    invoke<void>("rdp_stream_control", { sessionId, control }),
+  rdpStreamStop: (sessionId: string) => invoke<void>("rdp_stream_stop", { sessionId }),
   sshWrite: (sessionId: string, data: string) => invoke<string>("ssh_write", { sessionId, data }),
   sshResize: (sessionId: string, cols: number, rows: number) => invoke<void>("ssh_resize", { sessionId, cols, rows }),
   sshDisconnect: (sessionId: string) => invoke<void>("ssh_disconnect", { sessionId }),

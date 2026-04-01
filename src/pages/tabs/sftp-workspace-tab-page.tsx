@@ -1,3 +1,4 @@
+import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import Editor from "@monaco-editor/react";
@@ -46,7 +47,13 @@ import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
-import type { ConnectionProfile, RdpCaptureResult, RdpInputAction, SftpEntry } from "@/types/termopen";
+import type {
+  ConnectionProfile,
+  RdpInputAction,
+  RdpStreamEvent,
+  SftpEntry,
+  StreamControlInput,
+} from "@/types/termopen";
 
 type WorkspaceKind = "terminal" | "sftp" | "rdp" | "editor" | "logs";
 type WorkspaceMode = "free";
@@ -140,6 +147,7 @@ interface LogsBlock extends BaseBlock {
 interface RdpBlock extends BaseBlock {
   kind: "rdp";
   profileId: string;
+  streamSessionId: string | null;
   connectStage: ConnectStage;
   connectMessage: string;
   connectError: string | null;
@@ -147,7 +155,7 @@ interface RdpBlock extends BaseBlock {
   savePasswordChoice: boolean;
   retryAttempt: number;
   retryInSeconds: number | null;
-  imageBase64: string | null;
+  imageUrl: string | null;
   imageWidth: number;
   imageHeight: number;
   capturedAt: number | null;
@@ -600,7 +608,10 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [snapPreview, setSnapPreview] = useState<WorkspaceBlockLayout | null>(null);
   const connectRetryTimersRef = useRef<Record<string, { retryTimer: number; countdownTimer: number }>>({});
-  const rdpCaptureInFlightRef = useRef<Set<string>>(new Set());
+  const rdpStreamSessionByBlockRef = useRef<Map<string, string>>(new Map());
+  const rdpStreamTokenByBlockRef = useRef<Map<string, string>>(new Map());
+  const rdpInputQueueByBlockRef = useRef<Map<string, RdpInputAction[]>>(new Map());
+  const rdpInputFlushTimerByBlockRef = useRef<Map<string, number>>(new Map());
 
   const clearBlockRetryTimers = useCallback((blockId: string) => {
     const active = connectRetryTimersRef.current[blockId];
@@ -895,6 +906,24 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const closeBlock = useCallback(
     (id: string) => {
       clearBlockRetryTimers(id);
+      const rdpBlock = blocksRef.current.find(
+        (item): item is RdpBlock => item.id === id && item.kind === "rdp",
+      );
+      if (rdpBlock?.imageUrl) {
+        URL.revokeObjectURL(rdpBlock.imageUrl);
+      }
+      const sessionId = rdpStreamSessionByBlockRef.current.get(id);
+      if (sessionId) {
+        rdpStreamSessionByBlockRef.current.delete(id);
+        rdpStreamTokenByBlockRef.current.delete(id);
+        const flushTimer = rdpInputFlushTimerByBlockRef.current.get(id);
+        if (flushTimer) {
+          window.clearTimeout(flushTimer);
+          rdpInputFlushTimerByBlockRef.current.delete(id);
+        }
+        rdpInputQueueByBlockRef.current.delete(id);
+        void api.rdpStreamStop(sessionId).catch(() => undefined);
+      }
       setBlocks((current) => current.filter((block) => block.id !== id));
     },
     [clearBlockRetryTimers],
@@ -1545,6 +1574,51 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
     appendWorkspaceLog("info", "Bloco de logs aberto");
   }, [appendWorkspaceLog, focusBlock, workspaceSize.height, workspaceSize.width]);
 
+  const replaceRdpFrameForBlock = useCallback(
+    (blockId: string, imageUrl: string) => {
+      const previous = blocksRef.current.find(
+        (item): item is RdpBlock => item.id === blockId && item.kind === "rdp",
+      )?.imageUrl;
+      if (previous && previous !== imageUrl) {
+        URL.revokeObjectURL(previous);
+      }
+
+      setBlocks((current) =>
+        current.map((block) =>
+          block.id === blockId && block.kind === "rdp"
+            ? {
+                ...block,
+                imageUrl,
+                capturedAt: Math.floor(Date.now() / 1000),
+                connectStage: "ready",
+                connectMessage: t.workspace.rdp.ready,
+                connectError: null,
+                retryAttempt: 0,
+                retryInSeconds: null,
+              }
+            : block,
+        ),
+      );
+
+      const probe = new Image();
+      probe.onload = () => {
+        setBlocks((current) =>
+          current.map((block) =>
+            block.id === blockId && block.kind === "rdp"
+              ? {
+                  ...block,
+                  imageWidth: probe.naturalWidth || block.imageWidth,
+                  imageHeight: probe.naturalHeight || block.imageHeight,
+                }
+              : block,
+          ),
+        );
+      };
+      probe.src = imageUrl;
+    },
+    [t.workspace.rdp.ready],
+  );
+
   const resolvePendingRdpConnection = useCallback(
     async (
       blockId: string,
@@ -1555,12 +1629,40 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         inputActions?: RdpInputAction[];
       },
     ) => {
-      if (rdpCaptureInFlightRef.current.has(blockId)) {
+      const target = blocksRef.current.find((item): item is RdpBlock => item.id === blockId && item.kind === "rdp");
+      if (!target) {
         return;
       }
 
-      const target = blocksRef.current.find((item): item is RdpBlock => item.id === blockId && item.kind === "rdp");
-      if (!target) {
+      const inputActions = options?.inputActions ?? [];
+      if (inputActions.length > 0) {
+        const sessionId = rdpStreamSessionByBlockRef.current.get(blockId);
+        if (!sessionId) {
+          return;
+        }
+
+        const queue = rdpInputQueueByBlockRef.current.get(blockId) ?? [];
+        queue.push(...inputActions.slice(0, 24));
+        if (queue.length > 96) {
+          queue.splice(0, queue.length - 96);
+        }
+        rdpInputQueueByBlockRef.current.set(blockId, queue);
+
+        if (!rdpInputFlushTimerByBlockRef.current.has(blockId)) {
+          const timer = window.setTimeout(() => {
+            rdpInputFlushTimerByBlockRef.current.delete(blockId);
+            const pending = rdpInputQueueByBlockRef.current.get(blockId) ?? [];
+            rdpInputQueueByBlockRef.current.set(blockId, []);
+            const currentSessionId = rdpStreamSessionByBlockRef.current.get(blockId);
+            if (!currentSessionId || pending.length === 0) {
+              return;
+            }
+            void api.rdpStreamInput(currentSessionId, pending).catch((error) => {
+              appendWorkspaceLog("warn", "Falha ao enviar input RDP", getError(error));
+            });
+          }, 22);
+          rdpInputFlushTimerByBlockRef.current.set(blockId, timer);
+        }
         return;
       }
 
@@ -1576,6 +1678,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                   connectError: "Perfil RDP nao encontrado.",
                   retryAttempt: 0,
                   retryInSeconds: null,
+                  streamSessionId: null,
                 }
               : block,
           ),
@@ -1586,64 +1689,192 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       const passwordOverride = options?.passwordOverride ?? null;
       const saveAuthChoice = options?.saveAuthChoice ?? false;
       const currentAttempt = Math.max(0, options?.retryAttempt ?? target.retryAttempt);
-      const inputActions = options?.inputActions ?? [];
-      const interactionOnly = inputActions.length > 0;
       const connectingMessage = passwordOverride ? "Logando..." : t.workspace.rdp.connecting;
+      const previousSessionId = rdpStreamSessionByBlockRef.current.get(blockId) ?? target.streamSessionId;
+      if (previousSessionId) {
+        rdpStreamSessionByBlockRef.current.delete(blockId);
+        void api.rdpStreamStop(previousSessionId).catch(() => undefined);
+      }
+      const pendingFlush = rdpInputFlushTimerByBlockRef.current.get(blockId);
+      if (pendingFlush) {
+        window.clearTimeout(pendingFlush);
+        rdpInputFlushTimerByBlockRef.current.delete(blockId);
+      }
+      rdpInputQueueByBlockRef.current.set(blockId, []);
       clearBlockRetryTimers(blockId);
-      rdpCaptureInFlightRef.current.add(blockId);
 
-      const shouldShowConnecting = !(interactionOnly && target.connectStage === "ready");
-      if (shouldShowConnecting) {
-        setBlocks((current) =>
-          current.map((block) =>
-            block.id === blockId && block.kind === "rdp"
-              ? {
-                  ...block,
-                  connectStage: "connecting",
-                  connectMessage: connectingMessage,
-                  connectError: null,
-                  retryAttempt: currentAttempt,
-                  retryInSeconds: null,
-                }
-              : block,
-          ),
-        );
-      }
-      if (!interactionOnly) {
-        appendWorkspaceLog("info", "Conexao RDP em andamento", `${profile.username}@${profile.host}:${profile.port}`);
-      }
+      setBlocks((current) =>
+        current.map((block) =>
+          block.id === blockId && block.kind === "rdp"
+            ? {
+                ...block,
+                connectStage: "connecting",
+                connectMessage: connectingMessage,
+                connectError: null,
+                retryAttempt: currentAttempt,
+                retryInSeconds: null,
+                streamSessionId: null,
+              }
+            : block,
+        ),
+      );
+      appendWorkspaceLog("info", "Conexao RDP em andamento", `${profile.username}@${profile.host}:${profile.port}`);
 
-      try {
-        const result: RdpCaptureResult = await api.rdpCapture(profile.id, {
-          width: 1280,
-          height: 720,
-          passwordOverride,
-          saveAuthChoice,
-          inputActions,
-        });
+      const streamToken = createId("rdpstream");
+      rdpStreamTokenByBlockRef.current.set(blockId, streamToken);
 
-        if (result.status === "ready") {
+      const channel = new Channel<RdpStreamEvent>((event) => {
+        if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
+          return;
+        }
+
+        if (event.event === "ready") {
+          clearBlockRetryTimers(blockId);
           setBlocks((current) =>
             current.map((block) =>
               block.id === blockId && block.kind === "rdp"
                 ? {
                     ...block,
+                    streamSessionId: event.data.session_id,
                     connectStage: "ready",
                     connectMessage: t.workspace.rdp.ready,
                     connectError: null,
-                    imageBase64: result.image_base64,
-                    imageWidth: result.width,
-                    imageHeight: result.height,
-                    capturedAt: result.captured_at,
+                    imageWidth: event.data.width,
+                    imageHeight: event.data.height,
                     retryAttempt: 0,
                     retryInSeconds: null,
                   }
                 : block,
             ),
           );
-          if (!interactionOnly) {
-            appendWorkspaceLog("success", "Frame RDP recebido", `${profile.host} ${result.width}x${result.height}`);
+          appendWorkspaceLog("success", "Sessao RDP conectada", `${profile.host} ${event.data.width}x${event.data.height}`);
+          return;
+        }
+
+        if (event.event === "connecting") {
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "rdp"
+                ? {
+                    ...block,
+                    connectStage: "connecting",
+                    connectMessage: event.data.message || t.workspace.rdp.connecting,
+                    connectError: null,
+                  }
+                : block,
+            ),
+          );
+          return;
+        }
+
+        if (event.event === "auth_required") {
+          clearBlockRetryTimers(blockId);
+          rdpStreamSessionByBlockRef.current.delete(blockId);
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "rdp"
+                ? {
+                    ...block,
+                    streamSessionId: null,
+                    connectStage: "awaiting_password",
+                    connectMessage: t.workspace.rdp.authRequired,
+                    connectError: event.data.message,
+                    retryAttempt: 0,
+                    retryInSeconds: null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog("warn", "Autenticacao RDP pendente", `${profile.username}@${profile.host}:${profile.port}`);
+          return;
+        }
+
+        if (event.event === "error") {
+          rdpStreamSessionByBlockRef.current.delete(blockId);
+          const timeoutDetected = isTimeoutErrorMessage(event.data.message);
+          const nextAttempt = currentAttempt + 1;
+          const delaySeconds = Math.max(1, settings.reconnect_delay_seconds);
+          const canRetry = settings.auto_reconnect_enabled && nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS && timeoutDetected;
+          const retryLabel = canRetry
+            ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
+            : `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`;
+
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "rdp"
+                ? {
+                    ...block,
+                    streamSessionId: null,
+                    connectStage: "error",
+                    connectMessage: timeoutDetected ? "Timeout na conexao RDP." : t.workspace.rdp.error,
+                    connectError: timeoutDetected ? `${event.data.message} ${retryLabel}`.trim() : event.data.message,
+                    retryAttempt: timeoutDetected ? nextAttempt : 0,
+                    retryInSeconds: canRetry ? delaySeconds : null,
+                  }
+                : block,
+            ),
+          );
+          appendWorkspaceLog("error", "Falha no stream RDP", event.data.message);
+
+          if (canRetry) {
+            scheduleBlockAutoRetry({
+              blockId,
+              kind: "rdp",
+              delaySeconds,
+              attempt: nextAttempt,
+              onRetry: () => {
+                void resolvePendingRdpConnection(blockId, {
+                  passwordOverride,
+                  saveAuthChoice,
+                  retryAttempt: nextAttempt,
+                });
+              },
+            });
           }
+          return;
+        }
+
+        if (event.event === "stopped") {
+          const current = rdpStreamSessionByBlockRef.current.get(blockId);
+          if (current === event.data.session_id) {
+            rdpStreamSessionByBlockRef.current.delete(blockId);
+          }
+        }
+      });
+
+      const frameChannel = new Channel<ArrayBuffer>((message) => {
+        if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
+          return;
+        }
+        if (!(message instanceof ArrayBuffer)) {
+          return;
+        }
+
+        const imageUrl = URL.createObjectURL(new Blob([message], { type: "image/png" }));
+        replaceRdpFrameForBlock(blockId, imageUrl);
+      });
+
+      try {
+        const result = await api.rdpStreamStart(profile.id, channel, frameChannel, {
+          width: 1280,
+          height: 720,
+          passwordOverride,
+          saveAuthChoice,
+        });
+
+        if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
+          return;
+        }
+
+        if (result.status === "started") {
+          rdpStreamSessionByBlockRef.current.set(blockId, result.session_id);
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "rdp"
+                ? { ...block, streamSessionId: result.session_id, connectMessage: connectingMessage }
+                : block,
+            ),
+          );
           return;
         }
 
@@ -1653,6 +1884,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               block.id === blockId && block.kind === "rdp"
                 ? {
                     ...block,
+                    streamSessionId: null,
                     connectStage: "awaiting_password",
                     connectMessage: t.workspace.rdp.authRequired,
                     connectError: result.message,
@@ -1662,54 +1894,6 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 : block,
             ),
           );
-          if (!interactionOnly) {
-            appendWorkspaceLog("warn", "Autenticacao RDP pendente", `${profile.username}@${profile.host}:${profile.port}`);
-          }
-          return;
-        }
-
-        const timeoutDetected = isTimeoutErrorMessage(result.message);
-        if (timeoutDetected) {
-          const nextAttempt = currentAttempt + 1;
-          const delaySeconds = Math.max(1, settings.reconnect_delay_seconds);
-          const canRetry = !interactionOnly && settings.auto_reconnect_enabled && nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS;
-          const retryLabel = canRetry
-            ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
-            : `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`;
-
-          setBlocks((current) =>
-            current.map((block) =>
-              block.id === blockId && block.kind === "rdp"
-                ? {
-                    ...block,
-                    connectStage: "error",
-                    connectMessage: "Timeout na conexao RDP.",
-                    connectError: `${result.message} ${retryLabel}`.trim(),
-                    retryAttempt: nextAttempt,
-                    retryInSeconds: canRetry ? delaySeconds : null,
-                  }
-                : block,
-            ),
-          );
-          if (!interactionOnly) {
-            appendWorkspaceLog("warn", "Timeout ao conectar RDP", `${profile.host} | ${retryLabel}`);
-          }
-
-          if (canRetry) {
-            scheduleBlockAutoRetry({
-              blockId,
-              kind: "rdp",
-              delaySeconds,
-              attempt: nextAttempt,
-              onRetry: () => {
-                void resolvePendingRdpConnection(blockId, {
-                  passwordOverride,
-                  saveAuthChoice,
-                  retryAttempt: nextAttempt,
-                });
-              },
-            });
-          }
           return;
         }
 
@@ -1718,6 +1902,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
             block.id === blockId && block.kind === "rdp"
               ? {
                   ...block,
+                  streamSessionId: null,
                   connectStage: "error",
                   connectMessage: t.workspace.rdp.error,
                   connectError: result.message,
@@ -1727,61 +1912,14 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               : block,
           ),
         );
-        if (!interactionOnly) {
-          appendWorkspaceLog("error", "Falha ao conectar RDP", result.message);
-        }
       } catch (error) {
         const message = getError(error);
-        const timeoutDetected = isTimeoutErrorMessage(message);
-        if (timeoutDetected) {
-          const nextAttempt = currentAttempt + 1;
-          const delaySeconds = Math.max(1, settings.reconnect_delay_seconds);
-          const canRetry = !interactionOnly && settings.auto_reconnect_enabled && nextAttempt <= MAX_CONNECT_RETRY_ATTEMPTS;
-          const retryLabel = canRetry
-            ? `Nova tentativa em ${delaySeconds}s (${nextAttempt}/${MAX_CONNECT_RETRY_ATTEMPTS}).`
-            : `Limite de ${MAX_CONNECT_RETRY_ATTEMPTS} tentativas atingido.`;
-
-          setBlocks((current) =>
-            current.map((block) =>
-              block.id === blockId && block.kind === "rdp"
-                ? {
-                    ...block,
-                    connectStage: "error",
-                    connectMessage: "Timeout na conexao RDP.",
-                    connectError: `${message} ${retryLabel}`.trim(),
-                    retryAttempt: nextAttempt,
-                    retryInSeconds: canRetry ? delaySeconds : null,
-                  }
-                : block,
-            ),
-          );
-          if (!interactionOnly) {
-            appendWorkspaceLog("warn", "Timeout ao conectar RDP", `${profile.host} | ${retryLabel}`);
-          }
-
-          if (canRetry) {
-            scheduleBlockAutoRetry({
-              blockId,
-              kind: "rdp",
-              delaySeconds,
-              attempt: nextAttempt,
-              onRetry: () => {
-                void resolvePendingRdpConnection(blockId, {
-                  passwordOverride,
-                  saveAuthChoice,
-                  retryAttempt: nextAttempt,
-                });
-              },
-            });
-          }
-          return;
-        }
-
         setBlocks((current) =>
           current.map((block) =>
             block.id === blockId && block.kind === "rdp"
               ? {
                   ...block,
+                  streamSessionId: null,
                   connectStage: "error",
                   connectMessage: t.workspace.rdp.error,
                   connectError: message,
@@ -1791,20 +1929,17 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               : block,
           ),
         );
-        if (!interactionOnly) {
-          appendWorkspaceLog("error", "Erro ao conectar RDP", message);
-        }
-      } finally {
-        rdpCaptureInFlightRef.current.delete(blockId);
+        appendWorkspaceLog("error", "Erro ao iniciar stream RDP", message);
       }
     },
     [
       appendWorkspaceLog,
       clearBlockRetryTimers,
       connections,
-      scheduleBlockAutoRetry,
+      replaceRdpFrameForBlock,
       settings.auto_reconnect_enabled,
       settings.reconnect_delay_seconds,
+      scheduleBlockAutoRetry,
       t.workspace.rdp.authRequired,
       t.workspace.rdp.connecting,
       t.workspace.rdp.error,
@@ -1829,6 +1964,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         kind: "rdp",
         title: count > 0 ? `${baseTitle} (${count + 1})` : baseTitle,
         profileId,
+        streamSessionId: null,
         connectStage: "connecting",
         connectMessage: t.workspace.rdp.connecting,
         connectError: null,
@@ -1836,7 +1972,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         savePasswordChoice: false,
         retryAttempt: 0,
         retryInSeconds: null,
-        imageBase64: null,
+        imageUrl: null,
         imageWidth: 0,
         imageHeight: 0,
         capturedAt: null,
@@ -1855,21 +1991,24 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   );
 
   useEffect(() => {
-    const activeBlocks = blocks.filter(
-      (block): block is RdpBlock => block.kind === "rdp" && block.autoRefresh && block.connectStage === "ready",
-    );
-    if (activeBlocks.length === 0) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      activeBlocks.forEach((block) => {
-        void resolvePendingRdpConnection(block.id, { retryAttempt: block.retryAttempt });
+    return () => {
+      blocksRef.current.forEach((block) => {
+        if (block.kind === "rdp" && block.imageUrl) {
+          URL.revokeObjectURL(block.imageUrl);
+        }
       });
-    }, 7000);
-
-    return () => window.clearInterval(timer);
-  }, [blocks, resolvePendingRdpConnection]);
+      rdpInputFlushTimerByBlockRef.current.forEach((timer) => {
+        window.clearTimeout(timer);
+      });
+      rdpInputFlushTimerByBlockRef.current.clear();
+      rdpInputQueueByBlockRef.current.clear();
+      rdpStreamTokenByBlockRef.current.clear();
+      rdpStreamSessionByBlockRef.current.forEach((sessionId) => {
+        void api.rdpStreamStop(sessionId).catch(() => undefined);
+      });
+      rdpStreamSessionByBlockRef.current.clear();
+    };
+  }, []);
 
   const resolvePendingTerminalConnection = useCallback(
     async (
@@ -3406,16 +3545,20 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                 onFocus={() => focusBlock(block.id)}
                 onProfileChange={(profileId) => {
                   clearBlockRetryTimers(block.id);
+                  if (block.imageUrl) {
+                    URL.revokeObjectURL(block.imageUrl);
+                  }
                   setBlocks((current) =>
                     current.map((item) =>
                       item.id === block.id && item.kind === "rdp"
                         ? {
                             ...item,
                             profileId,
+                            streamSessionId: null,
                             connectStage: "connecting",
                             connectMessage: t.workspace.rdp.connecting,
                             connectError: null,
-                            imageBase64: null,
+                            imageUrl: null,
                             imageWidth: 0,
                             imageHeight: 0,
                             capturedAt: null,
@@ -3452,15 +3595,41 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
                   );
                   void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
                 }}
-                onToggleAutoRefresh={() =>
+                onToggleAutoRefresh={() => {
+                  const nextEnabled = !block.autoRefresh;
                   setBlocks((current) =>
                     current.map((item) =>
                       item.id === block.id && item.kind === "rdp"
-                        ? { ...item, autoRefresh: !item.autoRefresh }
+                        ? { ...item, autoRefresh: nextEnabled }
                         : item,
                     ),
-                  )
-                }
+                  );
+                  if (nextEnabled) {
+                    void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
+                    return;
+                  }
+                  const activeSessionId = rdpStreamSessionByBlockRef.current.get(block.id) ?? block.streamSessionId;
+                  if (activeSessionId) {
+                    rdpStreamSessionByBlockRef.current.delete(block.id);
+                    void api.rdpStreamStop(activeSessionId).catch(() => undefined);
+                    setBlocks((current) =>
+                      current.map((item) =>
+                        item.id === block.id && item.kind === "rdp"
+                          ? { ...item, streamSessionId: null, connectMessage: "Pausado" }
+                          : item,
+                      ),
+                    );
+                  }
+                }}
+                onControlChange={(control) => {
+                  const sessionId = rdpStreamSessionByBlockRef.current.get(block.id) ?? block.streamSessionId;
+                  if (!sessionId) {
+                    return;
+                  }
+                  void api.rdpStreamControl(sessionId, control).catch((error) => {
+                    appendWorkspaceLog("warn", "Falha ao atualizar controle RDP", getError(error));
+                  });
+                }}
                 onPasswordDraftChange={(value) =>
                   setBlocks((current) =>
                     current.map((item) =>
@@ -4702,6 +4871,7 @@ interface RdpBlockViewProps {
   onProfileChange: (profileId: string) => void;
   onRefresh: () => void;
   onInteract: (inputActions: RdpInputAction[]) => void;
+  onControlChange: (control: StreamControlInput) => void;
   onRetry: () => void;
   onToggleAutoRefresh: () => void;
   onPasswordDraftChange: (value: string) => void;
@@ -4724,6 +4894,7 @@ function RdpBlockView({
   onProfileChange,
   onRefresh,
   onInteract,
+  onControlChange,
   onRetry,
   onToggleAutoRefresh,
   onPasswordDraftChange,
@@ -4743,7 +4914,23 @@ function RdpBlockView({
   });
   const lastMoveSentAtRef = useRef(0);
   const [localPointer, setLocalPointer] = useState<{ x: number; y: number } | null>(null);
-  const isConnected = block.connectStage === "ready" && !!block.imageBase64;
+  const isConnected = block.connectStage === "ready" && !!block.imageUrl;
+  const emitControlWithViewport = useCallback(
+    (control: StreamControlInput) => {
+      const canvas = canvasRef.current;
+      const viewport = canvas
+        ? {
+            width: Math.max(1, Math.floor(canvas.clientWidth)),
+            height: Math.max(1, Math.floor(canvas.clientHeight)),
+          }
+        : null;
+      onControlChange({
+        ...control,
+        viewport,
+      });
+    },
+    [onControlChange],
+  );
 
   const drawFrame = useCallback(() => {
     const canvas = canvasRef.current;
@@ -4821,7 +5008,7 @@ function RdpBlockView({
   }, [block.imageHeight, block.imageWidth, localPointer]);
 
   useEffect(() => {
-    if (!block.imageBase64) {
+    if (!block.imageUrl) {
       frameImageRef.current = null;
       drawFrame();
       return;
@@ -4832,8 +5019,8 @@ function RdpBlockView({
       frameImageRef.current = frame;
       drawFrame();
     };
-    frame.src = `data:image/png;base64,${block.imageBase64}`;
-  }, [block.imageBase64, drawFrame]);
+    frame.src = block.imageUrl;
+  }, [block.imageUrl, drawFrame]);
 
   useEffect(() => {
     drawFrame();
@@ -4844,10 +5031,13 @@ function RdpBlockView({
     if (!canvas) {
       return;
     }
-    const observer = new ResizeObserver(() => drawFrame());
+    const observer = new ResizeObserver(() => {
+      drawFrame();
+      emitControlWithViewport({});
+    });
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [drawFrame]);
+  }, [drawFrame, emitControlWithViewport]);
 
   const mapClientToRemote = useCallback(
     (clientX: number, clientY: number) => {
@@ -4891,6 +5081,10 @@ function RdpBlockView({
         return;
       }
       setLocalPointer(remotePoint);
+      emitControlWithViewport({
+        active: true,
+        pointer_inside: true,
+      });
 
       if (!isConnected) {
         return;
@@ -4907,7 +5101,7 @@ function RdpBlockView({
         },
       ]);
     },
-    [isConnected, mapClientToRemote, onFocus, onInteract],
+    [emitControlWithViewport, isConnected, mapClientToRemote, onFocus, onInteract],
   );
 
   const handleCanvasPointerMove = useCallback(
@@ -4967,6 +5161,10 @@ function RdpBlockView({
 
       event.preventDefault();
       event.stopPropagation();
+      emitControlWithViewport({
+        active: true,
+        pointer_inside: true,
+      });
       onInteract([
         {
           kind: "key_press",
@@ -4979,8 +5177,36 @@ function RdpBlockView({
         },
       ]);
     },
-    [isConnected, onInteract],
+    [emitControlWithViewport, isConnected, onInteract],
   );
+
+  const handleCanvasPointerEnter = useCallback(() => {
+    emitControlWithViewport({
+      pointer_inside: true,
+      active: true,
+    });
+  }, [emitControlWithViewport]);
+
+  const handleCanvasPointerLeave = useCallback(() => {
+    setLocalPointer(null);
+    emitControlWithViewport({
+      pointer_inside: false,
+      active: false,
+    });
+  }, [emitControlWithViewport]);
+
+  const handleCanvasFocus = useCallback(() => {
+    emitControlWithViewport({
+      active: true,
+      pointer_inside: true,
+    });
+  }, [emitControlWithViewport]);
+
+  const handleCanvasBlur = useCallback(() => {
+    emitControlWithViewport({
+      active: false,
+    });
+  }, [emitControlWithViewport]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-zinc-950">
@@ -5039,6 +5265,10 @@ function RdpBlockView({
             )}
             onPointerDown={handleCanvasPointerDown}
             onPointerMove={handleCanvasPointerMove}
+            onPointerEnter={handleCanvasPointerEnter}
+            onPointerLeave={handleCanvasPointerLeave}
+            onFocus={handleCanvasFocus}
+            onBlur={handleCanvasBlur}
             onKeyDown={handleCanvasKeyDown}
             onContextMenu={(event) => event.preventDefault()}
           />
