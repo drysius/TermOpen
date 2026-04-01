@@ -88,11 +88,31 @@ impl ConnectionProfile {
 pub struct KeychainEntry {
     pub id: String,
     pub name: String,
+    #[serde(default = "default_keychain_entry_type")]
+    pub entry_type: KeychainEntryType,
     pub password: Option<String>,
     pub private_key: Option<String>,
     pub public_key: Option<String>,
     pub passphrase: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeychainEntryType {
+    Password,
+    SshKey,
+    Secret,
+}
+
+impl Default for KeychainEntryType {
+    fn default() -> Self {
+        Self::Password
+    }
+}
+
+fn default_keychain_entry_type() -> KeychainEntryType {
+    KeychainEntryType::Password
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

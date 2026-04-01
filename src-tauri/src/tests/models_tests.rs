@@ -1,4 +1,4 @@
-use crate::models::{AppSettings, KeychainEntry};
+use crate::models::{AppSettings, KeychainEntry, KeychainEntryType};
 
 #[test]
 fn should_default_terminal_interaction_settings() {
@@ -14,6 +14,7 @@ fn should_serialize_keychain_password_field() {
     let entry = KeychainEntry {
         id: "a0f1f421-d7a7-4416-8f34-c8f6a4f84ff9".to_string(),
         name: "shared".to_string(),
+        entry_type: KeychainEntryType::Password,
         password: Some("super-secret".to_string()),
         private_key: None,
         public_key: None,

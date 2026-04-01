@@ -1,6 +1,7 @@
 export type KeyMode = "password" | "keychain";
 export type ConnectionKind = "host" | "sftp" | "both";
 export type ConnectionProtocol = "ssh" | "sftp";
+export type KeychainEntryType = "password" | "ssh_key" | "secret";
 export type EditorPreference = "internal" | "vscode" | "system";
 export type ModifiedUploadPolicy = "auto" | "ask" | "manual";
 
@@ -36,6 +37,7 @@ export interface ConnectionProfile {
 export interface KeychainEntry {
   id: string;
   name: string;
+  entry_type: KeychainEntryType;
   password?: string | null;
   private_key?: string | null;
   public_key?: string | null;

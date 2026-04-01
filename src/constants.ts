@@ -18,6 +18,7 @@ export const BLANK_PROFILE: ConnectionProfile = {
 export const BLANK_KEYCHAIN_ENTRY: KeychainEntry = {
   id: "",
   name: "",
+  entry_type: "password",
   password: "",
   private_key: "",
   public_key: "",
