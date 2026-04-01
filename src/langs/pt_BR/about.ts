@@ -9,6 +9,8 @@ export const about: AppDictionary["about"] = {
   versionLabel: "Versao do app: ",
   updatesInfo: "Atualizacoes: verifique releases e commits no GitHub.",
   stackSection: "Stack e Bibliotecas",
+  newPackagesSection: "Pacotes recentes",
+  newPackagesDescription: "Inclui novas integracoes para HTTP e Deep Link nativos no Tauri.",
   syncSection: "Google Sync",
   syncDescription: "O sync usa OAuth Device Flow com escopo `drive.file`.",
   syncConfig:

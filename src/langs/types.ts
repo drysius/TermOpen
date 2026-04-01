@@ -317,6 +317,8 @@ export interface AppDictionary {
     versionLabel: string;
     updatesInfo: string;
     stackSection: string;
+    newPackagesSection: string;
+    newPackagesDescription: string;
     syncSection: string;
     syncDescription: string;
     syncConfig: string;
