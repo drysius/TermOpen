@@ -115,6 +115,9 @@ interface EditorBlock extends BaseBlock {
   mediaBase64: string | null;
   previewError: string | null;
   sizeBytes: number | null;
+  loading: boolean;
+  loadProgress: number;
+  loadError: string | null;
   dirty: boolean;
   saving: boolean;
 }
@@ -464,6 +467,22 @@ async function readSourceFile(sourceId: string, path: string): Promise<string> {
     return api.localRead(path);
   }
   return api.sftpRead(sourceId, path);
+}
+
+async function readSourceTextChunk(sourceId: string, path: string, offset: number) {
+  if (sourceId === "local") {
+    return api.localReadChunk(path, offset);
+  }
+  return api.sftpReadChunk(sourceId, path, offset);
+}
+
+function decodeBase64Chunk(value: string): Uint8Array {
+  const raw = atob(value);
+  const output = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) {
+    output[index] = raw.charCodeAt(index);
+  }
+  return output;
 }
 
 async function writeSourceFile(sourceId: string, path: string, content: string): Promise<void> {
@@ -895,9 +914,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const saveEditorBlock = useCallback(
     async (blockId: string) => {
       const target = blocksRef.current.find((block): block is EditorBlock => block.id === blockId && block.kind === "editor");
-      if (!target || target.view !== "text" || !target.dirty || target.saving) {
+      if (!target || target.view !== "text" || target.loading || !target.dirty || target.saving) {
         if (target && target.view !== "text") {
           toast.warning("Somente arquivos texto podem ser salvos no editor interno.");
+        } else if (target?.loading) {
+          toast.warning("Aguarde o fim do carregamento para salvar.");
         }
         return;
       }
@@ -972,6 +993,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
 
   const openFile = useCallback(
     async (sourceId: string, path: string) => {
+      let streamingEditorId: string | null = null;
       try {
         const meta = detectEditorFileMeta(path);
         if (meta.view === "text" && settings.preferred_editor !== "internal") {
@@ -984,10 +1006,11 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
         let mediaBase64: string | null = null;
         let previewError: string | null = null;
         let sizeBytes: number | null = null;
+        let loading = false;
+        let loadProgress = 100;
+        let loadError: string | null = null;
 
-        if (meta.view === "text") {
-          content = await readSourceFile(sourceId, path);
-        } else if (meta.view === "image" || meta.view === "video") {
+        if (meta.view === "image" || meta.view === "video") {
           const preview = await readSourceBinaryPreview(sourceId, path);
           if (preview.status === "ready") {
             mediaBase64 = preview.base64;
@@ -998,8 +1021,15 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           }
         }
 
+        if (meta.view === "text") {
+          loading = true;
+          loadProgress = 0;
+        }
+
+        const editorId = createId("editor");
+        streamingEditorId = meta.view === "text" ? editorId : null;
         const editorBlock: EditorBlock = {
-          id: createId("editor"),
+          id: editorId,
           kind: "editor",
           title: `Editor - ${baseName(path)}`,
           sourceId,
@@ -1011,6 +1041,9 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           mediaBase64,
           previewError,
           sizeBytes,
+          loading,
+          loadProgress,
+          loadError,
           dirty: false,
           saving: false,
           layout: workspaceDefaultLayout("editor", blocksRef.current.length + 1, workspaceSize.width, workspaceSize.height),
@@ -1018,8 +1051,74 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           maximized: false,
         };
         setBlocks((current) => [...current, editorBlock]);
+
+        if (meta.view !== "text") {
+          return;
+        }
+
+        const decoder = new TextDecoder("utf-8");
+        let offset = 0;
+        let aggregated = "";
+
+        while (true) {
+          const chunk = await readSourceTextChunk(sourceId, path, offset);
+          const bytes = decodeBase64Chunk(chunk.chunk_base64);
+          aggregated += decoder.decode(bytes, { stream: !chunk.eof });
+          offset = chunk.bytes_read;
+          const progress =
+            chunk.total_bytes > 0
+              ? Math.max(0, Math.min(100, Math.round((chunk.bytes_read / chunk.total_bytes) * 100)))
+              : chunk.eof
+                ? 100
+                : 0;
+
+          setBlocks((current) =>
+            current.map((item) =>
+              item.id === editorId && item.kind === "editor"
+                ? {
+                    ...item,
+                    content: aggregated,
+                    loadProgress: progress,
+                  }
+                : item,
+            ),
+          );
+
+          if (chunk.eof) {
+            aggregated += decoder.decode();
+            break;
+          }
+        }
+
+        setBlocks((current) =>
+          current.map((item) =>
+            item.id === editorId && item.kind === "editor"
+              ? {
+                  ...item,
+                  content: aggregated,
+                  loading: false,
+                  loadProgress: 100,
+                  loadError: null,
+                }
+              : item,
+          ),
+        );
       } catch (error) {
-        toast.error(getError(error));
+        const message = getError(error);
+        toast.error(message);
+        if (streamingEditorId) {
+          setBlocks((current) =>
+            current.map((item) =>
+              item.id === streamingEditorId && item.kind === "editor"
+                ? {
+                    ...item,
+                    loading: false,
+                    loadError: message,
+                  }
+                : item,
+            ),
+          );
+        }
       }
     },
     [settings.external_editor_command, settings.preferred_editor, workspaceSize.height, workspaceSize.width],
@@ -4078,7 +4177,7 @@ function LogsBlockView({ entries, onClear }: LogsBlockViewProps) {
 }
 
 function EditorBlockView({ block, onChange, onSave, onOpenExternal }: EditorBlockViewProps) {
-  const canSave = block.view === "text";
+  const canSave = block.view === "text" && !block.loading;
   const previewUrl = block.mimeType && block.mediaBase64 ? toDataUrl(block.mimeType, block.mediaBase64) : null;
 
   return (
@@ -4108,6 +4207,22 @@ function EditorBlockView({ block, onChange, onSave, onOpenExternal }: EditorBloc
           </button>
         </div>
       </div>
+      {block.view === "text" && (block.loading || block.loadError) ? (
+        <div className="border-b border-white/10 px-3 py-2">
+          {block.loading ? (
+            <>
+              <p className="text-[11px] text-cyan-200">Carregando arquivo por streaming... {block.loadProgress}%</p>
+              <div className="mt-1 h-1.5 overflow-hidden rounded bg-white/10">
+                <div
+                  className="h-full bg-cyan-500/80 transition-all"
+                  style={{ width: `${Math.max(2, Math.min(100, block.loadProgress))}%` }}
+                />
+              </div>
+            </>
+          ) : null}
+          {block.loadError ? <p className="text-[11px] text-red-300">{block.loadError}</p> : null}
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1">
         {block.view === "text" ? (
           <Editor
@@ -4121,6 +4236,7 @@ function EditorBlockView({ block, onChange, onSave, onOpenExternal }: EditorBloc
               fontSize: 13,
               smoothScrolling: true,
               automaticLayout: true,
+              readOnly: block.loading,
             }}
           />
         ) : null}

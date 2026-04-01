@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     env, fs,
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Read, Seek, SeekFrom, Write},
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
@@ -337,6 +337,46 @@ impl SshManager {
         }
 
         Ok(Some(bytes))
+    }
+
+    pub fn sftp_read_chunk(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        offset: u64,
+        chunk_size: usize,
+    ) -> Result<(Vec<u8>, u64, bool)> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let target = normalize_remote_path(path);
+        let total = sftp
+            .stat(&target)
+            .ok()
+            .and_then(|stat| stat.size)
+            .unwrap_or(0);
+
+        let mut file = sftp
+            .open(&target)
+            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target.display()))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("Falha ao posicionar leitura remota em {}", target.display()))?;
+
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+        let size = file
+            .read(&mut buffer)
+            .with_context(|| format!("Falha ao ler chunk remoto: {}", target.display()))?;
+        buffer.truncate(size);
+        let bytes_read = offset.saturating_add(size as u64);
+        let eof = size == 0 || bytes_read >= total;
+
+        Ok((buffer, total, eof))
     }
 
     pub fn sftp_write(

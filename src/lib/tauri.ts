@@ -15,6 +15,7 @@ import type {
   SshConnectResult,
   SshSessionInfo,
   SyncState,
+  TextReadChunk,
   VaultStatus,
 } from "@/types/termopen";
 
@@ -87,6 +88,8 @@ export const api = {
 
   sftpList: (sessionId: string, path: string) => invoke<SftpEntry[]>("sftp_list", { sessionId, path }),
   sftpRead: (sessionId: string, path: string) => invoke<string>("sftp_read", { sessionId, path }),
+  sftpReadChunk: (sessionId: string, path: string, offset: number) =>
+    invoke<TextReadChunk>("sftp_read_chunk", { sessionId, path, offset }),
   sftpWrite: (sessionId: string, path: string, content: string) =>
     invoke<void>("sftp_write", { sessionId, path, content }),
   sftpRename: (sessionId: string, fromPath: string, toPath: string) =>
@@ -113,6 +116,8 @@ export const api = {
     }),
   localList: (path?: string | null) => invoke<SftpEntry[]>("local_list", { path }),
   localRead: (path: string) => invoke<string>("local_read", { path }),
+  localReadChunk: (path: string, offset: number) =>
+    invoke<TextReadChunk>("local_read_chunk", { path, offset }),
   localRename: (fromPath: string, toPath: string) => invoke<void>("local_rename", { fromPath, toPath }),
   localDelete: (path: string, isDir: boolean) => invoke<void>("local_delete", { path, isDir }),
   localMkdir: (path: string) => invoke<void>("local_mkdir", { path }),

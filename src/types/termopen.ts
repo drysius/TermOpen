@@ -91,6 +91,13 @@ export type BinaryPreviewResult =
       limit: number;
     };
 
+export interface TextReadChunk {
+  chunk_base64: string;
+  bytes_read: number;
+  total_bytes: number;
+  eof: boolean;
+}
+
 export interface SyncState {
   connected: boolean;
   status: "idle" | "running" | "ok" | "error" | "conflict";

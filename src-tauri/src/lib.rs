@@ -41,6 +41,14 @@ const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/MarcosBrendonDeP
 const DEFAULT_WORKSPACE_WIDTH: f64 = 1440.0;
 const DEFAULT_WORKSPACE_HEIGHT: f64 = 900.0;
 
+#[derive(serde::Serialize)]
+struct TextReadChunkPayload {
+    chunk_base64: String,
+    bytes_read: u64,
+    total_bytes: u64,
+    eof: bool,
+}
+
 fn app_error(error: impl ToString) -> String {
     error.to_string()
 }
@@ -442,6 +450,27 @@ async fn sftp_read(
 }
 
 #[tauri::command]
+async fn sftp_read_chunk(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+    offset: u64,
+) -> Result<TextReadChunkPayload, String> {
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
+    let mut ssh = state.ssh.lock().await;
+    let (chunk, total, eof) = ssh
+        .sftp_read_chunk(&session_id, &path, offset, chunk_size)
+        .map_err(app_error)?;
+    let bytes_read = offset.saturating_add(chunk.len() as u64);
+    Ok(TextReadChunkPayload {
+        chunk_base64: BASE64.encode(chunk),
+        bytes_read,
+        total_bytes: total,
+        eof,
+    })
+}
+
+#[tauri::command]
 async fn sftp_write(
     state: State<'_, AppState>,
     session_id: String,
@@ -678,6 +707,33 @@ async fn local_read(path: String) -> Result<String, String> {
     let target = resolve_local_path(Some(&path))?;
     fs::read_to_string(&target)
         .map_err(|error| format!("Falha ao ler arquivo local {}: {}", target.display(), error))
+}
+
+#[tauri::command]
+async fn local_read_chunk(path: String, offset: u64) -> Result<TextReadChunkPayload, String> {
+    let target = resolve_local_path(Some(&path))?;
+    let mut file = fs::File::open(&target).map_err(|error| {
+        format!(
+            "Falha ao abrir arquivo local {}: {}",
+            target.display(),
+            error
+        )
+    })?;
+    let total = file.metadata().map_err(app_error)?.len();
+    file.seek(SeekFrom::Start(offset)).map_err(app_error)?;
+
+    let mut buffer = vec![0u8; chunk_size_from_kb(DEFAULT_SFTP_CHUNK_SIZE_KB)];
+    let size = file.read(&mut buffer).map_err(app_error)?;
+    buffer.truncate(size);
+    let bytes_read = offset.saturating_add(size as u64);
+    let eof = size == 0 || bytes_read >= total;
+
+    Ok(TextReadChunkPayload {
+        chunk_base64: BASE64.encode(buffer),
+        bytes_read,
+        total_bytes: total,
+        eof,
+    })
 }
 
 #[tauri::command]
@@ -1404,6 +1460,7 @@ pub fn run() {
             known_hosts_ensure_cmd,
             sftp_list,
             sftp_read,
+            sftp_read_chunk,
             sftp_write,
             sftp_rename,
             sftp_delete,
@@ -1413,6 +1470,7 @@ pub fn run() {
             sftp_read_binary_preview,
             local_list,
             local_read,
+            local_read_chunk,
             local_write,
             local_rename,
             local_delete,
