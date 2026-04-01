@@ -20,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
 import { WorkspaceBlockController, type WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
@@ -3327,6 +3328,7 @@ function SftpBlockView({
   const [containerWidth, setContainerWidth] = useState(1200);
   const [contextMenu, setContextMenu] = useState<SftpContextMenuState | null>(null);
   const [transferMenuOpen, setTransferMenuOpen] = useState(false);
+  const [transferMenuRect, setTransferMenuRect] = useState<{ left: number; top: number } | null>(null);
   const sortedEntries = useMemo(
     () => sortSftpEntries(block.entries, block.sortKey, block.sortDirection),
     [block.entries, block.sortDirection, block.sortKey],
@@ -3408,6 +3410,34 @@ function SftpBlockView({
     return () => {
       window.removeEventListener("mousedown", handlePointerDown);
       window.removeEventListener("keydown", handleEscape);
+    };
+  }, [transferMenuOpen]);
+
+  useEffect(() => {
+    if (!transferMenuOpen) {
+      setTransferMenuRect(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const anchor = transferToggleRef.current;
+      if (!anchor) {
+        return;
+      }
+      const rect = anchor.getBoundingClientRect();
+      const width = 384;
+      const margin = 8;
+      const left = Math.max(margin, Math.min(rect.right - width, window.innerWidth - width - margin));
+      const top = Math.min(rect.bottom + 8, window.innerHeight - 220);
+      setTransferMenuRect({ left, top });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
     };
   }, [transferMenuOpen]);
 
@@ -3578,10 +3608,14 @@ function SftpBlockView({
               </span>
             ) : null}
           </button>
-          {transferMenuOpen ? (
+        </div>
+      </div>
+      {transferMenuOpen && transferMenuRect
+        ? createPortal(
             <div
               ref={transferMenuRef}
-              className="absolute right-0 top-9 z-30 w-96 max-w-[78vw] rounded border border-white/15 bg-zinc-950/95 p-2 shadow-2xl shadow-black/40 backdrop-blur"
+              className="fixed z-[12000] w-96 max-w-[78vw] rounded border border-white/15 bg-zinc-950/95 p-2 shadow-2xl shadow-black/40 backdrop-blur"
+              style={{ left: transferMenuRect.left, top: transferMenuRect.top }}
             >
               <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
                 Transferencias do bloco
@@ -3639,10 +3673,10 @@ function SftpBlockView({
                   })}
                 </div>
               )}
-            </div>
-          ) : null}
-        </div>
-      </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       <div className={cn("min-h-0 flex-1 overflow-auto", !isConnected ? "opacity-40" : undefined)}>
         <table className="w-full select-none border-collapse text-xs">
@@ -3860,35 +3894,38 @@ function SftpBlockView({
           </div>
         </div>
       ) : null}
-      {contextMenu ? (
-        <div
-          className="fixed inset-0 z-50"
-          onMouseDown={() => setContextMenu(null)}
-          onContextMenu={(event) => event.preventDefault()}
-        >
-          <div
-            ref={contextMenuRef}
-            className="absolute z-50 w-56 rounded border border-white/15 bg-zinc-950/95 p-1 shadow-2xl shadow-black/40 backdrop-blur"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            {menuItems.map((item) => (
-              <button
-                key={item.action}
-                type="button"
-                className={cn(
-                  "flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-zinc-100 transition",
-                  item.disabled ? "cursor-not-allowed opacity-40" : "hover:bg-zinc-800",
-                )}
-                disabled={item.disabled}
-                onClick={() => runContextAction(item.action)}
+      {contextMenu
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[12000]"
+              onMouseDown={() => setContextMenu(null)}
+              onContextMenu={(event) => event.preventDefault()}
+            >
+              <div
+                ref={contextMenuRef}
+                className="absolute z-[12001] w-56 rounded border border-white/15 bg-zinc-950/95 p-1 shadow-2xl shadow-black/40 backdrop-blur"
+                style={{ left: contextMenu.x, top: contextMenu.y }}
+                onMouseDown={(event) => event.stopPropagation()}
               >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
+                {menuItems.map((item) => (
+                  <button
+                    key={item.action}
+                    type="button"
+                    className={cn(
+                      "flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-zinc-100 transition",
+                      item.disabled ? "cursor-not-allowed opacity-40" : "hover:bg-zinc-800",
+                    )}
+                    disabled={item.disabled}
+                    onClick={() => runContextAction(item.action)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
