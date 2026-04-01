@@ -237,7 +237,7 @@ function App() {
   if (booting) {
     return (
       <main className={shellClass}>
-        <Toaster richColors position="bottom-right" />
+        <Toaster theme="dark" richColors position="bottom-right" />
         <AppHeader
           tabs={[]}
           activeTabId={null}
@@ -267,7 +267,7 @@ function App() {
   if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
     return (
       <main className={shellClass}>
-        <Toaster richColors position="bottom-right" />
+        <Toaster theme="dark" richColors position="bottom-right" />
         <AppHeader
           tabs={tabs}
           activeTabId={activeTabId}
@@ -295,7 +295,7 @@ function App() {
 
   return (
     <main className={shellClass}>
-      <Toaster richColors position="bottom-right" />
+      <Toaster theme="dark" richColors position="bottom-right" />
 
       <AppHeader
         tabs={tabs}
