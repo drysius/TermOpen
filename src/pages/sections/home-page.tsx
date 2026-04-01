@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { supportsProtocol } from "@/functions/common";
+import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
 
 function protocolsLabel(protocols: string[]): string {
@@ -27,6 +28,7 @@ function protocolsLabel(protocols: string[]): string {
 }
 
 export function HomePage() {
+  const t = useT();
   const connections = useAppStore((state) => state.connections);
   const sessions = useAppStore((state) => state.sessions);
   const syncState = useAppStore((state) => state.syncState);
@@ -71,12 +73,12 @@ export function HomePage() {
           <CardHeader className="pb-2">
             <CardTitle className="inline-flex items-center gap-2 text-sm">
               <Server className="h-4 w-4 text-cyan-300" />
-              Hosts
+              {t.home.stats.hosts}
             </CardTitle>
           </CardHeader>
           <CardContent className="pt-0">
             <p className="text-xl font-semibold text-zinc-100">{connections.length}</p>
-            <p className="text-xs text-zinc-500">Profiles saved in vault.</p>
+            <p className="text-xs text-zinc-500">{t.home.stats.hostsSub}</p>
           </CardContent>
         </Card>
 
@@ -84,12 +86,12 @@ export function HomePage() {
           <CardHeader className="pb-2">
             <CardTitle className="inline-flex items-center gap-2 text-sm">
               <Workflow className="h-4 w-4 text-purple-300" />
-              Active Sessions
+              {t.home.stats.sessions}
             </CardTitle>
           </CardHeader>
           <CardContent className="pt-0">
             <p className="text-xl font-semibold text-zinc-100">{sessions.length}</p>
-            <p className="text-xs text-zinc-500">Connected terminals right now.</p>
+            <p className="text-xs text-zinc-500">{t.home.stats.sessionsSub}</p>
           </CardContent>
         </Card>
 
@@ -97,12 +99,12 @@ export function HomePage() {
           <CardHeader className="pb-2">
             <CardTitle className="inline-flex items-center gap-2 text-sm">
               <Cloud className="h-4 w-4 text-emerald-300" />
-              Sync
+              {t.home.stats.sync}
             </CardTitle>
           </CardHeader>
           <CardContent className="pt-0">
             <p className="text-sm font-semibold text-zinc-100">
-              {syncState.connected ? "Connected" : "Disconnected"}
+              {syncState.connected ? t.home.stats.syncConnected : t.home.stats.syncDisconnected}
             </p>
             <p className="truncate text-xs text-zinc-500">{syncState.message}</p>
           </CardContent>
@@ -112,35 +114,35 @@ export function HomePage() {
           <CardHeader className="pb-2">
             <CardTitle className="inline-flex items-center gap-2 text-sm">
               <ShieldCheck className="h-4 w-4 text-amber-300" />
-              Vault
+              {t.home.stats.vault}
             </CardTitle>
           </CardHeader>
           <CardContent className="pt-0">
             <p className="text-sm font-semibold text-zinc-100">
-              {vaultStatus?.initialized ? "Initialized" : "Pending"}
+              {vaultStatus?.initialized ? t.home.stats.vaultInitialized : t.home.stats.vaultPending}
             </p>
-            <p className="text-xs text-zinc-500">{vaultStatus?.locked ? "Locked" : "Unlocked"}</p>
+            <p className="text-xs text-zinc-500">{vaultStatus?.locked ? t.home.stats.vaultLocked : t.home.stats.vaultUnlocked}</p>
           </CardContent>
         </Card>
       </section>
 
       <section>
         <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-zinc-100">Hosts</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">{t.home.hosts.title}</h2>
           <Button size="sm" onClick={() => openHostDrawer(undefined, "ssh")}>
-            <Plus className="mr-1 h-4 w-4" /> Novo Host
+            <Plus className="mr-1 h-4 w-4" /> {t.home.hosts.newHost}
           </Button>
         </div>
 
         {hostProfiles.length === 0 ? (
           <Card className="rounded-md border-dashed border-white/15 bg-zinc-950/40">
             <CardContent className="py-6">
-              <p className="text-sm font-medium text-zinc-200">Nenhum host SSH cadastrado</p>
+              <p className="text-sm font-medium text-zinc-200">{t.home.hosts.emptyTitle}</p>
               <p className="mt-1 text-xs text-zinc-500">
-                Crie um host para abrir terminais e comecar seu workspace.
+                {t.home.hosts.emptyDescription}
               </p>
               <Button size="sm" className="mt-3" onClick={() => openHostDrawer(undefined, "ssh")}>
-                <Plus className="mr-1 h-4 w-4" /> Adicionar Host SSH
+                <Plus className="mr-1 h-4 w-4" /> {t.home.hosts.addButton}
               </Button>
             </CardContent>
           </Card>
@@ -190,7 +192,7 @@ export function HomePage() {
                                 setMenuOpenId(null);
                               }}
                             >
-                              Editar
+                              {t.home.hosts.edit}
                             </button>
                             <button
                               type="button"
@@ -201,7 +203,7 @@ export function HomePage() {
                                 setMenuOpenId(null);
                               }}
                             >
-                              Remover
+                              {t.home.hosts.remove}
                             </button>
                           </div>
                         ) : null}
@@ -212,7 +214,7 @@ export function HomePage() {
                     </p>
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <p className="text-xs text-zinc-500">Clique para abrir terminal SSH.</p>
+                    <p className="text-xs text-zinc-500">{t.home.hosts.clickToOpen}</p>
                   </CardContent>
                 </Card>
               );
@@ -223,21 +225,21 @@ export function HomePage() {
 
       <section className="mt-4">
         <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-zinc-100">SFTP</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">{t.home.sftp.title}</h2>
           <Button size="sm" onClick={() => openHostDrawer(undefined, "sftp")}>
-            <Plus className="mr-1 h-4 w-4" /> Novo SFTP
+            <Plus className="mr-1 h-4 w-4" /> {t.home.sftp.newSftp}
           </Button>
         </div>
 
         {sftpProfiles.length === 0 ? (
           <Card className="rounded-md border-dashed border-white/15 bg-zinc-950/40">
             <CardContent className="py-6">
-              <p className="text-sm font-medium text-zinc-200">Nenhum host SFTP cadastrado</p>
+              <p className="text-sm font-medium text-zinc-200">{t.home.sftp.emptyTitle}</p>
               <p className="mt-1 text-xs text-zinc-500">
-                Adicione um perfil SFTP para navegar e mover arquivos remotos.
+                {t.home.sftp.emptyDescription}
               </p>
               <Button size="sm" className="mt-3" onClick={() => openHostDrawer(undefined, "sftp")}>
-                <Plus className="mr-1 h-4 w-4" /> Adicionar Host SFTP
+                <Plus className="mr-1 h-4 w-4" /> {t.home.sftp.addButton}
               </Button>
             </CardContent>
           </Card>
@@ -288,7 +290,7 @@ export function HomePage() {
                                 setMenuOpenId(null);
                               }}
                             >
-                              Editar
+                              {t.home.sftp.edit}
                             </button>
                             <button
                               type="button"
@@ -299,7 +301,7 @@ export function HomePage() {
                                 setMenuOpenId(null);
                               }}
                             >
-                              Remover
+                              {t.home.sftp.remove}
                             </button>
                           </div>
                         ) : null}
@@ -310,7 +312,7 @@ export function HomePage() {
                     </p>
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <p className="text-xs text-zinc-500">Clique para abrir workspace SFTP.</p>
+                    <p className="text-xs text-zinc-500">{t.home.sftp.clickToOpen}</p>
                   </CardContent>
                 </Card>
               );
@@ -324,13 +326,13 @@ export function HomePage() {
           <CardHeader className="pb-2">
             <CardTitle className="inline-flex items-center gap-2 text-sm">
               <Server className="h-4 w-4 text-purple-300" />
-              Sessions
+              {t.home.sessionsCard.title}
             </CardTitle>
           </CardHeader>
           <CardContent className="pt-0 text-xs text-zinc-500">
             {sessions.length > 0
-              ? `${sessions.length} active session(s). Open more blocks to work in parallel.`
-              : "No active sessions. Use SSH/SFTP cards to start a workspace."}
+              ? t.home.sessionsCard.active.replace("{count}", String(sessions.length))
+              : t.home.sessionsCard.empty}
           </CardContent>
         </Card>
       </section>

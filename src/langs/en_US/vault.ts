@@ -1,0 +1,57 @@
+import type { AppDictionary } from "../types";
+
+export const vault: AppDictionary["vault"] = {
+  init: {
+    passwordPlaceholder: "Master password",
+    confirmPlaceholder: "Confirm password",
+    submit: "Initialize",
+    mismatch: "Password confirmation does not match.",
+  },
+  unlock: {
+    passwordPlaceholder: "Master password",
+    submit: "Unlock",
+    forgotPassword: "Forgot password?",
+  },
+  forgot: {
+    title: "Forgot password",
+    description: "Without the master password, recovery is not possible.",
+    warning: "Data cannot be recovered without the master password.",
+    explanation:
+      "All TermOpen data is encrypted locally. If you lost your password, the only option is to delete current data and start fresh.",
+    confirmLabel: "Type 'DELETE DATA' to continue",
+    confirmPlaceholder: 'Type "DELETE DATA"',
+    confirmPhrase: "DELETE DATA",
+    confirmError: 'Type exactly "DELETE DATA" to continue.',
+    deleting: "Deleting...",
+    deleteButton: "Delete data",
+    deleteSuccess: "Local data removed. You can start fresh.",
+  },
+  recovery: {
+    loginButton: "Login to recover",
+    title: "Recover Login",
+    description: "Select the server and recover your files from the cloud.",
+    serverLabel: "Server",
+    selectServer: "Select a server to continue.",
+    invalidServer: "Invalid server.",
+    enterPassword: "Enter the master password.",
+    connecting: "Connecting...",
+    loginGoogle: "Google Login",
+    validating: "Validating...",
+    restoreButton: "Restore",
+    downloading: "Downloading...",
+    backupFound: "Backup found. Enter the master password to validate and download files.",
+    downloadingInfo: "Downloading files from cloud...",
+    downloadingWait: "This may take a few seconds.",
+    restoreSuccess: "Backup restored successfully.",
+    limitReached: "5 attempts limit reached. Recovery cancelled.",
+    attempts: "Attempts: {count}/5",
+  },
+  toasts: {
+    initialized: "Vault initialized.",
+    unlocked: "Vault unlocked.",
+    lockedInactivity: "Application locked due to inactivity.",
+    syncStartup: "Syncing on startup...",
+    syncConflicts: "Sync conflicts detected on startup.",
+    conflictsResolved: "Conflicts resolved successfully.",
+  },
+};
