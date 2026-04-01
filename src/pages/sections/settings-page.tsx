@@ -676,7 +676,7 @@ export function SettingsPage() {
 
                 <div className="mb-3 flex items-center gap-2">
                   <Input
-                    placeholder="Buscar servidor..."
+                    placeholder={t.settings.drive.serverSearch}
                     className="h-9 flex-1 text-xs"
                     value={serverFilter}
                     onChange={(e) => { setServerFilter(e.target.value); setServerPage(0); }}
@@ -862,9 +862,9 @@ export function SettingsPage() {
         <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
           <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.masterPassword}</h3>
           <div className="grid gap-2 py-1 md:grid-cols-3">
-            <Input type="password" placeholder="Senha atual" {...passwordForm.register("oldPassword")} />
-            <Input type="password" placeholder="Nova senha" {...passwordForm.register("newPassword")} />
-            <Input type="password" placeholder="Confirmar" {...passwordForm.register("confirmPassword")} />
+            <Input type="password" placeholder={t.settings.password.currentPlaceholder} {...passwordForm.register("oldPassword")} />
+            <Input type="password" placeholder={t.settings.password.newPlaceholder} {...passwordForm.register("newPassword")} />
+            <Input type="password" placeholder={t.settings.password.confirmPlaceholder} {...passwordForm.register("confirmPassword")} />
             <div className="md:col-span-3 md:flex md:justify-end">
               <Button
                 type="button"
@@ -878,7 +878,7 @@ export function SettingsPage() {
                   )()
                 }
               >
-                <Lock className="mr-2 h-4 w-4" /> Atualizar Senha
+                <Lock className="mr-2 h-4 w-4" /> {t.settings.password.updateButton}
               </Button>
             </div>
           </div>
@@ -926,14 +926,14 @@ export function SettingsPage() {
       >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <Input
-            placeholder="Server label"
+            placeholder={t.settings.localServer.editTitle}
             value={serverDraft.label}
             onChange={(event) =>
               setServerDraft((current) => ({ ...current, label: event.target.value }))
             }
           />
           <Input
-            placeholder="https://my-worker.example.com"
+            placeholder="https://worker.example.com"
             value={serverDraft.address}
             onChange={(event) =>
               setServerDraft((current) => ({ ...current, address: event.target.value }))
@@ -941,7 +941,7 @@ export function SettingsPage() {
           />
           <Input
             className="md:col-span-2"
-            placeholder="Author URL (optional)"
+            placeholder={t.settings.localServer.addServer}
             value={serverDraft.author}
             onChange={(event) =>
               setServerDraft((current) => ({ ...current, author: event.target.value }))
