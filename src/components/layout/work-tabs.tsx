@@ -18,7 +18,7 @@ function trimTitle(title: string, max: number): string {
   if (title.length <= max) {
     return title;
   }
-  return `${title.slice(0, Math.max(1, max - 1)).trim()}…`;
+  return `${title.slice(0, Math.max(1, max - 1)).trim()}...`;
 }
 
 function renderTabTitle(tab: WorkTab, mode: TabLabelMode, index: number): string {
@@ -84,7 +84,7 @@ export function WorkTabs({ tabs, activeId, onSelect, onClose, onCreateWorkspace 
           data-tauri-drag-region="false"
           className={`group flex h-full items-center border-r border-white/10 text-sm ${
             activeId === tab.id
-              ? "border-b border-b-purple-400/70 bg-zinc-900 text-zinc-100"
+              ? "border-b border-b-cyan-400/70 bg-zinc-900 text-zinc-100"
               : "bg-zinc-950 text-zinc-400"
           }`}
           style={{
@@ -124,3 +124,4 @@ export function WorkTabs({ tabs, activeId, onSelect, onClose, onCreateWorkspace 
     </div>
   );
 }
+

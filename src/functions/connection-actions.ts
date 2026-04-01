@@ -259,14 +259,14 @@ export function createConnectionActions(
       }
     },
 
-    runSync: async (action) => {
+    runSync: async (action, serverAddress) => {
       try {
         set((state) => ({
           syncState: { ...state.syncState, status: "running", message: "Sincronizando..." },
         }));
         const nextState =
           action === "login"
-            ? await api.syncGoogleLogin()
+            ? await api.syncGoogleLogin(serverAddress ?? null)
             : action === "push"
               ? await api.syncPush()
               : await api.syncPull();

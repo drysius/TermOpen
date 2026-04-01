@@ -15,6 +15,15 @@ export interface AppDictionary {
       statusDisconnected: string;
       login: string;
       syncNow: string;
+      loginServerTitle: string;
+      loginServerDescription: string;
+      loginServerLoading: string;
+      loginServerEmpty: string;
+      loginServerRecommended: string;
+      loginServerOffline: string;
+      loginServerUnknownMs: string;
+      loginServerAction: string;
+      loginServerRefresh: string;
       hello: string;
       guest: string;
       syncing: string;

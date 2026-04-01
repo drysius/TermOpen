@@ -3,12 +3,14 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { Toaster, toast } from "sonner";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
 import { HostFormDrawer } from "@/components/drawers/host-form-drawer";
 import { KeychainFormDrawer } from "@/components/drawers/keychain-form-drawer";
 import { AppHeader } from "@/components/layout/app-header";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
+import { getError } from "@/functions/common";
 import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { AboutPage } from "@/pages/sections/about-page";
@@ -21,6 +23,7 @@ import { SftpWorkspaceTabPage } from "@/pages/tabs/sftp-workspace-tab-page";
 import { VaultGatePage } from "@/pages/vault-gate-page";
 import { useAppStore } from "@/store/app-store";
 import type {
+  AuthServer,
   ConnectionProfile,
   SyncConflictDecision,
   SyncKeepSide,
@@ -81,6 +84,8 @@ interface ParsedConnectionDeepLink {
   username: string;
   remotePath: string;
 }
+
+type PingMap = Record<string, number | null>;
 
 function normalizeDeepLinkInput(raw: string): string {
   return raw
@@ -160,6 +165,33 @@ function parseConnectionDeepLink(raw: string): ParsedConnectionDeepLink | null {
   return null;
 }
 
+function pickRecommendedAuthServer(servers: AuthServer[], pings: PingMap): string | null {
+  if (servers.length === 0) {
+    return null;
+  }
+
+  const onlineOfficials = servers
+    .filter((server) => server.official && typeof pings[server.id] === "number")
+    .sort((left, right) => (pings[left.id] ?? Number.POSITIVE_INFINITY) - (pings[right.id] ?? Number.POSITIVE_INFINITY));
+  if (onlineOfficials.length > 0) {
+    return onlineOfficials[0].id;
+  }
+
+  const officials = servers.filter((server) => server.official);
+  if (officials.length > 0) {
+    return officials[0].id;
+  }
+
+  const online = servers
+    .filter((server) => typeof pings[server.id] === "number")
+    .sort((left, right) => (pings[left.id] ?? Number.POSITIVE_INFINITY) - (pings[right.id] ?? Number.POSITIVE_INFINITY));
+  if (online.length > 0) {
+    return online[0].id;
+  }
+
+  return servers[0].id;
+}
+
 function App() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -207,6 +239,12 @@ function App() {
   const [pendingSettingsNavigation, setPendingSettingsNavigation] = useState<SidebarSection | null>(null);
   const [leavingSettingsBusy, setLeavingSettingsBusy] = useState(false);
   const [pendingDeepLinks, setPendingDeepLinks] = useState<string[]>([]);
+  const [loginServerModalOpen, setLoginServerModalOpen] = useState(false);
+  const [loginServerLoading, setLoginServerLoading] = useState(false);
+  const [loginServerBusy, setLoginServerBusy] = useState(false);
+  const [loginServers, setLoginServers] = useState<AuthServer[]>([]);
+  const [loginServerPings, setLoginServerPings] = useState<PingMap>({});
+  const [selectedLoginServerId, setSelectedLoginServerId] = useState<string | null>(null);
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId]);
   const pendingCloseTab = useMemo(
     () => tabs.find((tab) => tab.id === pendingCloseTabId) ?? null,
@@ -224,6 +262,27 @@ function App() {
         to: formatSettingValue(settingsUnsavedDraft[key]),
       }));
   }, [settings, settingsUnsavedDraft]);
+  const recommendedLoginServerId = useMemo(
+    () => pickRecommendedAuthServer(loginServers, loginServerPings),
+    [loginServerPings, loginServers],
+  );
+  const loginServersSorted = useMemo(
+    () =>
+      [...loginServers].sort((left, right) => {
+        const leftPing = loginServerPings[left.id];
+        const rightPing = loginServerPings[right.id];
+        const leftRank = typeof leftPing === "number" ? 0 : leftPing === null ? 2 : 1;
+        const rightRank = typeof rightPing === "number" ? 0 : rightPing === null ? 2 : 1;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        if (leftRank === 0 && rightRank === 0) {
+          return (leftPing ?? Number.POSITIVE_INFINITY) - (rightPing ?? Number.POSITIVE_INFINITY);
+        }
+        return left.label.localeCompare(right.label);
+      }),
+    [loginServerPings, loginServers],
+  );
   const currentSection = activeTabId ? "home" : sectionFromPath(location.pathname);
   const shellClass = isWindowMaximized
     ? "flex h-full w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100"
@@ -244,7 +303,89 @@ function App() {
     setLoggedUser(user);
   }
 
+  async function loadLoginServers() {
+    setLoginServerLoading(true);
+    setLoginServerPings({});
+    try {
+      const servers = await api.authServersFetchRemote().catch(() => api.authServersList());
+      setLoginServers(servers);
+      if (servers.length === 0) {
+        setSelectedLoginServerId(null);
+        return;
+      }
+
+      const pingEntries = await Promise.all(
+        servers.map(async (server) => {
+          const startedAt = performance.now();
+          try {
+            const response = await tauriFetch(server.address, { method: "GET" });
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            return [server.id, Math.round(performance.now() - startedAt)] as const;
+          } catch {
+            return [server.id, null] as const;
+          }
+        }),
+      );
+      const nextPings: PingMap = {};
+      pingEntries.forEach(([id, value]) => {
+        nextPings[id] = value;
+      });
+      setLoginServerPings(nextPings);
+      setSelectedLoginServerId((current) => {
+        if (current && servers.some((server) => server.id === current)) {
+          return current;
+        }
+        return pickRecommendedAuthServer(servers, nextPings);
+      });
+    } catch (error) {
+      setLoginServers([]);
+      setSelectedLoginServerId(null);
+      toast.error(getError(error));
+    } finally {
+      setLoginServerLoading(false);
+    }
+  }
+
+  async function openLoginServerModal() {
+    if (syncState.status === "running" || headerSyncBusy) {
+      return;
+    }
+    setLoginServerModalOpen(true);
+    await loadLoginServers();
+  }
+
+  async function handleLoginWithSelectedServer() {
+    if (loginServerBusy || headerSyncBusy) {
+      return;
+    }
+    const selected =
+      loginServers.find((server) => server.id === selectedLoginServerId) ??
+      loginServers.find((server) => server.id === recommendedLoginServerId) ??
+      loginServers[0];
+    if (!selected) {
+      return;
+    }
+
+    setLoginServerBusy(true);
+    setHeaderSyncBusy(true);
+    try {
+      await runSync("login", selected.address);
+      await refreshLoggedUser();
+      setLoginServerModalOpen(false);
+    } finally {
+      setHeaderSyncBusy(false);
+      setLoginServerBusy(false);
+    }
+  }
+
   async function handleHeaderSync(action: "login" | "push") {
+    if (action === "login") {
+      await openLoginServerModal();
+      return;
+    }
+
     if (syncState.status === "running" || headerSyncBusy) {
       return;
     }
@@ -730,6 +871,90 @@ function App() {
 
       <HostFormDrawer />
       <KeychainFormDrawer />
+      <Dialog
+        open={loginServerModalOpen}
+        title={t.app.header.loginServerTitle}
+        description={t.app.header.loginServerDescription}
+        onClose={() => {
+          if (loginServerBusy) {
+            return;
+          }
+          setLoginServerModalOpen(false);
+        }}
+        footer={
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-white/20 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
+              onClick={() => void loadLoginServers()}
+              disabled={loginServerBusy || loginServerLoading}
+            >
+              {t.app.header.loginServerRefresh}
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-white/20 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
+                onClick={() => setLoginServerModalOpen(false)}
+                disabled={loginServerBusy}
+              >
+                {t.common.cancel}
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-cyan-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
+                onClick={() => void handleLoginWithSelectedServer()}
+                disabled={loginServerBusy || loginServerLoading || !selectedLoginServerId}
+              >
+                {loginServerBusy ? t.app.header.syncing : t.app.header.loginServerAction}
+              </button>
+            </div>
+          </div>
+        }
+      >
+        {loginServerLoading ? (
+          <p className="text-sm text-zinc-300">{t.app.header.loginServerLoading}</p>
+        ) : loginServersSorted.length === 0 ? (
+          <p className="text-sm text-zinc-400">{t.app.header.loginServerEmpty}</p>
+        ) : (
+          <div className="space-y-2">
+            {loginServersSorted.map((server) => {
+              const ping = loginServerPings[server.id];
+              const selected = selectedLoginServerId === server.id;
+              const recommended = recommendedLoginServerId === server.id;
+              return (
+                <button
+                  key={server.id}
+                  type="button"
+                  className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                    selected
+                      ? "border-cyan-400/70 bg-cyan-500/15 text-cyan-100"
+                      : "border-white/10 bg-zinc-900/50 text-zinc-200 hover:border-cyan-400/50"
+                  }`}
+                  onClick={() => setSelectedLoginServerId(server.id)}
+                >
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm font-medium">{server.label}</p>
+                    {recommended ? (
+                      <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">
+                        {t.app.header.loginServerRecommended}
+                      </span>
+                    ) : null}
+                    <span className="ml-auto text-xs font-mono text-zinc-400">
+                      {typeof ping === "number"
+                        ? `${ping}ms`
+                        : ping === null
+                          ? t.app.header.loginServerOffline
+                          : t.app.header.loginServerUnknownMs}
+                    </span>
+                  </div>
+                  <p className="mt-1 truncate text-xs text-zinc-500">{server.address}</p>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </Dialog>
       <Dialog
         open={startupConflicts.length > 0}
         title="Conflitos de Sincronizacao"

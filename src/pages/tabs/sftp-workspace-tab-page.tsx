@@ -7,7 +7,6 @@ import "@xterm/xterm/css/xterm.css";
 import {
   ArrowDownAZ,
   ArrowUpAZ,
-  Columns2,
   FileText,
   Folder,
   Grip,
@@ -559,6 +558,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   const [createBlockModalOpen, setCreateBlockModalOpen] = useState(false);
   const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "editor" | "logs">("terminal");
   const [createSourceDraft, setCreateSourceDraft] = useState("local");
+  const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
+  const [snapPreview, setSnapPreview] = useState<WorkspaceBlockLayout | null>(null);
   const connectRetryTimersRef = useRef<Record<string, { retryTimer: number; countdownTimer: number }>>({});
 
   const clearBlockRetryTimers = useCallback((blockId: string) => {
@@ -860,6 +861,29 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
       }),
     );
   }, [workspaceSize]);
+
+  const onBlockDragStart = useCallback((id: string) => {
+    setDraggingBlockId(id);
+  }, []);
+
+  const onBlockDragPreview = useCallback(
+    (id: string, nextLayout: WorkspaceBlockLayout) => {
+      const snapped = snapLayoutToWorkspace(nextLayout, workspaceSize);
+      const changed =
+        Math.round(snapped.x) !== Math.round(nextLayout.x) ||
+        Math.round(snapped.y) !== Math.round(nextLayout.y) ||
+        Math.round(snapped.width) !== Math.round(nextLayout.width) ||
+        Math.round(snapped.height) !== Math.round(nextLayout.height);
+      setDraggingBlockId(id);
+      setSnapPreview(changed ? snapped : null);
+    },
+    [workspaceSize],
+  );
+
+  const onBlockDragEnd = useCallback(() => {
+    setDraggingBlockId(null);
+    setSnapPreview(null);
+  }, []);
 
   const refreshSftpBlock = useCallback(
     async (blockId: string, pathOverride?: string, sourceOverride?: string) => {
@@ -2602,13 +2626,21 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
   );
 
   const activeTransfers = transfers.filter((item) => item.status === "running").length;
+  const hasLogsBlock = useMemo(() => blocks.some((block) => block.kind === "logs"), [blocks]);
+  const draggingBlockZIndex = useMemo(() => {
+    if (!draggingBlockId) {
+      return 1;
+    }
+    const block = blocks.find((item) => item.id === draggingBlockId);
+    return Math.max(1, (block?.zIndex ?? 2) - 1);
+  }, [blocks, draggingBlockId]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-10 items-center gap-1 border-b border-white/10 px-2">
         <button
           type="button"
-          className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 transition hover:border-purple-400/60 hover:bg-zinc-900"
+          className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 transition hover:border-cyan-400/60 hover:bg-zinc-900"
           onClick={() => {
             setCreateBlockKind("terminal");
             setCreateSourceDraft("local");
@@ -2618,12 +2650,14 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           <Plus className="h-4 w-4" />
         </button>
 
-        <div className="flex h-7 items-center gap-1 rounded border border-purple-400/60 bg-purple-600/20 px-2 text-xs text-purple-200">
-          <Columns2 className="h-3.5 w-3.5" /> Livre
-        </div>
         <button
           type="button"
-          className="flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-zinc-900"
+          className={cn(
+            "flex h-7 items-center gap-1 rounded border px-2 text-xs transition",
+            hasLogsBlock
+              ? "border-cyan-400/70 bg-cyan-500/15 text-cyan-100 shadow-[0_0_14px_rgba(34,211,238,0.35)]"
+              : "border-white/10 text-zinc-300 hover:border-cyan-400/50 hover:bg-zinc-900",
+          )}
           onClick={() => addLogsBlock()}
         >
           <FileText className="h-3.5 w-3.5" /> Logs
@@ -2631,7 +2665,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
 
         <div className="ml-auto flex items-center gap-2 text-xs text-zinc-300">
           {activeTransfers > 0 ? (
-            <div className="flex items-center gap-2 rounded border border-purple-400/40 bg-purple-600/10 px-2 py-1 text-purple-200">
+            <div className="flex items-center gap-2 rounded border border-cyan-400/40 bg-cyan-500/10 px-2 py-1 text-cyan-200">
               <MonitorUp className="h-3.5 w-3.5 animate-pulse" />
               <span>{activeTransfers} transferencia(s)</span>
             </div>
@@ -2680,6 +2714,19 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
           </div>
         ) : null}
 
+        {snapPreview ? (
+          <div
+            className="pointer-events-none absolute rounded-md border border-cyan-400/70 bg-cyan-500/12 shadow-[0_0_24px_rgba(34,211,238,0.35)]"
+            style={{
+              left: snapPreview.x,
+              top: snapPreview.y,
+              width: snapPreview.width,
+              height: snapPreview.height,
+              zIndex: draggingBlockZIndex,
+            }}
+          />
+        ) : null}
+
         {renderedBlocks.map(({ block, layout, interactive }) => (
           <WorkspaceBlockController
             key={block.id}
@@ -2689,6 +2736,9 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
             zIndex={block.maximized ? 9999 : block.zIndex}
             interactive={interactive}
             onFocus={focusBlock}
+            onDragStart={onBlockDragStart}
+            onDragPreview={onBlockDragPreview}
+            onDragEnd={onBlockDragEnd}
             onLayoutChange={onLayoutChange}
             minWidth={block.kind === "terminal" ? 420 : block.kind === "logs" ? 460 : 360}
             minHeight={block.kind === "terminal" ? 260 : block.kind === "logs" ? 220 : 240}
@@ -2970,7 +3020,7 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
             </button>
             <button
               type="button"
-              className="rounded bg-purple-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-600"
+              className="rounded bg-cyan-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-600"
               onClick={() => void createBlock()}
             >
               Criar Bloco
@@ -2985,8 +3035,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               className={cn(
                 "rounded border p-2 text-xs transition",
                 createBlockKind === "terminal"
-                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
               )}
               onClick={() => setCreateBlockKind("terminal")}
             >
@@ -2998,8 +3048,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               className={cn(
                 "rounded border p-2 text-xs transition",
                 createBlockKind === "sftp"
-                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
               )}
               onClick={() => setCreateBlockKind("sftp")}
             >
@@ -3011,8 +3061,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               className={cn(
                 "rounded border p-2 text-xs transition",
                 createBlockKind === "editor"
-                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
               )}
               onClick={() => setCreateBlockKind("editor")}
             >
@@ -3024,8 +3074,8 @@ export function SftpWorkspaceTabPage({ tabId, initialBlock, initialSourceId }: S
               className={cn(
                 "rounded border p-2 text-xs transition",
                 createBlockKind === "logs"
-                  ? "border-purple-400/60 bg-purple-600/20 text-purple-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-purple-400/40",
+                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
+                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
               )}
               onClick={() => setCreateBlockKind("logs")}
             >
@@ -3290,7 +3340,7 @@ function TerminalBlockView({
     <div className="h-full min-h-0 overflow-hidden bg-zinc-950 p-1.5">
       <div className="flex h-full min-h-0 flex-col overflow-hidden rounded border border-white/10 bg-zinc-950">
         <div className="flex h-9 items-center gap-2 border-b border-white/10 px-2">
-          <TerminalSquare className="h-4 w-4 text-purple-300" />
+          <TerminalSquare className="h-4 w-4 text-cyan-300" />
           <select
             className="h-7 min-w-[220px] rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
             value={sessionId ?? ""}
@@ -3716,7 +3766,7 @@ function SftpBlockView({
 
         <div className="flex min-w-0 items-center gap-1">
           <input
-            className="h-8 min-w-0 w-full rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-purple-400/70"
+            className="h-8 min-w-0 w-full rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-cyan-400/70"
             value={pathDraft}
             list={pathListId}
             onChange={(event) => setPathDraft(event.target.value)}
@@ -3737,7 +3787,7 @@ function SftpBlockView({
         <div className="relative flex items-center justify-end gap-1">
           <button
             type="button"
-            className="inline-flex h-8 w-8 items-center justify-center rounded border border-white/10 text-zinc-300 hover:border-purple-400/60 hover:bg-zinc-900"
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-white/10 text-zinc-300 hover:border-cyan-400/60 hover:bg-zinc-900"
             onClick={() => onRefresh(pathDraft, block.sourceId)}
             disabled={!isConnected}
           >
@@ -3750,7 +3800,7 @@ function SftpBlockView({
               "relative inline-flex h-8 w-8 items-center justify-center rounded border text-zinc-300",
               runningTransfers > 0
                 ? "border-cyan-400/50 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20"
-                : "border-white/10 hover:border-purple-400/60 hover:bg-zinc-900",
+                : "border-white/10 hover:border-cyan-400/60 hover:bg-zinc-900",
             )}
             onClick={() => setTransferMenuOpen((current) => !current)}
             title="Transferencias deste bloco"
@@ -3881,7 +3931,7 @@ function SftpBlockView({
                   className={cn(
                     "border-b border-white/5 text-zinc-200 transition hover:bg-zinc-900/70",
                     "cursor-grab active:cursor-grabbing",
-                    selected ? "bg-purple-600/10" : undefined,
+                    selected ? "bg-cyan-600/10" : undefined,
                   )}
                   draggable
                   onClick={() => onSelectEntry(entry.path)}
@@ -3923,7 +3973,7 @@ function SftpBlockView({
                       {entry.name === ".." ? (
                         <Folder className="h-3.5 w-3.5 text-cyan-300" />
                       ) : entry.is_dir ? (
-                        <Folder className="h-3.5 w-3.5 text-purple-300" />
+                        <Folder className="h-3.5 w-3.5 text-cyan-300" />
                       ) : (
                         <FileText className="h-3.5 w-3.5 text-zinc-400" />
                       )}
@@ -4190,12 +4240,12 @@ function EditorBlockView({ block, onChange, onSave, onOpenExternal }: EditorBloc
         <div className="inline-flex items-center gap-2 text-xs text-zinc-400">
           <Grip className="h-3.5 w-3.5" />
           <span className="truncate">{block.path}</span>
-          {block.dirty ? <span className="text-purple-300">*</span> : null}
+          {block.dirty ? <span className="text-cyan-300">*</span> : null}
         </div>
         <div className="inline-flex items-center gap-2">
           <button
             type="button"
-            className="inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-[11px] text-zinc-100 hover:border-purple-400/60 hover:bg-zinc-900"
+            className="inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-[11px] text-zinc-100 hover:border-cyan-400/60 hover:bg-zinc-900"
             onClick={onSave}
             disabled={!canSave || block.saving}
           >
@@ -4204,7 +4254,7 @@ function EditorBlockView({ block, onChange, onSave, onOpenExternal }: EditorBloc
           </button>
           <button
             type="button"
-            className="inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-[11px] text-zinc-100 hover:border-purple-400/60 hover:bg-zinc-900"
+            className="inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2 text-[11px] text-zinc-100 hover:border-cyan-400/60 hover:bg-zinc-900"
             onClick={onOpenExternal}
           >
             Externo

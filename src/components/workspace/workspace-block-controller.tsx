@@ -19,6 +19,9 @@ interface WorkspaceBlockControllerProps {
   minHeight?: number;
   headerRight?: ReactNode;
   onFocus?: (id: string) => void;
+  onDragStart?: (id: string) => void;
+  onDragPreview?: (id: string, nextLayout: WorkspaceBlockLayout) => void;
+  onDragEnd?: (id: string) => void;
   onLayoutChange: (id: string, nextLayout: WorkspaceBlockLayout) => void;
   children: ReactNode;
 }
@@ -34,6 +37,9 @@ export function WorkspaceBlockController({
   minHeight = 220,
   headerRight,
   onFocus,
+  onDragStart,
+  onDragPreview,
+  onDragEnd,
   onLayoutChange,
   children,
 }: WorkspaceBlockControllerProps) {
@@ -73,12 +79,26 @@ export function WorkspaceBlockController({
       disableDragging={!interactive}
       enableResizing={enabledResizeHandles}
       resizeHandleStyles={resizeHandleStyles}
-      onDragStop={(_, data) =>
-        onLayoutChange(id, {
+      onDragStart={() => {
+        onFocus?.(id);
+        onDragStart?.(id);
+      }}
+      onDrag={(_, data) =>
+        onDragPreview?.(id, {
           ...layout,
           x: data.x,
           y: data.y,
         })
+      }
+      onDragStop={(_, data) =>
+        {
+          onLayoutChange(id, {
+            ...layout,
+            x: data.x,
+            y: data.y,
+          });
+          onDragEnd?.(id);
+        }
       }
       onResizeStop={(_, __, ref, ___, position) =>
         onLayoutChange(id, {
