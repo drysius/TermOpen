@@ -19,7 +19,7 @@ use tokio::sync::Notify;
 use crate::{
     models::{
         RecoveryProbeResult, SyncConflictDecision, SyncConflictItem, SyncConflictKind,
-        SyncConflictPreview, SyncKeepSide, SyncState, VaultStatus,
+        SyncConflictPreview, SyncKeepSide, SyncLoggedUser, SyncState, VaultStatus,
     },
     vault::VaultManager,
 };
@@ -28,6 +28,7 @@ const KEYRING_SERVICE: &str = "com.drysius.termopen";
 const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
 const KEYRING_USER_EMAIL: &str = "google-user-email";
 const KEYRING_USER_NAME: &str = "google-user-name";
+const KEYRING_USER_PICTURE: &str = "google-user-picture";
 const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
 const DRIVE_ROOT_FOLDER_NAME: &str = "TermOpen";
 const DRIVE_TOP_PARENT_ID: &str = "root";
@@ -45,6 +46,38 @@ struct AuthCallbackQueue {
 static AUTH_CALLBACK_QUEUE: OnceLock<AuthCallbackQueue> = OnceLock::new();
 static SYNC_CANCELLED: AtomicBool = AtomicBool::new(false);
 static SYNC_CANCEL_NOTIFY: OnceLock<Notify> = OnceLock::new();
+
+#[derive(Debug, Clone, Serialize)]
+struct SyncProgressPayload {
+    percent: u8,
+    stage: String,
+    current_file: Option<String>,
+    processed: u32,
+    total: u32,
+}
+
+fn emit_sync_progress(
+    app: &tauri::AppHandle,
+    stage: &str,
+    current_file: Option<&str>,
+    processed: usize,
+    total: usize,
+) {
+    let bounded_processed = processed.min(total);
+    let percent = if total == 0 {
+        100
+    } else {
+        ((bounded_processed * 100) / total).min(100) as u8
+    };
+    let payload = SyncProgressPayload {
+        percent,
+        stage: stage.to_string(),
+        current_file: current_file.map(|value| value.to_string()),
+        processed: bounded_processed as u32,
+        total: total as u32,
+    };
+    app.emit("sync:progress", payload).ok();
+}
 
 fn auth_callback_queue() -> &'static AuthCallbackQueue {
     AUTH_CALLBACK_QUEUE.get_or_init(|| AuthCallbackQueue {
@@ -97,6 +130,7 @@ impl SyncManager {
         delete_keyring_field(KEYRING_REFRESH_TOKEN);
         delete_keyring_field(KEYRING_USER_EMAIL);
         delete_keyring_field(KEYRING_USER_NAME);
+        delete_keyring_field(KEYRING_USER_PICTURE);
     }
 
     pub async fn google_login(
@@ -161,14 +195,26 @@ impl SyncManager {
         }
     }
 
-    pub fn logged_user(&self) -> Option<(String, String)> {
-        let email = load_user_field(KEYRING_USER_EMAIL).ok();
-        let name = load_user_field(KEYRING_USER_NAME).ok();
-        if email.is_some() || name.is_some() {
-            Some((name.unwrap_or_default(), email.unwrap_or_default()))
-        } else {
-            None
+    pub fn logged_user(&self) -> Option<SyncLoggedUser> {
+        let email = load_user_field(KEYRING_USER_EMAIL)
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let name = load_user_field(KEYRING_USER_NAME)
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let picture_url = load_user_field(KEYRING_USER_PICTURE)
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+
+        if email.is_none() && name.is_none() && picture_url.is_none() {
+            return None;
         }
+
+        Some(SyncLoggedUser {
+            name,
+            email,
+            picture_url,
+        })
     }
 
     pub async fn push(
@@ -195,20 +241,45 @@ impl SyncManager {
 
         let local_files = vault.list_local_bin_files()?;
         let mut local_names = HashSet::new();
+        for (name, _) in &local_files {
+            local_names.insert(name.clone());
+        }
+        let stale_remote_count = remote_files
+            .keys()
+            .filter(|name| !local_names.contains(*name))
+            .count();
+        let total_steps = local_files.len() + stale_remote_count;
+        let mut processed_steps = 0usize;
+        emit_sync_progress(app, "uploading", None, processed_steps, total_steps);
 
         for (name, bytes) in local_files {
-            local_names.insert(name.clone());
             if let Some(existing) = remote_files.get(&name) {
                 upload_file_bytes(&client, &access_token, &existing.id, bytes).await?;
             } else {
                 let created = create_drive_file(&client, &access_token, &folder_id, &name).await?;
                 upload_file_bytes(&client, &access_token, &created.id, bytes).await?;
             }
+            processed_steps = processed_steps.saturating_add(1);
+            emit_sync_progress(
+                app,
+                "uploading",
+                Some(name.as_str()),
+                processed_steps,
+                total_steps,
+            );
         }
 
         for (name, metadata) in remote_files {
             if !local_names.contains(&name) {
                 delete_drive_file(&client, &access_token, &metadata.id).await?;
+                processed_steps = processed_steps.saturating_add(1);
+                emit_sync_progress(
+                    app,
+                    "cleaning_remote",
+                    Some(name.as_str()),
+                    processed_steps,
+                    total_steps,
+                );
             }
         }
 
@@ -223,6 +294,7 @@ impl SyncManager {
             "Arquivos enviados para o Google Drive com sucesso.",
             metadata.last_sync_at,
         );
+        emit_sync_progress(app, "complete", None, total_steps, total_steps);
         app.emit("sync:status", &state).ok();
         Ok(state)
     }
@@ -260,10 +332,21 @@ impl SyncManager {
             return Ok(state);
         }
 
+        let total_steps = remote_files.len();
+        let mut processed_steps = 0usize;
+        emit_sync_progress(app, "downloading", None, processed_steps, total_steps);
         let mut snapshot = HashMap::new();
         for (name, metadata) in &remote_files {
             let bytes = download_file_bytes(&client, &access_token, &metadata.id).await?;
             snapshot.insert(name.clone(), bytes);
+            processed_steps = processed_steps.saturating_add(1);
+            emit_sync_progress(
+                app,
+                "downloading",
+                Some(name.as_str()),
+                processed_steps,
+                total_steps,
+            );
         }
 
         vault.replace_local_files(&snapshot)?;
@@ -279,6 +362,7 @@ impl SyncManager {
             "Arquivos baixados do Google Drive com sucesso.",
             next_metadata.last_sync_at,
         );
+        emit_sync_progress(app, "complete", None, total_steps, total_steps);
         app.emit("sync:status", &state).ok();
         Ok(state)
     }
@@ -570,6 +654,9 @@ fn finalize_auth_result(
             if let Some(ref name) = auth_data.name {
                 store_user_field(KEYRING_USER_NAME, name).ok();
             }
+            if let Some(ref picture_url) = auth_data.picture_url {
+                store_user_field(KEYRING_USER_PICTURE, picture_url).ok();
+            }
 
             let message = if let Some(ref name) = auth_data.name {
                 let email = auth_data.email.as_deref().unwrap_or("");
@@ -665,11 +752,17 @@ fn parse_auth_callback_from_deeplink(raw_url: &str) -> Result<Option<CallbackAut
         .get("name")
         .cloned()
         .filter(|value| !value.is_empty());
+    let picture_url = params
+        .get("picture")
+        .or_else(|| params.get("picture_url"))
+        .cloned()
+        .filter(|value| !value.is_empty());
 
     Ok(Some(CallbackAuthData {
         refresh_token,
         email,
         name,
+        picture_url,
     }))
 }
 
@@ -694,6 +787,7 @@ struct CallbackAuthData {
     refresh_token: String,
     email: Option<String>,
     name: Option<String>,
+    picture_url: Option<String>,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -736,6 +830,11 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
 
     let email = params.get("email").cloned().filter(|v| !v.is_empty());
     let name = params.get("name").cloned().filter(|v| !v.is_empty());
+    let picture_url = params
+        .get("picture")
+        .or_else(|| params.get("picture_url"))
+        .cloned()
+        .filter(|value| !value.is_empty());
 
     let display_name = name.as_deref().unwrap_or("usuario");
     let html = format!(
@@ -753,6 +852,7 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
         refresh_token,
         email,
         name,
+        picture_url,
     })
 }
 

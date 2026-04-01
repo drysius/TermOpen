@@ -10,7 +10,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use models::{
     AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, KeychainEntry, KnownHostEntry,
     RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult, SshSessionInfo,
-    SyncConflictDecision, SyncConflictPreview, SyncState, VaultStatus, WindowState,
+    SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState, VaultStatus, WindowState,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
@@ -968,7 +968,7 @@ async fn sync_google_login(
 }
 
 #[tauri::command]
-async fn sync_logged_user(state: State<'_, AppState>) -> Result<Option<(String, String)>, String> {
+async fn sync_logged_user(state: State<'_, AppState>) -> Result<Option<SyncLoggedUser>, String> {
     let sync = state.sync.lock().await;
     Ok(sync.logged_user())
 }

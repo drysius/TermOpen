@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useAppStore } from "@/store/app-store";
 import { api } from "@/lib/tauri";
-import type { AppSettings, AuthServer, ModifiedUploadPolicy } from "@/types/termopen";
+import type { AppSettings, AuthServer, ModifiedUploadPolicy, SyncLoggedUser } from "@/types/termopen";
 
 interface SettingsFormValues extends AppSettings {}
 
@@ -112,7 +112,7 @@ export function SettingsPage() {
 
   const [showUploadPolicyModal, setShowUploadPolicyModal] = useState(false);
   const [authServers, setAuthServers] = useState<AuthServer[]>([]);
-  const [loggedUser, setLoggedUser] = useState<{ name: string; email: string } | null>(null);
+  const [loggedUser, setLoggedUser] = useState<SyncLoggedUser | null>(null);
   const [driveTab, setDriveTab] = useState<"account" | "config">("account");
   const [settingsTab, setSettingsTab] = useState<"general" | "sftp" | "terminal" | "sync" | "security">("general");
   const [serverPings, setServerPings] = useState<Record<string, number | null>>({});
@@ -149,9 +149,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     void api.authServersList().then(setAuthServers);
-    void api.syncLoggedUser().then((data) => {
-      if (data) setLoggedUser({ name: data[0], email: data[1] });
-    });
+    void api.syncLoggedUser().then(setLoggedUser);
   }, [syncState]);
 
   useEffect(() => {

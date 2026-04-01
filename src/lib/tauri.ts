@@ -10,6 +10,7 @@ import type {
   RecoveryProbeResult,
   ReleaseCheckResult,
   SftpEntry,
+  SyncLoggedUser,
   SyncConflictDecision,
   SyncConflictPreview,
   SshConnectResult,
@@ -133,7 +134,7 @@ export const api = {
 
   syncGoogleLogin: (serverAddress?: string | null) =>
     invoke<SyncState>("sync_google_login", { serverAddress }),
-  syncLoggedUser: () => invoke<[string, string] | null>("sync_logged_user"),
+  syncLoggedUser: () => invoke<SyncLoggedUser | null>("sync_logged_user"),
   syncCancel: () => invoke<SyncState>("sync_cancel"),
   syncPush: () => invoke<SyncState>("sync_push"),
   syncPull: () => invoke<SyncState>("sync_pull"),

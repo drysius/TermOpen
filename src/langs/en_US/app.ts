@@ -11,4 +11,17 @@ export const app: AppDictionary["app"] = {
     autoRunning: "Automatic sync in progress...",
     autoFailed: "Automatic sync failed.",
   },
+  header: {
+    statusConnected: "Connected",
+    statusDisconnected: "Disconnected",
+    login: "Sign in",
+    syncNow: "Sync now",
+    hello: "Hello",
+    guest: "user",
+    syncing: "Syncing...",
+    stageUploading: "Uploading files",
+    stageDownloading: "Downloading files",
+    stageCleaningRemote: "Cleaning remote",
+    stageComplete: "Completed",
+  },
 };

@@ -10,6 +10,19 @@ export interface AppDictionary {
       autoRunning: string;
       autoFailed: string;
     };
+    header: {
+      statusConnected: string;
+      statusDisconnected: string;
+      login: string;
+      syncNow: string;
+      hello: string;
+      guest: string;
+      syncing: string;
+      stageUploading: string;
+      stageDownloading: string;
+      stageCleaningRemote: string;
+      stageComplete: string;
+    };
   };
   sidebar: {
     home: string;

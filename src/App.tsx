@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Toaster, toast } from "sonner";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { HostFormDrawer } from "@/components/drawers/host-form-drawer";
@@ -18,7 +19,7 @@ import { EditorTabPage } from "@/pages/tabs/editor-tab-page";
 import { SftpWorkspaceTabPage } from "@/pages/tabs/sftp-workspace-tab-page";
 import { VaultGatePage } from "@/pages/vault-gate-page";
 import { useAppStore } from "@/store/app-store";
-import type { SyncConflictDecision, SyncKeepSide } from "@/types/termopen";
+import type { SyncConflictDecision, SyncKeepSide, SyncLoggedUser, SyncProgressState, SyncState } from "@/types/termopen";
 import type { SidebarSection } from "@/types/workspace";
 
 function sectionFromPath(pathname: string): SidebarSection {
@@ -77,6 +78,7 @@ function App() {
   const saveEditor = useAppStore((state) => state.saveEditor);
   const openEditorExternal = useAppStore((state) => state.openEditorExternal);
   const vaultLock = useAppStore((state) => state.vaultLock);
+  const runSync = useAppStore((state) => state.runSync);
 
   const lastActivityRef = useRef<number>(Date.now());
   const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
@@ -85,6 +87,9 @@ function App() {
   const [bootMessage, setBootMessage] = useState("Iniciando TermOpen...");
   const [syncChoices, setSyncChoices] = useState<Record<string, SyncKeepSide>>({});
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+  const [loggedUser, setLoggedUser] = useState<SyncLoggedUser | null>(null);
+  const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
+  const [headerSyncBusy, setHeaderSyncBusy] = useState(false);
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId]);
   const pendingCloseTab = useMemo(
     () => tabs.find((tab) => tab.id === pendingCloseTabId) ?? null,
@@ -103,6 +108,24 @@ function App() {
   async function handleToggleMaximize() {
     const value = await api.windowToggleMaximize().catch(() => isWindowMaximized);
     setIsWindowMaximized(value);
+  }
+
+  async function refreshLoggedUser() {
+    const user = await api.syncLoggedUser().catch(() => null);
+    setLoggedUser(user);
+  }
+
+  async function handleHeaderSync(action: "login" | "push") {
+    if (syncState.status === "running" || headerSyncBusy) {
+      return;
+    }
+    setHeaderSyncBusy(true);
+    try {
+      await runSync(action);
+      await refreshLoggedUser();
+    } finally {
+      setHeaderSyncBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -186,6 +209,14 @@ function App() {
   }, [settings.sync_auto_enabled, settings.sync_interval_minutes, syncState.connected, vaultStatus]);
 
   useEffect(() => {
+    if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
+      setLoggedUser(null);
+      return;
+    }
+    void refreshLoggedUser();
+  }, [syncState.last_sync_at, syncState.status, vaultStatus]);
+
+  useEffect(() => {
     if (startupConflicts.length === 0) {
       setSyncChoices({});
       return;
@@ -225,6 +256,31 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let stopSyncStatus: (() => void) | null = null;
+    let stopSyncProgress: (() => void) | null = null;
+
+    void listen<SyncState>("sync:status", (event) => {
+      useAppStore.setState({ syncState: event.payload });
+      if (event.payload.status !== "running") {
+        setSyncProgress(null);
+      }
+    }).then((unlisten) => {
+      stopSyncStatus = unlisten;
+    });
+
+    void listen<SyncProgressState>("sync:progress", (event) => {
+      setSyncProgress(event.payload);
+    }).then((unlisten) => {
+      stopSyncProgress = unlisten;
+    });
+
+    return () => {
+      stopSyncStatus?.();
+      stopSyncProgress?.();
+    };
+  }, []);
+
   async function handleResolveStartupConflicts() {
     const decisions: SyncConflictDecision[] = startupConflicts.map((item) => ({
       kind: item.kind,
@@ -245,6 +301,10 @@ function App() {
           onCloseTab={() => undefined}
           onCreateWorkspaceTab={() => undefined}
           syncRunning={false}
+          syncProgress={null}
+          loggedUser={null}
+          onSyncLogin={() => undefined}
+          onSyncNow={() => undefined}
           maximized={isWindowMaximized}
           onMinimize={() => void api.windowMinimize()}
           onToggleMaximize={() => void handleToggleMaximize()}
@@ -282,6 +342,10 @@ function App() {
             })
           }
           syncRunning={false}
+          syncProgress={null}
+          loggedUser={null}
+          onSyncLogin={() => undefined}
+          onSyncNow={() => undefined}
           maximized={isWindowMaximized}
           onMinimize={() => void api.windowMinimize()}
           onToggleMaximize={() => void handleToggleMaximize()}
@@ -325,7 +389,11 @@ function App() {
             closable: true,
           })
         }
-        syncRunning={syncState.status === "running"}
+        syncRunning={syncState.status === "running" || headerSyncBusy}
+        syncProgress={syncProgress}
+        loggedUser={loggedUser}
+        onSyncLogin={() => void handleHeaderSync("login")}
+        onSyncNow={() => void handleHeaderSync("push")}
         maximized={isWindowMaximized}
         onMinimize={() => void api.windowMinimize()}
         onToggleMaximize={() => void handleToggleMaximize()}

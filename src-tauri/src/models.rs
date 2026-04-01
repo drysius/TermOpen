@@ -395,6 +395,16 @@ pub struct SyncState {
     pub verification_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncLoggedUser {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub picture_url: Option<String>,
+}
+
 impl SyncState {
     pub fn idle(message: impl Into<String>) -> Self {
         Self {

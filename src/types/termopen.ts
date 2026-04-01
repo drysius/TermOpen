@@ -107,6 +107,20 @@ export interface SyncState {
   verification_url?: string | null;
 }
 
+export interface SyncLoggedUser {
+  name?: string | null;
+  email?: string | null;
+  picture_url?: string | null;
+}
+
+export interface SyncProgressState {
+  percent: number;
+  stage: string;
+  current_file?: string | null;
+  processed: number;
+  total: number;
+}
+
 export type SyncConflictKind = "host" | "keychain" | "profile";
 export type SyncKeepSide = "client" | "server";
 
