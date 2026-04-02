@@ -365,8 +365,9 @@ impl SshManager {
         let mut file = sftp
             .open(&target)
             .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target.display()))?;
-        file.seek(SeekFrom::Start(offset))
-            .with_context(|| format!("Falha ao posicionar leitura remota em {}", target.display()))?;
+        file.seek(SeekFrom::Start(offset)).with_context(|| {
+            format!("Falha ao posicionar leitura remota em {}", target.display())
+        })?;
 
         let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
         let size = file
@@ -588,6 +589,129 @@ impl SshManager {
 
         Ok(transferred)
     }
+
+    pub fn sessions_share_profile(&self, left_session_id: &str, right_session_id: &str) -> bool {
+        let left = self.sessions.get(left_session_id);
+        let right = self.sessions.get(right_session_id);
+        match (left, right) {
+            (Some(left_session), Some(right_session)) => {
+                left_session.info.profile_id == right_session.info.profile_id
+            }
+            _ => false,
+        }
+    }
+
+    pub fn sftp_copy_between_sessions(
+        &mut self,
+        from_session_id: &str,
+        to_session_id: &str,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<()> {
+        if from_session_id != to_session_id
+            && !self.sessions_share_profile(from_session_id, to_session_id)
+        {
+            return Err(anyhow!(
+                "Copia remota otimizada requer sessoes no mesmo perfil"
+            ));
+        }
+
+        let managed = self
+            .sessions
+            .get_mut(from_session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", from_session_id))?;
+
+        let sftp = managed
+            .session
+            .sftp()
+            .context("Falha ao abrir canal SFTP")?;
+        let source = normalize_remote_path(from_path);
+        let target = normalize_remote_path(to_path);
+        if source == target {
+            return Ok(());
+        }
+
+        let stat = sftp
+            .stat(&source)
+            .with_context(|| format!("Falha ao obter metadata remota: {}", source.display()))?;
+        let source_is_dir = stat
+            .perm
+            .map(|value| (value & 0o170000) == 0o040000)
+            .unwrap_or(false);
+        drop(sftp);
+
+        run_remote_copy_command(&managed.session, &source, &target, source_is_dir)
+    }
+}
+
+fn run_remote_copy_command(
+    session: &Session,
+    source: &Path,
+    target: &Path,
+    source_is_dir: bool,
+) -> Result<()> {
+    let source_quoted = shell_quote_posix(source.to_string_lossy().as_ref());
+    let target_quoted = shell_quote_posix(target.to_string_lossy().as_ref());
+
+    let cp_a = format!("cp -a -- {} {}", source_quoted, target_quoted);
+    if run_remote_exec(session, cp_a.as_str()).is_ok() {
+        return Ok(());
+    }
+
+    let recursive_flag = if source_is_dir { "-R" } else { "" };
+    let cp_r = if recursive_flag.is_empty() {
+        format!("cp -- {} {}", source_quoted, target_quoted)
+    } else {
+        format!(
+            "cp {} -- {} {}",
+            recursive_flag, source_quoted, target_quoted
+        )
+    };
+    run_remote_exec(session, cp_r.as_str())
+}
+
+fn run_remote_exec(session: &Session, command: &str) -> Result<()> {
+    let mut channel = session
+        .channel_session()
+        .context("Falha ao abrir canal exec SSH")?;
+    channel
+        .handle_extended_data(ExtendedData::Merge)
+        .context("Falha ao configurar stderr para exec SSH")?;
+    channel
+        .exec(command)
+        .with_context(|| format!("Falha ao executar comando remoto: {}", command))?;
+
+    let mut output = Vec::new();
+    channel
+        .read_to_end(&mut output)
+        .context("Falha ao ler saida de comando remoto")?;
+
+    channel
+        .wait_close()
+        .context("Falha ao finalizar comando remoto")?;
+    let status = channel
+        .exit_status()
+        .context("Falha ao ler status do comando remoto")?;
+    if status == 0 {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output).trim().to_string();
+    if stderr.is_empty() {
+        return Err(anyhow!(
+            "Comando remoto retornou status {} sem detalhes",
+            status
+        ));
+    }
+    Err(anyhow!(
+        "Comando remoto retornou status {}: {}",
+        status,
+        stderr
+    ))
+}
+
+fn shell_quote_posix(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 pub fn known_hosts_list(path_override: Option<&str>) -> Result<Vec<KnownHostEntry>> {
