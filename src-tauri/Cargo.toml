@@ -43,6 +43,7 @@ ironrdp = { version = "0.14.0", features = ["connector", "session", "graphics", 
 ironrdp-blocking = "0.8.0"
 ironrdp-graphics = "0.7.0"
 ironrdp-pdu = "0.7.0"
+openh264 = { version = "0.9.3", default-features = false, features = ["source"] }
 sspi = { version = "0.18.7", features = ["network_client"] }
 tempfile = "3"
 tokio = { version = "1", features = ["time", "net", "io-util", "macros"] }

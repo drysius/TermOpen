@@ -32,7 +32,7 @@ import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
-import type { RdpInputAction, RdpStreamEvent, SftpEntry } from "@/types/termopen";
+import type { RdpFrameCodec, RdpInputAction, RdpStreamEvent, SftpEntry } from "@/types/termopen";
 import editorWorkspace from "@/pages/tabs/workspace/editor";
 import logsWorkspace from "@/pages/tabs/workspace/logs";
 import rdpWorkspace from "@/pages/tabs/workspace/rdp";
@@ -57,6 +57,12 @@ import type {
 } from "@/pages/tabs/workspace/types";
 import { snapLayoutToWorkspace, workspaceDefaultLayout } from "@/pages/tabs/workspace/natives/layout";
 import { joinPathBySource, joinRelativePathBySource, normalizeAnyPath, parentDirectory, shellQuote } from "@/pages/tabs/workspace/natives/paths";
+import {
+  detectPreferredRdpCodec,
+  emitRdpVideoChunk,
+  onRdpVideoDecoderError,
+  parseRdpStreamFramePacket,
+} from "@/pages/tabs/workspace/natives/rdp-stream";
 import { createSourceFile, createSourceFolder, decodeBase64Chunk, deleteSourceEntry, listSourceEntries, readSourceBinaryPreview, readSourceFile, readSourceTextChunk, renameSourceEntry, writeSourceFile } from "@/pages/tabs/workspace/natives/source-io";
 import { createId, isTimeoutErrorMessage, MAX_CONNECT_RETRY_ATTEMPTS, parseProfileSourceId } from "@/pages/tabs/workspace/natives/runtime";
 
@@ -108,6 +114,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const rdpStreamTokenByBlockRef = useRef<Map<string, string>>(new Map());
   const rdpInputQueueByBlockRef = useRef<Map<string, RdpInputAction[]>>(new Map());
   const rdpInputFlushTimerByBlockRef = useRef<Map<string, number>>(new Map());
+  const rdpLastFrameAtByBlockRef = useRef<Map<string, number>>(new Map());
 
   const clearBlockRetryTimers = useCallback((blockId: string) => {
     const active = connectRetryTimersRef.current[blockId];
@@ -438,10 +445,11 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       if (rdpBlock?.imageUrl) {
         URL.revokeObjectURL(rdpBlock.imageUrl);
       }
+      rdpStreamTokenByBlockRef.current.delete(id);
+      rdpLastFrameAtByBlockRef.current.delete(id);
       const sessionId = rdpStreamSessionByBlockRef.current.get(id);
       if (sessionId) {
         rdpStreamSessionByBlockRef.current.delete(id);
-        rdpStreamTokenByBlockRef.current.delete(id);
         const flushTimer = rdpInputFlushTimerByBlockRef.current.get(id);
         if (flushTimer) {
           window.clearTimeout(flushTimer);
@@ -1108,7 +1116,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   }, [appendWorkspaceLog, focusBlock, workspaceSize.height, workspaceSize.width]);
 
   const replaceRdpFrameForBlock = useCallback(
-    (blockId: string, imageUrl: string) => {
+    (blockId: string, imageUrl: string, width?: number, height?: number) => {
       const previous = blocksRef.current.find(
         (item): item is RdpBlock => item.id === blockId && item.kind === "rdp",
       )?.imageUrl;
@@ -1122,6 +1130,8 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
             ? {
                 ...block,
                 imageUrl,
+                imageWidth: width && width > 0 ? width : block.imageWidth,
+                imageHeight: height && height > 0 ? height : block.imageHeight,
                 capturedAt: Math.floor(Date.now() / 1000),
                 connectStage: "ready",
                 connectMessage: t.workspace.rdp.ready,
@@ -1133,21 +1143,68 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         ),
       );
 
-      const probe = new Image();
-      probe.onload = () => {
-        setBlocks((current) =>
-          current.map((block) =>
-            block.id === blockId && block.kind === "rdp"
-              ? {
-                  ...block,
-                  imageWidth: probe.naturalWidth || block.imageWidth,
-                  imageHeight: probe.naturalHeight || block.imageHeight,
-                }
-              : block,
-          ),
-        );
-      };
-      probe.src = imageUrl;
+      if (!(width && width > 0 && height && height > 0)) {
+        const probe = new Image();
+        probe.onload = () => {
+          setBlocks((current) =>
+            current.map((block) =>
+              block.id === blockId && block.kind === "rdp"
+                ? {
+                    ...block,
+                    imageWidth: probe.naturalWidth || block.imageWidth,
+                    imageHeight: probe.naturalHeight || block.imageHeight,
+                  }
+                : block,
+            ),
+          );
+        };
+        probe.src = imageUrl;
+      }
+    },
+    [t.workspace.rdp.ready],
+  );
+
+  const touchRdpFrameForBlock = useCallback(
+    (blockId: string, width: number, height: number) => {
+      const currentBlock = blocksRef.current.find(
+        (item): item is RdpBlock => item.id === blockId && item.kind === "rdp",
+      );
+      if (!currentBlock) {
+        return;
+      }
+
+      const nextWidth = width > 0 ? width : currentBlock.imageWidth;
+      const nextHeight = height > 0 ? height : currentBlock.imageHeight;
+      const dimensionsChanged = nextWidth !== currentBlock.imageWidth || nextHeight !== currentBlock.imageHeight;
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const lastTouch = rdpLastFrameAtByBlockRef.current.get(blockId) ?? 0;
+      const shouldUpdateTimestamp = nowSeconds > lastTouch;
+
+      if (!dimensionsChanged && !shouldUpdateTimestamp) {
+        return;
+      }
+
+      if (shouldUpdateTimestamp) {
+        rdpLastFrameAtByBlockRef.current.set(blockId, nowSeconds);
+      }
+
+      setBlocks((current) =>
+        current.map((block) =>
+          block.id === blockId && block.kind === "rdp"
+            ? {
+                ...block,
+                imageWidth: nextWidth,
+                imageHeight: nextHeight,
+                capturedAt: shouldUpdateTimestamp ? nowSeconds : block.capturedAt,
+                connectStage: "ready",
+                connectMessage: t.workspace.rdp.ready,
+                connectError: null,
+                retryAttempt: 0,
+                retryInSeconds: null,
+              }
+            : block,
+        ),
+      );
     },
     [t.workspace.rdp.ready],
   );
@@ -1160,6 +1217,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         saveAuthChoice?: boolean;
         retryAttempt?: number;
         inputActions?: RdpInputAction[];
+        preferredCodec?: RdpFrameCodec;
       },
     ) => {
       const target = blocksRef.current.find((item): item is RdpBlock => item.id === blockId && item.kind === "rdp");
@@ -1221,6 +1279,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
       const passwordOverride = options?.passwordOverride ?? null;
       const saveAuthChoice = options?.saveAuthChoice ?? false;
+      const preferredCodec = options?.preferredCodec ?? (await detectPreferredRdpCodec());
       const currentAttempt = Math.max(0, options?.retryAttempt ?? target.retryAttempt);
       const connectingMessage = passwordOverride ? "Logando..." : t.workspace.rdp.connecting;
       const previousSessionId = rdpStreamSessionByBlockRef.current.get(blockId) ?? target.streamSessionId;
@@ -1233,6 +1292,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         window.clearTimeout(pendingFlush);
         rdpInputFlushTimerByBlockRef.current.delete(blockId);
       }
+      rdpLastFrameAtByBlockRef.current.delete(blockId);
       rdpInputQueueByBlockRef.current.set(blockId, []);
       clearBlockRetryTimers(blockId);
 
@@ -1262,6 +1322,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         }
 
         if (event.event === "ready") {
+          const activeCodec = event.data.frame_codec ?? preferredCodec;
           clearBlockRetryTimers(blockId);
           setBlocks((current) =>
             current.map((block) =>
@@ -1280,7 +1341,11 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                 : block,
             ),
           );
-          appendWorkspaceLog("success", "Sessao RDP conectada", `${profile.host} ${event.data.width}x${event.data.height}`);
+          appendWorkspaceLog(
+            "success",
+            "Sessao RDP conectada",
+            `${profile.host} ${event.data.width}x${event.data.height} (${activeCodec.toUpperCase()})`,
+          );
           return;
         }
 
@@ -1360,6 +1425,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                   passwordOverride,
                   saveAuthChoice,
                   retryAttempt: nextAttempt,
+                  preferredCodec,
                 });
               },
             });
@@ -1383,8 +1449,26 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           return;
         }
 
-        const imageUrl = URL.createObjectURL(new Blob([message], { type: "image/png" }));
-        replaceRdpFrameForBlock(blockId, imageUrl);
+        const packet = parseRdpStreamFramePacket(message);
+        if (!packet) {
+          return;
+        }
+
+        if (packet.codec === "h264") {
+          touchRdpFrameForBlock(blockId, packet.width, packet.height);
+          emitRdpVideoChunk({
+            blockId,
+            keyframe: packet.keyframe,
+            width: packet.width,
+            height: packet.height,
+            ptsUs: packet.ptsUs,
+            payload: packet.payload,
+          });
+          return;
+        }
+
+        const imageUrl = URL.createObjectURL(new Blob([packet.payload], { type: "image/png" }));
+        replaceRdpFrameForBlock(blockId, imageUrl, packet.width, packet.height);
       });
 
       try {
@@ -1393,6 +1477,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           height: 720,
           passwordOverride,
           saveAuthChoice,
+          preferredCodec,
         });
 
         if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
@@ -1473,12 +1558,33 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       settings.auto_reconnect_enabled,
       settings.reconnect_delay_seconds,
       scheduleBlockAutoRetry,
+      touchRdpFrameForBlock,
       t.workspace.rdp.authRequired,
       t.workspace.rdp.connecting,
       t.workspace.rdp.error,
       t.workspace.rdp.ready,
     ],
   );
+
+  useEffect(() => {
+    const detach = onRdpVideoDecoderError(({ blockId }) => {
+      const target = blocksRef.current.find(
+        (item): item is RdpBlock => item.id === blockId && item.kind === "rdp",
+      );
+      if (!target) {
+        return;
+      }
+      appendWorkspaceLog("warn", "Decoder de video RDP falhou", "Alternando para stream PNG.");
+      void resolvePendingRdpConnection(blockId, {
+        retryAttempt: 0,
+        preferredCodec: "png",
+      });
+    });
+
+    return () => {
+      detach();
+    };
+  }, [appendWorkspaceLog, resolvePendingRdpConnection]);
 
   const addPendingRdpBlock = useCallback(
     (profileId: string) => {
@@ -1536,6 +1642,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       rdpInputFlushTimerByBlockRef.current.clear();
       rdpInputQueueByBlockRef.current.clear();
       rdpStreamTokenByBlockRef.current.clear();
+      rdpLastFrameAtByBlockRef.current.clear();
       rdpStreamSessionByBlockRef.current.forEach((sessionId) => {
         void api.rdpStreamStop(sessionId).catch(() => undefined);
       });

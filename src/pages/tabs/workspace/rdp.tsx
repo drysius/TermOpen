@@ -11,6 +11,7 @@ import {
 import { useT } from "@/langs";
 import { cn } from "@/lib/utils";
 import type { ConnectionProfile, RdpInputAction, StreamControlInput } from "@/types/termopen";
+import { emitRdpVideoDecoderError, onRdpVideoChunk } from "@/pages/tabs/workspace/natives/rdp-stream";
 
 import type { RdpBlock } from "./types";
 import type { WorkspaceBlockModule } from "./block-module";
@@ -56,6 +57,10 @@ export function RdpBlockView({
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameImageRef = useRef<HTMLImageElement | null>(null);
+  const decodedFrameRef = useRef<VideoFrame | null>(null);
+  const videoDecoderRef = useRef<VideoDecoder | null>(null);
+  const decoderStartedRef = useRef(false);
+  const decoderFailedRef = useRef(false);
   const drawRectRef = useRef({
     x: 0,
     y: 0,
@@ -64,9 +69,10 @@ export function RdpBlockView({
     canvasWidth: 0,
     canvasHeight: 0,
   });
+  const drawFrameRef = useRef<() => void>(() => undefined);
   const lastMoveSentAtRef = useRef(0);
   const [localPointer, setLocalPointer] = useState<{ x: number; y: number } | null>(null);
-  const isConnected = block.connectStage === "ready" && !!block.imageUrl;
+  const isConnected = block.connectStage === "ready" && block.imageWidth > 0 && block.imageHeight > 0;
   const emitControlWithViewport = useCallback(
     (control: StreamControlInput) => {
       const canvas = canvasRef.current;
@@ -83,6 +89,25 @@ export function RdpBlockView({
     },
     [onControlChange],
   );
+  const clearVideoDecoder = useCallback(() => {
+    decoderStartedRef.current = false;
+    const decoder = videoDecoderRef.current;
+    videoDecoderRef.current = null;
+    if (decoder && decoder.state !== "closed") {
+      decoder.close();
+    }
+    if (decodedFrameRef.current) {
+      decodedFrameRef.current.close();
+      decodedFrameRef.current = null;
+    }
+  }, []);
+  const reportDecoderFailure = useCallback(() => {
+    if (decoderFailedRef.current) {
+      return;
+    }
+    decoderFailedRef.current = true;
+    emitRdpVideoDecoderError({ blockId: block.id });
+  }, [block.id]);
 
   const drawFrame = useCallback(() => {
     const canvas = canvasRef.current;
@@ -110,7 +135,7 @@ export function RdpBlockView({
     context.fillStyle = "#09090b";
     context.fillRect(0, 0, canvas.width, canvas.height);
 
-    const frame = frameImageRef.current;
+    const frame = decodedFrameRef.current ?? frameImageRef.current;
     if (frame && block.imageWidth > 0 && block.imageHeight > 0) {
       const scale = Math.min(canvas.width / block.imageWidth, canvas.height / block.imageHeight);
       const drawWidth = Math.max(1, Math.floor(block.imageWidth * scale));
@@ -128,7 +153,7 @@ export function RdpBlockView({
       };
 
       context.imageSmoothingEnabled = false;
-      context.drawImage(frame, offsetX, offsetY, drawWidth, drawHeight);
+      context.drawImage(frame as unknown as CanvasImageSource, offsetX, offsetY, drawWidth, drawHeight);
 
       if (localPointer) {
         const normalizedX = block.imageWidth > 1 ? localPointer.x / (block.imageWidth - 1) : 0;
@@ -160,19 +185,113 @@ export function RdpBlockView({
   }, [block.imageHeight, block.imageWidth, localPointer]);
 
   useEffect(() => {
+    drawFrameRef.current = drawFrame;
+  }, [drawFrame]);
+
+  useEffect(() => {
     if (!block.imageUrl) {
       frameImageRef.current = null;
       drawFrame();
       return;
     }
 
+    clearVideoDecoder();
     const frame = new Image();
     frame.onload = () => {
       frameImageRef.current = frame;
       drawFrame();
     };
     frame.src = block.imageUrl;
-  }, [block.imageUrl, drawFrame]);
+  }, [block.imageUrl, clearVideoDecoder, drawFrame]);
+
+  useEffect(() => {
+    if (block.connectStage === "ready") {
+      return;
+    }
+    decoderFailedRef.current = false;
+    clearVideoDecoder();
+    drawFrameRef.current();
+  }, [block.connectStage, clearVideoDecoder]);
+
+  useEffect(() => {
+    const videoDecoderCtor = (globalThis as typeof globalThis & { VideoDecoder?: typeof VideoDecoder }).VideoDecoder;
+    const encodedVideoChunkCtor = (globalThis as typeof globalThis & { EncodedVideoChunk?: typeof EncodedVideoChunk })
+      .EncodedVideoChunk;
+    if (!videoDecoderCtor || !encodedVideoChunkCtor) {
+      return () => undefined;
+    }
+
+    const ensureDecoder = (): VideoDecoder | null => {
+      const current = videoDecoderRef.current;
+      if (current && current.state !== "closed") {
+        return current;
+      }
+
+      try {
+        const decoder = new videoDecoderCtor({
+          output: (frame) => {
+            if (decodedFrameRef.current) {
+              decodedFrameRef.current.close();
+            }
+            decodedFrameRef.current = frame;
+            drawFrameRef.current();
+          },
+          error: () => {
+            reportDecoderFailure();
+            clearVideoDecoder();
+            drawFrameRef.current();
+          },
+        });
+        decoder.configure({
+          codec: "avc1.42E01F",
+          optimizeForLatency: true,
+          hardwareAcceleration: "prefer-hardware",
+        });
+        videoDecoderRef.current = decoder;
+        return decoder;
+      } catch {
+        reportDecoderFailure();
+        clearVideoDecoder();
+        return null;
+      }
+    };
+
+    const detach = onRdpVideoChunk((chunk) => {
+      if (chunk.blockId !== block.id) {
+        return;
+      }
+
+      const decoder = ensureDecoder();
+      if (!decoder || decoder.state === "closed") {
+        return;
+      }
+
+      if (!decoderStartedRef.current) {
+        if (!chunk.keyframe) {
+          return;
+        }
+        decoderStartedRef.current = true;
+      }
+
+      try {
+        decoder.decode(
+          new encodedVideoChunkCtor({
+            type: chunk.keyframe ? "key" : "delta",
+            timestamp: Math.max(0, Math.floor(chunk.ptsUs)),
+            data: chunk.payload,
+          }),
+        );
+      } catch {
+        reportDecoderFailure();
+        clearVideoDecoder();
+      }
+    });
+
+    return () => {
+      detach();
+      clearVideoDecoder();
+    };
+  }, [block.id, clearVideoDecoder, reportDecoderFailure]);
 
   useEffect(() => {
     drawFrame();

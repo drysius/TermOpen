@@ -10,6 +10,7 @@ import type {
   RecoveryProbeResult,
   ReleaseCheckResult,
   RdpCaptureResult,
+  RdpFrameCodec,
   RdpStreamEvent,
   RdpStreamStartResult,
   RdpInputAction,
@@ -97,6 +98,7 @@ export const api = {
       passwordOverride?: string | null;
       keychainIdOverride?: string | null;
       saveAuthChoice?: boolean;
+      preferredCodec?: RdpFrameCodec;
     },
   ) =>
     invoke<RdpStreamStartResult>("rdp_stream_start", {
@@ -106,6 +108,7 @@ export const api = {
       passwordOverride: options?.passwordOverride,
       keychainIdOverride: options?.keychainIdOverride,
       saveAuthChoice: options?.saveAuthChoice,
+      preferredCodec: options?.preferredCodec,
       channel,
       frameChannel,
     }),

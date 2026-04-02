@@ -23,6 +23,12 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use openh264::encoder::{
+    BitRate, Encoder as H264Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod,
+    RateControlMode, UsageType,
+};
+use openh264::formats::{RgbaSliceU8, YUVBuffer};
+use openh264::{OpenH264API, Timestamp};
 use sspi::network_client::reqwest_network_client::ReqwestNetworkClient;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio_rustls::rustls;
@@ -41,6 +47,7 @@ pub struct RdpCaptureOptions {
     pub height: u16,
     pub timeout_seconds: u64,
     pub input_actions: Vec<RdpInputAction>,
+    pub stream_codec: RdpFrameCodec,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +68,7 @@ pub enum RdpStreamEvent {
         session_id: String,
         width: u16,
         height: u16,
+        frame_codec: RdpFrameCodec,
     },
     AuthRequired {
         session_id: String,
@@ -73,6 +81,13 @@ pub enum RdpStreamEvent {
     Stopped {
         session_id: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RdpFrameCodec {
+    Png,
+    H264,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -171,21 +186,12 @@ impl RdpStreamManager {
             };
         };
 
-        self.sessions.insert(
-            session_id.clone(),
-            RdpStreamSession {
-                tx,
-                _join: join,
-            },
-        );
+        self.sessions
+            .insert(session_id.clone(), RdpStreamSession { tx, _join: join });
         RdpStreamStartResult::Started { session_id }
     }
 
-    pub fn input(
-        &mut self,
-        session_id: &str,
-        input_actions: Vec<RdpInputAction>,
-    ) -> Result<()> {
+    pub fn input(&mut self, session_id: &str, input_actions: Vec<RdpInputAction>) -> Result<()> {
         let Some(session) = self.sessions.get(session_id) else {
             anyhow::bail!("Sessao de stream RDP nao encontrada.");
         };
@@ -205,10 +211,7 @@ impl RdpStreamManager {
             anyhow::bail!("Sessao de stream RDP nao encontrada.");
         };
 
-        if let Err(error) = session
-            .tx
-            .send(RdpStreamWorkerMessage::Control(control))
-        {
+        if let Err(error) = session.tx.send(RdpStreamWorkerMessage::Control(control)) {
             self.sessions.remove(session_id);
             return Err(anyhow::Error::new(error).context("stream control send"));
         }
@@ -228,6 +231,12 @@ impl RdpStreamManager {
 type UpgradedFramed =
     ironrdp_blocking::Framed<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 static RUSTLS_PROVIDER_INIT: Once = Once::new();
+const STREAM_PACKET_MAGIC: [u8; 4] = *b"TRDP";
+const STREAM_PACKET_VERSION: u8 = 1;
+const STREAM_PACKET_HEADER_LEN: usize = 24;
+const H264_KEYFRAME_INTERVAL_FRAMES: u64 = 60;
+const H264_TARGET_BITRATE_BPS: u32 = 3_500_000;
+const H264_TARGET_FPS: f32 = 18.0;
 
 fn ensure_rustls_crypto_provider() {
     RUSTLS_PROVIDER_INIT.call_once(|| {
@@ -241,6 +250,147 @@ fn emit_stream_event(channel: &Arc<Channel<RdpStreamEvent>>, event: RdpStreamEve
 
 fn emit_stream_frame(channel: &Arc<Channel<InvokeResponseBody>>, frame_bytes: Vec<u8>) -> bool {
     channel.send(InvokeResponseBody::Raw(frame_bytes)).is_ok()
+}
+
+impl RdpFrameCodec {
+    fn packet_codec_id(self) -> u8 {
+        match self {
+            Self::Png => 0,
+            Self::H264 => 1,
+        }
+    }
+}
+
+struct RdpStreamFramePacket {
+    codec: RdpFrameCodec,
+    keyframe: bool,
+    width: u16,
+    height: u16,
+    pts_us: u64,
+    payload: Vec<u8>,
+}
+
+impl RdpStreamFramePacket {
+    fn new(
+        codec: RdpFrameCodec,
+        keyframe: bool,
+        width: u16,
+        height: u16,
+        pts_us: u64,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            codec,
+            keyframe,
+            width,
+            height,
+            pts_us,
+            payload,
+        }
+    }
+
+    fn into_bytes(self) -> Result<Vec<u8>> {
+        let payload_len = u32::try_from(self.payload.len()).context("frame payload too large")?;
+        let mut packet = Vec::with_capacity(STREAM_PACKET_HEADER_LEN + self.payload.len());
+        packet.extend_from_slice(&STREAM_PACKET_MAGIC);
+        packet.push(STREAM_PACKET_VERSION);
+        packet.push(self.codec.packet_codec_id());
+        packet.push(if self.keyframe { 1 } else { 0 });
+        packet.push(0);
+        packet.extend_from_slice(&self.width.to_le_bytes());
+        packet.extend_from_slice(&self.height.to_le_bytes());
+        packet.extend_from_slice(&self.pts_us.to_le_bytes());
+        packet.extend_from_slice(&payload_len.to_le_bytes());
+        packet.extend_from_slice(&self.payload);
+        Ok(packet)
+    }
+}
+
+struct H264StreamEncoder {
+    encoder: H264Encoder,
+    yuv_buffer: Option<YUVBuffer>,
+    width: usize,
+    height: usize,
+    frame_index: u64,
+}
+
+impl H264StreamEncoder {
+    fn new() -> Result<Self> {
+        let config = EncoderConfig::new()
+            .usage_type(UsageType::ScreenContentRealTime)
+            .rate_control_mode(RateControlMode::Bitrate)
+            .bitrate(BitRate::from_bps(H264_TARGET_BITRATE_BPS))
+            .max_frame_rate(FrameRate::from_hz(H264_TARGET_FPS))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(
+                H264_KEYFRAME_INTERVAL_FRAMES as u32,
+            ));
+        let encoder = H264Encoder::with_api_config(OpenH264API::from_source(), config)
+            .context("initialize H.264 encoder")?;
+        Ok(Self {
+            encoder,
+            yuv_buffer: None,
+            width: 0,
+            height: 0,
+            frame_index: 0,
+        })
+    }
+
+    fn encode(
+        &mut self,
+        image: &DecodedImage,
+        pts_us: u64,
+    ) -> Result<Option<RdpStreamFramePacket>> {
+        let width = usize::from(image.width());
+        let height = usize::from(image.height());
+        if width % 2 != 0 || height % 2 != 0 {
+            anyhow::bail!("H.264 requires even width/height.");
+        }
+
+        if self.width != width || self.height != height || self.yuv_buffer.is_none() {
+            self.width = width;
+            self.height = height;
+            self.yuv_buffer = Some(YUVBuffer::new(width, height));
+            self.frame_index = 0;
+        }
+
+        let Some(yuv_buffer) = self.yuv_buffer.as_mut() else {
+            anyhow::bail!("H.264 YUV buffer is not initialized.");
+        };
+
+        let rgba_source = RgbaSliceU8::new(image.data(), (width, height));
+        yuv_buffer.read_rgb(rgba_source);
+
+        if self.frame_index == 0 || self.frame_index % H264_KEYFRAME_INTERVAL_FRAMES == 0 {
+            self.encoder.force_intra_frame();
+        }
+
+        let timestamp_ms = pts_us / 1_000;
+        let stream = self
+            .encoder
+            .encode_at(yuv_buffer, Timestamp::from_millis(timestamp_ms))
+            .context("encode H.264 stream frame")?;
+        self.frame_index = self.frame_index.saturating_add(1);
+
+        let frame_type = stream.frame_type();
+        if frame_type == FrameType::Skip {
+            return Ok(None);
+        }
+
+        let payload = stream.to_vec();
+        if payload.is_empty() {
+            return Ok(None);
+        }
+
+        let keyframe = matches!(frame_type, FrameType::IDR | FrameType::I);
+        Ok(Some(RdpStreamFramePacket::new(
+            RdpFrameCodec::H264,
+            keyframe,
+            image.width(),
+            image.height(),
+            pts_us,
+            payload,
+        )))
+    }
 }
 
 fn looks_like_auth_error(message: &str) -> bool {
@@ -330,8 +480,14 @@ fn run_rdp_stream_worker_inner(
 
     let connect_timeout = Duration::from_secs(options.timeout_seconds.clamp(3, 30));
     let read_timeout = Duration::from_millis(130);
-    let (connection_result, mut framed) = connect(config, options.host, options.port, connect_timeout, read_timeout)
-        .context("connect")?;
+    let (connection_result, mut framed) = connect(
+        config,
+        options.host,
+        options.port,
+        connect_timeout,
+        read_timeout,
+    )
+    .context("connect")?;
 
     let mut image = DecodedImage::new(
         PixelFormat::RgbA32,
@@ -342,6 +498,19 @@ fn run_rdp_stream_worker_inner(
     let mut pending_inputs = options.input_actions;
     let mut force_emit = true;
     let mut last_emit = Instant::now();
+    let stream_started = Instant::now();
+    let mut frame_codec = options.stream_codec;
+    let mut h264_encoder = if frame_codec == RdpFrameCodec::H264 {
+        match H264StreamEncoder::new() {
+            Ok(encoder) => Some(encoder),
+            Err(_) => {
+                frame_codec = RdpFrameCodec::Png;
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     if !emit_stream_event(
         event_channel,
@@ -349,6 +518,7 @@ fn run_rdp_stream_worker_inner(
             session_id: session_id.to_string(),
             width: image.width(),
             height: image.height(),
+            frame_codec,
         },
     ) {
         return Ok(());
@@ -394,8 +564,31 @@ fn run_rdp_stream_worker_inner(
             Duration::from_millis(420)
         };
         if force_emit || last_emit.elapsed() >= emit_every {
-            let frame_bytes = encode_image_to_png_bytes(&image).context("encode stream frame")?;
-            if !emit_stream_frame(frame_channel, frame_bytes) {
+            let pts_us = stream_started
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64;
+            let frame_packet = if frame_codec == RdpFrameCodec::H264 {
+                match h264_encoder.as_mut() {
+                    Some(encoder) => match encoder.encode(&image, pts_us) {
+                        Ok(Some(packet)) => packet,
+                        Ok(None) => {
+                            force_emit = false;
+                            last_emit = Instant::now();
+                            continue;
+                        }
+                        Err(_) => {
+                            frame_codec = RdpFrameCodec::Png;
+                            h264_encoder = None;
+                            build_png_stream_packet(&image, pts_us)?
+                        }
+                    },
+                    None => build_png_stream_packet(&image, pts_us)?,
+                }
+            } else {
+                build_png_stream_packet(&image, pts_us)?
+            };
+            if !emit_stream_frame(frame_channel, frame_packet.into_bytes()?) {
                 break 'worker;
             }
             force_emit = false;
@@ -442,9 +635,12 @@ fn active_stage_tick(
 
 fn encode_image_to_png_bytes(image: &DecodedImage) -> Result<Vec<u8>> {
     let image_data = image.data().to_vec();
-    let img: image::ImageBuffer<image::Rgba<u8>, _> =
-        image::ImageBuffer::from_raw(u32::from(image.width()), u32::from(image.height()), image_data)
-            .context("invalid image")?;
+    let img: image::ImageBuffer<image::Rgba<u8>, _> = image::ImageBuffer::from_raw(
+        u32::from(image.width()),
+        u32::from(image.height()),
+        image_data,
+    )
+    .context("invalid image")?;
 
     let mut png_bytes = Vec::new();
     image::DynamicImage::ImageRgba8(img)
@@ -452,6 +648,18 @@ fn encode_image_to_png_bytes(image: &DecodedImage) -> Result<Vec<u8>> {
         .context("encode PNG frame")?;
 
     Ok(png_bytes)
+}
+
+fn build_png_stream_packet(image: &DecodedImage, pts_us: u64) -> Result<RdpStreamFramePacket> {
+    let png_bytes = encode_image_to_png_bytes(image).context("encode PNG stream frame")?;
+    Ok(RdpStreamFramePacket::new(
+        RdpFrameCodec::Png,
+        true,
+        image.width(),
+        image.height(),
+        pts_us,
+        png_bytes,
+    ))
 }
 
 pub fn capture_png_once(options: RdpCaptureOptions) -> Result<RdpCaptureImage> {

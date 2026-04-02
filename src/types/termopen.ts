@@ -73,6 +73,7 @@ export interface SshSessionInfo {
 }
 
 export type RdpMouseButton = "left" | "right" | "middle";
+export type RdpFrameCodec = "png" | "h264";
 
 export type RdpInputAction =
   | {
@@ -153,6 +154,7 @@ export type RdpStreamEvent =
         session_id: string;
         width: number;
         height: number;
+        frame_codec: RdpFrameCodec;
       };
     }
   | {

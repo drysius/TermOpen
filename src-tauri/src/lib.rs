@@ -16,8 +16,8 @@ use models::{
 };
 use protocol_stream::{StreamControlInput, StreamControlState, StreamViewport};
 use rdp::{
-    capture_png_once, RdpCaptureOptions, RdpInputAction, RdpStreamEvent, RdpStreamManager,
-    RdpStreamStartResult,
+    capture_png_once, RdpCaptureOptions, RdpFrameCodec, RdpInputAction, RdpStreamEvent,
+    RdpStreamManager, RdpStreamStartResult,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
@@ -517,6 +517,7 @@ async fn rdp_capture(
             .into_iter()
             .take(32)
             .collect(),
+        stream_codec: RdpFrameCodec::Png,
     };
 
     let captured = tokio::task::spawn_blocking(move || capture_png_once(options))
@@ -549,6 +550,7 @@ async fn rdp_stream_start(
     password_override: Option<String>,
     keychain_id_override: Option<String>,
     save_auth_choice: Option<bool>,
+    preferred_codec: Option<RdpFrameCodec>,
     channel: tauri::ipc::Channel<RdpStreamEvent>,
     frame_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<RdpStreamStartResult, String> {
@@ -582,6 +584,7 @@ async fn rdp_stream_start(
         height: target_height,
         timeout_seconds: 20,
         input_actions: Vec::new(),
+        stream_codec: preferred_codec.unwrap_or(RdpFrameCodec::Png),
     };
 
     let control_state = StreamControlState::new(StreamViewport {
