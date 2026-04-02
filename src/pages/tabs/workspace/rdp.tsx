@@ -61,6 +61,8 @@ export function RdpBlockView({
   const videoDecoderRef = useRef<VideoDecoder | null>(null);
   const decoderStartedRef = useRef(false);
   const decoderFailedRef = useRef(false);
+  const needsRedrawRef = useRef(true);
+  const animFrameRef = useRef(0);
   const drawRectRef = useRef({
     x: 0,
     y: 0,
@@ -69,10 +71,14 @@ export function RdpBlockView({
     canvasWidth: 0,
     canvasHeight: 0,
   });
-  const drawFrameRef = useRef<() => void>(() => undefined);
   const lastMoveSentAtRef = useRef(0);
   const [localPointer, setLocalPointer] = useState<{ x: number; y: number } | null>(null);
+  const localPointerRef = useRef<{ x: number; y: number } | null>(null);
+  localPointerRef.current = localPointer;
+  const imageSizeRef = useRef({ width: block.imageWidth, height: block.imageHeight });
+  imageSizeRef.current = { width: block.imageWidth, height: block.imageHeight };
   const isConnected = block.connectStage === "ready" && block.imageWidth > 0 && block.imageHeight > 0;
+
   const emitControlWithViewport = useCallback(
     (control: StreamControlInput) => {
       const canvas = canvasRef.current;
@@ -89,6 +95,7 @@ export function RdpBlockView({
     },
     [onControlChange],
   );
+
   const clearVideoDecoder = useCallback(() => {
     decoderStartedRef.current = false;
     const decoder = videoDecoderRef.current;
@@ -101,6 +108,7 @@ export function RdpBlockView({
       decodedFrameRef.current = null;
     }
   }, []);
+
   const reportDecoderFailure = useCallback(() => {
     if (decoderFailedRef.current) {
       return;
@@ -109,16 +117,13 @@ export function RdpBlockView({
     emitRdpVideoDecoderError({ blockId: block.id });
   }, [block.id]);
 
-  const drawFrame = useCallback(() => {
+  // Stable paint function — reads everything from refs, never recreated
+  const paint = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
+    if (!canvas) return;
 
     const context = canvas.getContext("2d");
-    if (!context) {
-      return;
-    }
+    if (!context) return;
 
     const cssWidth = Math.max(1, Math.floor(canvas.clientWidth));
     const cssHeight = Math.max(1, Math.floor(canvas.clientHeight));
@@ -136,10 +141,11 @@ export function RdpBlockView({
     context.fillRect(0, 0, canvas.width, canvas.height);
 
     const frame = decodedFrameRef.current ?? frameImageRef.current;
-    if (frame && block.imageWidth > 0 && block.imageHeight > 0) {
-      const scale = Math.min(canvas.width / block.imageWidth, canvas.height / block.imageHeight);
-      const drawWidth = Math.max(1, Math.floor(block.imageWidth * scale));
-      const drawHeight = Math.max(1, Math.floor(block.imageHeight * scale));
+    const imgSize = imageSizeRef.current;
+    if (frame && imgSize.width > 0 && imgSize.height > 0) {
+      const scale = Math.min(canvas.width / imgSize.width, canvas.height / imgSize.height);
+      const drawWidth = Math.max(1, Math.floor(imgSize.width * scale));
+      const drawHeight = Math.max(1, Math.floor(imgSize.height * scale));
       const offsetX = Math.floor((canvas.width - drawWidth) / 2);
       const offsetY = Math.floor((canvas.height - drawHeight) / 2);
 
@@ -155,9 +161,10 @@ export function RdpBlockView({
       context.imageSmoothingEnabled = false;
       context.drawImage(frame as unknown as CanvasImageSource, offsetX, offsetY, drawWidth, drawHeight);
 
-      if (localPointer) {
-        const normalizedX = block.imageWidth > 1 ? localPointer.x / (block.imageWidth - 1) : 0;
-        const normalizedY = block.imageHeight > 1 ? localPointer.y / (block.imageHeight - 1) : 0;
+      const pointer = localPointerRef.current;
+      if (pointer) {
+        const normalizedX = imgSize.width > 1 ? pointer.x / (imgSize.width - 1) : 0;
+        const normalizedY = imgSize.height > 1 ? pointer.y / (imgSize.height - 1) : 0;
         const pointerX = offsetX + normalizedX * drawWidth;
         const pointerY = offsetY + normalizedY * drawHeight;
 
@@ -182,16 +189,35 @@ export function RdpBlockView({
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
     };
-  }, [block.imageHeight, block.imageWidth, localPointer]);
+  }, []);
 
+  const requestRedraw = useCallback(() => {
+    needsRedrawRef.current = true;
+  }, []);
+
+  // rAF render loop — paints only when flagged dirty
   useEffect(() => {
-    drawFrameRef.current = drawFrame;
-  }, [drawFrame]);
+    let running = true;
+    const loop_ = () => {
+      if (!running) return;
+      if (needsRedrawRef.current) {
+        needsRedrawRef.current = false;
+        paint();
+      }
+      animFrameRef.current = requestAnimationFrame(loop_);
+    };
+    animFrameRef.current = requestAnimationFrame(loop_);
+    return () => {
+      running = false;
+      cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [paint]);
 
+  // Fallback: load imageUrl (PNG snapshot) into frameImageRef
   useEffect(() => {
     if (!block.imageUrl) {
       frameImageRef.current = null;
-      drawFrame();
+      requestRedraw();
       return;
     }
 
@@ -199,20 +225,22 @@ export function RdpBlockView({
     const frame = new Image();
     frame.onload = () => {
       frameImageRef.current = frame;
-      drawFrame();
+      requestRedraw();
     };
     frame.src = block.imageUrl;
-  }, [block.imageUrl, clearVideoDecoder, drawFrame]);
+  }, [block.imageUrl, clearVideoDecoder, requestRedraw]);
 
+  // Reset decoder when not connected
   useEffect(() => {
     if (block.connectStage === "ready") {
       return;
     }
     decoderFailedRef.current = false;
     clearVideoDecoder();
-    drawFrameRef.current();
-  }, [block.connectStage, clearVideoDecoder]);
+    requestRedraw();
+  }, [block.connectStage, clearVideoDecoder, requestRedraw]);
 
+  // VideoDecoder setup — receives H264 chunks, decodes to VideoFrame
   useEffect(() => {
     const videoDecoderCtor = (globalThis as typeof globalThis & { VideoDecoder?: typeof VideoDecoder }).VideoDecoder;
     const encodedVideoChunkCtor = (globalThis as typeof globalThis & { EncodedVideoChunk?: typeof EncodedVideoChunk })
@@ -234,12 +262,12 @@ export function RdpBlockView({
               decodedFrameRef.current.close();
             }
             decodedFrameRef.current = frame;
-            drawFrameRef.current();
+            requestRedraw();
           },
           error: () => {
             reportDecoderFailure();
             clearVideoDecoder();
-            drawFrameRef.current();
+            requestRedraw();
           },
         });
         decoder.configure({
@@ -291,24 +319,31 @@ export function RdpBlockView({
       detach();
       clearVideoDecoder();
     };
-  }, [block.id, clearVideoDecoder, reportDecoderFailure]);
+  }, [block.id, clearVideoDecoder, reportDecoderFailure, requestRedraw]);
 
+  // Redraw on pointer change or image size change
   useEffect(() => {
-    drawFrame();
-  }, [drawFrame, localPointer]);
+    requestRedraw();
+  }, [localPointer, block.imageWidth, block.imageHeight, requestRedraw]);
 
+  // Redraw on resize
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
+    if (!canvas) return;
     const observer = new ResizeObserver(() => {
-      drawFrame();
+      requestRedraw();
       emitControlWithViewport({});
     });
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [drawFrame, emitControlWithViewport]);
+  }, [requestRedraw, emitControlWithViewport]);
+
+  // Cleanup decoder on unmount
+  useEffect(() => {
+    return () => {
+      clearVideoDecoder();
+    };
+  }, [clearVideoDecoder]);
 
   const mapClientToRemote = useCallback(
     (clientX: number, clientY: number) => {
@@ -641,5 +676,3 @@ const rdpWorkspaceModule: WorkspaceBlockModule<RdpBlockViewProps> = {
 };
 
 export default rdpWorkspaceModule;
-
-

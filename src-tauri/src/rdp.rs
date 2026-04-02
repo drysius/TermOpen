@@ -234,8 +234,8 @@ const STREAM_PACKET_MAGIC: [u8; 4] = *b"TRDP";
 const STREAM_PACKET_VERSION: u8 = 1;
 const STREAM_PACKET_HEADER_LEN: usize = 24;
 const H264_KEYFRAME_INTERVAL_FRAMES: u64 = 60;
-const H264_TARGET_BITRATE_BPS: u32 = 3_500_000;
-const H264_TARGET_FPS: f32 = 18.0;
+const H264_TARGET_BITRATE_BPS: u32 = 8_000_000;
+const H264_TARGET_FPS: f32 = 60.0;
 
 fn ensure_rustls_crypto_provider() {
     RUSTLS_PROVIDER_INIT.call_once(|| {
@@ -385,6 +385,83 @@ impl H264StreamEncoder {
             payload,
         )))
     }
+
+    fn encode_raw(
+        &mut self,
+        rgba_data: &[u8],
+        width: u16,
+        height: u16,
+        pts_us: u64,
+    ) -> Result<Option<RdpStreamFramePacket>> {
+        let w = usize::from(width);
+        let h = usize::from(height);
+        if w % 2 != 0 || h % 2 != 0 {
+            anyhow::bail!("H.264 requires even width/height.");
+        }
+
+        if self.width != w || self.height != h || self.yuv_buffer.is_none() {
+            self.width = w;
+            self.height = h;
+            self.yuv_buffer = Some(YUVBuffer::new(w, h));
+            self.frame_index = 0;
+        }
+
+        let Some(yuv_buffer) = self.yuv_buffer.as_mut() else {
+            anyhow::bail!("H.264 YUV buffer is not initialized.");
+        };
+
+        let rgba_source = RgbaSliceU8::new(rgba_data, (w, h));
+        yuv_buffer.read_rgb(rgba_source);
+
+        if self.frame_index == 0 || self.frame_index % H264_KEYFRAME_INTERVAL_FRAMES == 0 {
+            self.encoder.force_intra_frame();
+        }
+
+        let timestamp_ms = pts_us / 1_000;
+        let stream = self
+            .encoder
+            .encode_at(yuv_buffer, Timestamp::from_millis(timestamp_ms))
+            .context("encode H.264 stream frame")?;
+        self.frame_index = self.frame_index.saturating_add(1);
+
+        let frame_type = stream.frame_type();
+        if frame_type == FrameType::Skip {
+            return Ok(None);
+        }
+
+        let payload = stream.to_vec();
+        if payload.is_empty() {
+            return Ok(None);
+        }
+
+        let keyframe = matches!(frame_type, FrameType::IDR | FrameType::I);
+        Ok(Some(RdpStreamFramePacket::new(
+            RdpFrameCodec::H264,
+            keyframe,
+            width,
+            height,
+            pts_us,
+            payload,
+        )))
+    }
+}
+
+fn build_png_stream_packet_raw(rgba_data: &[u8], width: u16, height: u16, pts_us: u64) -> Result<RdpStreamFramePacket> {
+    let img: image::ImageBuffer<image::Rgba<u8>, _> =
+        image::ImageBuffer::from_raw(u32::from(width), u32::from(height), rgba_data.to_vec())
+            .context("invalid image")?;
+    let mut png_bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .context("encode PNG frame")?;
+    Ok(RdpStreamFramePacket::new(
+        RdpFrameCodec::Png,
+        true,
+        width,
+        height,
+        pts_us,
+        png_bytes,
+    ))
 }
 
 fn looks_like_auth_error(message: &str) -> bool {
@@ -483,9 +560,6 @@ fn run_rdp_stream_worker_inner(
     );
     let mut active_stage = ActiveStage::new(connection_result);
     let mut pending_inputs = options.input_actions;
-    let mut force_emit = true;
-    let mut last_emit = Instant::now();
-    let stream_started = Instant::now();
     let mut frame_codec = options.stream_codec;
     let mut h264_encoder = if frame_codec == RdpFrameCodec::H264 {
         match H264StreamEncoder::new() {
@@ -510,6 +584,99 @@ fn run_rdp_stream_worker_inner(
         return Ok(());
     }
 
+    // Shared state between RDP reader thread and emit thread
+    let image_width = image.width();
+    let image_height = image.height();
+    let image_data_len = image.data().len();
+    let shared_buf = Arc::new(std::sync::Mutex::new(image.data().to_vec()));
+    let image_dirty = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let worker_stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stream_active = Arc::new(std::sync::atomic::AtomicBool::new(control_state.active));
+
+    // Emit thread: sends frames to frontend at ~60 FPS
+    let emit_buf = shared_buf.clone();
+    let emit_dirty = image_dirty.clone();
+    let emit_stopped = worker_stopped.clone();
+    let emit_active = stream_active.clone();
+    let emit_output = output.clone();
+    let emit_session_id = session_id.to_string();
+    let emit_handle = std::thread::Builder::new()
+        .name(format!("rdp-emit-{}", &session_id[..8]))
+        .spawn(move || {
+            let mut h264_enc = h264_encoder;
+            let mut codec = frame_codec;
+            let started = Instant::now();
+            // Scratch buffer to avoid allocating each frame
+            let mut scratch = vec![0u8; image_data_len];
+
+            loop {
+                if emit_stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+
+                let emit_every = if emit_active.load(std::sync::atomic::Ordering::Relaxed) {
+                    Duration::from_millis(16)
+                } else {
+                    Duration::from_millis(420)
+                };
+                std::thread::sleep(emit_every);
+
+                if !emit_dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+
+                // Copy image data under lock
+                {
+                    let buf = emit_buf.lock().unwrap();
+                    scratch.copy_from_slice(&buf);
+                }
+
+                let pts_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+
+                // Build a temporary DecodedImage from the scratch buffer
+                let frame_packet = if codec == RdpFrameCodec::H264 {
+                    match h264_enc.as_mut() {
+                        Some(encoder) => {
+                            match encoder.encode_raw(&scratch, image_width, image_height, pts_us) {
+                                Ok(Some(packet)) => packet,
+                                Ok(None) => continue,
+                                Err(_) => {
+                                    codec = RdpFrameCodec::Png;
+                                    h264_enc = None;
+                                    match build_png_stream_packet_raw(&scratch, image_width, image_height, pts_us) {
+                                        Ok(p) => p,
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            match build_png_stream_packet_raw(&scratch, image_width, image_height, pts_us) {
+                                Ok(p) => p,
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                } else {
+                    match build_png_stream_packet_raw(&scratch, image_width, image_height, pts_us) {
+                        Ok(p) => p,
+                        Err(_) => break,
+                    }
+                };
+
+                match frame_packet.into_bytes() {
+                    Ok(bytes) => {
+                        if !emit_output.send_frame(&emit_session_id, bytes) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .ok();
+
+    // RDP reader loop: reads PDUs and updates shared image buffer
     'worker: loop {
         while let Ok(message) = rx.try_recv() {
             match message {
@@ -524,6 +691,7 @@ fn run_rdp_stream_worker_inner(
                 }
                 RdpStreamWorkerMessage::Control(update) => {
                     control_state.apply(update);
+                    stream_active.store(control_state.active, std::sync::atomic::Ordering::Relaxed);
                 }
                 RdpStreamWorkerMessage::Stop => break 'worker,
             }
@@ -533,53 +701,28 @@ fn run_rdp_stream_worker_inner(
             process_input_actions(&mut framed, &mut active_stage, &mut image, &pending_inputs)
                 .context("process stream inputs")?;
             pending_inputs.clear();
-            force_emit = true;
+            // Copy updated image to shared buffer
+            let mut buf = shared_buf.lock().unwrap();
+            buf.copy_from_slice(image.data());
+            image_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         match active_stage_tick(&mut framed, &mut active_stage, &mut image)? {
             TickOutcome::Idle => {}
             TickOutcome::Updated => {
-                force_emit = true;
+                // Copy updated image to shared buffer
+                let mut buf = shared_buf.lock().unwrap();
+                buf.copy_from_slice(image.data());
+                image_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             TickOutcome::Terminated => break 'worker,
         }
+    }
 
-        let emit_every = if control_state.active {
-            Duration::from_millis(120)
-        } else {
-            Duration::from_millis(420)
-        };
-        if force_emit || last_emit.elapsed() >= emit_every {
-            let pts_us = stream_started
-                .elapsed()
-                .as_micros()
-                .min(u128::from(u64::MAX)) as u64;
-            let frame_packet = if frame_codec == RdpFrameCodec::H264 {
-                match h264_encoder.as_mut() {
-                    Some(encoder) => match encoder.encode(&image, pts_us) {
-                        Ok(Some(packet)) => packet,
-                        Ok(None) => {
-                            force_emit = false;
-                            last_emit = Instant::now();
-                            continue;
-                        }
-                        Err(_) => {
-                            frame_codec = RdpFrameCodec::Png;
-                            h264_encoder = None;
-                            build_png_stream_packet(&image, pts_us)?
-                        }
-                    },
-                    None => build_png_stream_packet(&image, pts_us)?,
-                }
-            } else {
-                build_png_stream_packet(&image, pts_us)?
-            };
-            if !output.send_frame(session_id, frame_packet.into_bytes()?) {
-                break 'worker;
-            }
-            force_emit = false;
-            last_emit = Instant::now();
-        }
+    // Stop emit thread
+    worker_stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(handle) = emit_handle {
+        let _ = handle.join();
     }
 
     Ok(())
