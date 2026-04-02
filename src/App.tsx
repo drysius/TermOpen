@@ -12,6 +12,7 @@ import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
 import { getError } from "@/functions/common";
 import { useT } from "@/langs";
+import { initializeBackendSocket } from "@/lib/backend-socket";
 import { api } from "@/lib/tauri";
 import { AboutPage } from "@/pages/sections/about-page";
 import { HomePage } from "@/pages/sections/home-page";
@@ -492,6 +493,13 @@ function App() {
   useEffect(() => {
     let mounted = true;
     void (async () => {
+      try {
+        setBootMessage("Inicializando socket local...");
+        await initializeBackendSocket();
+      } catch {
+        // Keep app startup resilient; modules can retry socket init on demand.
+      }
+
       try {
         setBootMessage("Verificando atualizacoes...");
         const release = await api.releaseCheckLatest().catch(() => null);

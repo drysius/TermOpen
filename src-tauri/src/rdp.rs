@@ -30,7 +30,6 @@ use openh264::encoder::{
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
 use openh264::{OpenH264API, Timestamp};
 use sspi::network_client::reqwest_network_client::ReqwestNetworkClient;
-use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio_rustls::rustls;
 use uuid::Uuid;
 
@@ -147,6 +146,11 @@ struct RdpStreamSession {
     _join: JoinHandle<()>,
 }
 
+pub trait RdpStreamOutput: Send + Sync + 'static {
+    fn send_event(&self, event: RdpStreamEvent) -> bool;
+    fn send_frame(&self, session_id: &str, frame_bytes: Vec<u8>) -> bool;
+}
+
 #[derive(Default)]
 pub struct RdpStreamManager {
     sessions: HashMap<String, RdpStreamSession>,
@@ -157,16 +161,12 @@ impl RdpStreamManager {
         &mut self,
         options: RdpCaptureOptions,
         control_state: StreamControlState,
-        event_channel: Channel<RdpStreamEvent>,
-        frame_channel: Channel<InvokeResponseBody>,
+        output: Arc<dyn RdpStreamOutput>,
     ) -> RdpStreamStartResult {
         let session_id = Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::channel::<RdpStreamWorkerMessage>();
-        let event_channel = Arc::new(event_channel);
-        let frame_channel = Arc::new(frame_channel);
         let worker_session_id = session_id.clone();
-        let worker_event_channel = event_channel.clone();
-        let worker_frame_channel = frame_channel.clone();
+        let worker_output = output.clone();
         let join = std::thread::Builder::new()
             .name(format!("rdp-stream-{}", &session_id[..8]))
             .spawn(move || {
@@ -174,8 +174,7 @@ impl RdpStreamManager {
                     worker_session_id.clone(),
                     options,
                     control_state,
-                    worker_event_channel,
-                    worker_frame_channel,
+                    worker_output,
                     rx,
                 );
             });
@@ -242,14 +241,6 @@ fn ensure_rustls_crypto_provider() {
     RUSTLS_PROVIDER_INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
-}
-
-fn emit_stream_event(channel: &Arc<Channel<RdpStreamEvent>>, event: RdpStreamEvent) -> bool {
-    channel.send(event).is_ok()
-}
-
-fn emit_stream_frame(channel: &Arc<Channel<InvokeResponseBody>>, frame_bytes: Vec<u8>) -> bool {
-    channel.send(InvokeResponseBody::Raw(frame_bytes)).is_ok()
 }
 
 impl RdpFrameCodec {
@@ -321,6 +312,9 @@ impl H264StreamEncoder {
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(H264_TARGET_BITRATE_BPS))
             .max_frame_rate(FrameRate::from_hz(H264_TARGET_FPS))
+            // These options are unsupported for ScreenContent in OpenH264 and only add startup warnings.
+            .adaptive_quantization(false)
+            .background_detection(false)
             .intra_frame_period(IntraFramePeriod::from_num_frames(
                 H264_KEYFRAME_INTERVAL_FRAMES as u32,
             ));
@@ -411,12 +405,10 @@ fn run_rdp_stream_worker(
     session_id: String,
     options: RdpCaptureOptions,
     mut control_state: StreamControlState,
-    event_channel: Arc<Channel<RdpStreamEvent>>,
-    frame_channel: Arc<Channel<InvokeResponseBody>>,
+    output: Arc<dyn RdpStreamOutput>,
     rx: mpsc::Receiver<RdpStreamWorkerMessage>,
 ) {
-    let _ = emit_stream_event(
-        &event_channel,
+    let _ = output.send_event(
         RdpStreamEvent::Connecting {
             session_id: session_id.clone(),
             message: "Conectando via RDP...".to_string(),
@@ -427,23 +419,20 @@ fn run_rdp_stream_worker(
         &session_id,
         options,
         &mut control_state,
-        &event_channel,
-        &frame_channel,
+        &output,
         rx,
     );
     if let Err(error) = worker_result {
         let message = format!("{error:#}");
         let _ = if looks_like_auth_error(&message) {
-            emit_stream_event(
-                &event_channel,
+            output.send_event(
                 RdpStreamEvent::AuthRequired {
                     session_id: session_id.clone(),
                     message,
                 },
             )
         } else {
-            emit_stream_event(
-                &event_channel,
+            output.send_event(
                 RdpStreamEvent::Error {
                     session_id: session_id.clone(),
                     message,
@@ -452,8 +441,7 @@ fn run_rdp_stream_worker(
         };
     }
 
-    let _ = emit_stream_event(
-        &event_channel,
+    let _ = output.send_event(
         RdpStreamEvent::Stopped {
             session_id: session_id.clone(),
         },
@@ -464,8 +452,7 @@ fn run_rdp_stream_worker_inner(
     session_id: &str,
     options: RdpCaptureOptions,
     control_state: &mut StreamControlState,
-    event_channel: &Arc<Channel<RdpStreamEvent>>,
-    frame_channel: &Arc<Channel<InvokeResponseBody>>,
+    output: &Arc<dyn RdpStreamOutput>,
     rx: mpsc::Receiver<RdpStreamWorkerMessage>,
 ) -> Result<()> {
     ensure_rustls_crypto_provider();
@@ -512,8 +499,7 @@ fn run_rdp_stream_worker_inner(
         None
     };
 
-    if !emit_stream_event(
-        event_channel,
+    if !output.send_event(
         RdpStreamEvent::Ready {
             session_id: session_id.to_string(),
             width: image.width(),
@@ -588,7 +574,7 @@ fn run_rdp_stream_worker_inner(
             } else {
                 build_png_stream_packet(&image, pts_us)?
             };
-            if !emit_stream_frame(frame_channel, frame_packet.into_bytes()?) {
+            if !output.send_frame(session_id, frame_packet.into_bytes()?) {
                 break 'worker;
             }
             force_emit = false;

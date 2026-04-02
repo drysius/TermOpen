@@ -1,13 +1,18 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::Mutex as StdMutex,
+    sync::{Arc, Mutex as StdMutex},
     time::UNIX_EPOCH,
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+    Engine,
+};
+use futures_util::{SinkExt, StreamExt};
 use models::{
     AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, KeychainEntry, KnownHostEntry,
     RdpCaptureResult, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult,
@@ -17,14 +22,19 @@ use models::{
 use protocol_stream::{StreamControlInput, StreamControlState, StreamViewport};
 use rdp::{
     capture_png_once, RdpCaptureOptions, RdpFrameCodec, RdpInputAction, RdpStreamEvent,
-    RdpStreamManager, RdpStreamStartResult,
+    RdpStreamManager, RdpStreamOutput, RdpStreamStartResult,
 };
+use rand::{rngs::OsRng, RngCore};
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tempfile::NamedTempFile;
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+use uuid::Uuid;
 use vault::VaultManager;
 
 mod models;
@@ -42,7 +52,91 @@ struct AppState {
     rdp_streams: Mutex<RdpStreamManager>,
     sync: Mutex<SyncManager>,
     deeplink_queue: StdMutex<Vec<String>>,
+    ws_bridge: StdMutex<WsBridgeState>,
 }
+
+#[derive(Default)]
+struct WsBridgeState {
+    token: Option<String>,
+    port: Option<u16>,
+    clients: HashMap<String, UnboundedSender<WsOutboundMessage>>,
+    session_owner: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+enum WsOutboundMessage {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WsBootstrapResult {
+    url: String,
+    token: String,
+    protocol_version: u8,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsClientRequest {
+    id: String,
+    method: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WsServerTextMessage {
+    Response {
+        id: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    Event {
+        event: String,
+        payload: serde_json::Value,
+    },
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsAuthParams {
+    token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsRdpStreamStartParams {
+    profile_id: String,
+    width: Option<u16>,
+    height: Option<u16>,
+    password_override: Option<String>,
+    keychain_id_override: Option<String>,
+    save_auth_choice: Option<bool>,
+    preferred_codec: Option<RdpFrameCodec>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsRdpStreamInputParams {
+    session_id: String,
+    input_actions: Vec<RdpInputAction>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsRdpStreamControlParams {
+    session_id: String,
+    control: StreamControlInput,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsRdpStreamStopParams {
+    session_id: String,
+}
+
+const WS_PROTOCOL_VERSION: u8 = 1;
+const WS_BINARY_MAGIC: [u8; 4] = *b"TOWS";
+const WS_BINARY_MESSAGE_RDP_FRAME: u8 = 1;
 
 const DEFAULT_SFTP_CHUNK_SIZE_KB: u32 = 1024;
 const MIN_SFTP_CHUNK_SIZE_KB: u32 = 64;
@@ -122,14 +216,14 @@ struct ResolvedRdpProfile {
 }
 
 async fn resolve_rdp_profile(
-    state: &State<'_, AppState>,
+    app_state: &AppState,
     profile_id: String,
     password_override: Option<String>,
     keychain_id_override: Option<String>,
     save_auth_choice: Option<bool>,
 ) -> Result<ResolvedRdpProfile, RdpStreamStartResult> {
     let profile = {
-        let mut vault = state.vault.lock().await;
+        let mut vault = app_state.vault.lock().await;
         let mut profile = match vault.profile_by_id(&profile_id) {
             Ok(value) => value,
             Err(error) => {
@@ -250,6 +344,484 @@ fn emit_transfer_progress(
         let percent = ((transferred.saturating_mul(100)) / total_bytes).min(100) as u8;
         let _ = app.emit(progress_event, percent);
     }
+}
+
+fn generate_ws_access_token() -> String {
+    let mut bytes = [0u8; 96];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn serialize_ws_text(message: &WsServerTextMessage) -> String {
+    serde_json::to_string(message).unwrap_or_else(|_| {
+        "{\"kind\":\"response\",\"id\":\"unknown\",\"ok\":false,\"error\":\"Falha interna no websocket.\"}"
+            .to_string()
+    })
+}
+
+fn ws_response_text(
+    id: String,
+    ok: bool,
+    result: Option<serde_json::Value>,
+    error: Option<String>,
+) -> String {
+    serialize_ws_text(&WsServerTextMessage::Response {
+        id,
+        ok,
+        result,
+        error,
+    })
+}
+
+fn ws_event_text(event: &str, payload: serde_json::Value) -> String {
+    serialize_ws_text(&WsServerTextMessage::Event {
+        event: event.to_string(),
+        payload,
+    })
+}
+
+fn ws_send_to_client(app: &tauri::AppHandle, client_id: &str, message: WsOutboundMessage) -> bool {
+    let app_state = app.state::<AppState>();
+    let sender = {
+        let Ok(bridge) = app_state.ws_bridge.lock() else {
+            return false;
+        };
+        bridge.clients.get(client_id).cloned()
+    };
+    let Some(sender) = sender else {
+        return false;
+    };
+    sender.send(message).is_ok()
+}
+
+fn ws_send_event_to_client(
+    app: &tauri::AppHandle,
+    client_id: &str,
+    event: &str,
+    payload: serde_json::Value,
+) -> bool {
+    ws_send_to_client(
+        app,
+        client_id,
+        WsOutboundMessage::Text(ws_event_text(event, payload)),
+    )
+}
+
+fn ws_encode_rdp_frame_message(session_id: &str, frame_packet: Vec<u8>) -> Result<Vec<u8>, String> {
+    let session_bytes = session_id.as_bytes();
+    let session_len: u8 = session_bytes
+        .len()
+        .try_into()
+        .map_err(|_| "Session id websocket invalido.".to_string())?;
+    let payload_len: u32 = frame_packet
+        .len()
+        .try_into()
+        .map_err(|_| "Payload websocket muito grande.".to_string())?;
+
+    let mut bytes = Vec::with_capacity(11usize + session_bytes.len() + frame_packet.len());
+    bytes.extend_from_slice(&WS_BINARY_MAGIC);
+    bytes.push(WS_PROTOCOL_VERSION);
+    bytes.push(WS_BINARY_MESSAGE_RDP_FRAME);
+    bytes.push(session_len);
+    bytes.push(0);
+    bytes.extend_from_slice(&payload_len.to_le_bytes());
+    bytes.extend_from_slice(session_bytes);
+    bytes.extend_from_slice(&frame_packet);
+    Ok(bytes)
+}
+
+fn ws_take_owned_sessions(state: &AppState, client_id: &str) -> Vec<String> {
+    let Ok(mut bridge) = state.ws_bridge.lock() else {
+        return Vec::new();
+    };
+
+    bridge.clients.remove(client_id);
+    let owned: Vec<String> = bridge
+        .session_owner
+        .iter()
+        .filter_map(|(session_id, owner)| {
+            if owner == client_id {
+                Some(session_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for session_id in &owned {
+        bridge.session_owner.remove(session_id);
+    }
+
+    owned
+}
+
+fn ws_set_session_owner(state: &AppState, session_id: &str, client_id: &str) {
+    if let Ok(mut bridge) = state.ws_bridge.lock() {
+        bridge
+            .session_owner
+            .insert(session_id.to_string(), client_id.to_string());
+    }
+}
+
+fn ws_clear_session_owner(state: &AppState, session_id: &str) {
+    if let Ok(mut bridge) = state.ws_bridge.lock() {
+        bridge.session_owner.remove(session_id);
+    }
+}
+
+#[derive(Clone)]
+struct WsRdpOutput {
+    app: tauri::AppHandle,
+    client_id: String,
+}
+
+impl RdpStreamOutput for WsRdpOutput {
+    fn send_event(&self, event: RdpStreamEvent) -> bool {
+        let payload = match serde_json::to_value(event) {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        ws_send_event_to_client(&self.app, &self.client_id, "rdp.stream.event", payload)
+    }
+
+    fn send_frame(&self, session_id: &str, frame_bytes: Vec<u8>) -> bool {
+        let encoded = match ws_encode_rdp_frame_message(session_id, frame_bytes) {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        ws_send_to_client(&self.app, &self.client_id, WsOutboundMessage::Binary(encoded))
+    }
+}
+
+async fn ws_handle_authenticated_request(
+    app: &tauri::AppHandle,
+    client_id: &str,
+    request: WsClientRequest,
+) -> String {
+    if request.method == "ping" {
+        return ws_response_text(
+            request.id,
+            true,
+            Some(serde_json::json!({ "pong": true })),
+            None,
+        );
+    }
+
+    if request.method == "rdp.stream.start" {
+        let parsed: WsRdpStreamStartParams = match serde_json::from_value(request.params) {
+            Ok(value) => value,
+            Err(error) => {
+                return ws_response_text(request.id, false, None, Some(app_error(error)));
+            }
+        };
+
+        let app_state = app.state::<AppState>();
+        let resolved = match resolve_rdp_profile(
+            app_state.inner(),
+            parsed.profile_id,
+            parsed.password_override,
+            parsed.keychain_id_override,
+            parsed.save_auth_choice,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(result) => {
+                let value = serde_json::to_value(result).ok();
+                return ws_response_text(request.id, true, value, None);
+            }
+        };
+
+        let target_width = parsed
+            .width
+            .unwrap_or(DEFAULT_RDP_WIDTH)
+            .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
+        let target_height = parsed
+            .height
+            .unwrap_or(DEFAULT_RDP_HEIGHT)
+            .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
+
+        let options = RdpCaptureOptions {
+            host: resolved.host,
+            port: resolved.port,
+            username: resolved.username,
+            password: resolved.password,
+            domain: resolved.domain,
+            width: target_width,
+            height: target_height,
+            timeout_seconds: 20,
+            input_actions: Vec::new(),
+            stream_codec: parsed.preferred_codec.unwrap_or(RdpFrameCodec::Png),
+        };
+
+        let control_state = StreamControlState::new(StreamViewport {
+            width: target_width,
+            height: target_height,
+        });
+
+        let mut manager = app_state.rdp_streams.lock().await;
+        let result = manager.start(
+            options,
+            control_state,
+            Arc::new(WsRdpOutput {
+                app: app.clone(),
+                client_id: client_id.to_string(),
+            }),
+        );
+        drop(manager);
+
+        if let RdpStreamStartResult::Started { session_id } = &result {
+            ws_set_session_owner(app_state.inner(), session_id.as_str(), client_id);
+        }
+
+        let value = serde_json::to_value(result).ok();
+        return ws_response_text(request.id, true, value, None);
+    }
+
+    if request.method == "rdp.stream.input" {
+        let parsed: WsRdpStreamInputParams = match serde_json::from_value(request.params) {
+            Ok(value) => value,
+            Err(error) => {
+                return ws_response_text(request.id, false, None, Some(app_error(error)));
+            }
+        };
+
+        let app_state = app.state::<AppState>();
+        let mut manager = app_state.rdp_streams.lock().await;
+        let result = manager
+            .input(
+                parsed.session_id.as_str(),
+                parsed.input_actions.into_iter().take(64).collect(),
+            )
+            .map_err(app_error);
+        return match result {
+            Ok(()) => ws_response_text(request.id, true, Some(serde_json::Value::Null), None),
+            Err(error) => ws_response_text(request.id, false, None, Some(error)),
+        };
+    }
+
+    if request.method == "rdp.stream.control" {
+        let parsed: WsRdpStreamControlParams = match serde_json::from_value(request.params) {
+            Ok(value) => value,
+            Err(error) => {
+                return ws_response_text(request.id, false, None, Some(app_error(error)));
+            }
+        };
+
+        let app_state = app.state::<AppState>();
+        let mut manager = app_state.rdp_streams.lock().await;
+        let result = manager
+            .control(parsed.session_id.as_str(), parsed.control)
+            .map_err(app_error);
+        return match result {
+            Ok(()) => ws_response_text(request.id, true, Some(serde_json::Value::Null), None),
+            Err(error) => ws_response_text(request.id, false, None, Some(error)),
+        };
+    }
+
+    if request.method == "rdp.stream.stop" {
+        let parsed: WsRdpStreamStopParams = match serde_json::from_value(request.params) {
+            Ok(value) => value,
+            Err(error) => {
+                return ws_response_text(request.id, false, None, Some(app_error(error)));
+            }
+        };
+
+        let app_state = app.state::<AppState>();
+        ws_clear_session_owner(app_state.inner(), parsed.session_id.as_str());
+        let mut manager = app_state.rdp_streams.lock().await;
+        let result = manager.stop(parsed.session_id.as_str()).map_err(app_error);
+        return match result {
+            Ok(()) => ws_response_text(request.id, true, Some(serde_json::Value::Null), None),
+            Err(error) => ws_response_text(request.id, false, None, Some(error)),
+        };
+    }
+
+    ws_response_text(
+        request.id,
+        false,
+        None,
+        Some("Metodo websocket nao suportado.".to_string()),
+    )
+}
+
+async fn ws_handle_connection(
+    app: tauri::AppHandle,
+    stream: tokio::net::TcpStream,
+    expected_token: String,
+) {
+    let ws_stream = match accept_async(stream).await {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<WsOutboundMessage>();
+    let writer = tokio::spawn(async move {
+        while let Some(message) = outgoing_rx.recv().await {
+            let send_result = match message {
+                WsOutboundMessage::Text(text) => ws_write.send(Message::Text(text)).await,
+                WsOutboundMessage::Binary(bytes) => ws_write.send(Message::Binary(bytes)).await,
+            };
+            if send_result.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut authenticated_client_id: Option<String> = None;
+    while let Some(message) = ws_read.next().await {
+        let Ok(message) = message else {
+            break;
+        };
+
+        if matches!(message, Message::Close(_)) {
+            break;
+        }
+
+        if !message.is_text() {
+            continue;
+        }
+
+        let Some(text) = message.into_text().ok() else {
+            continue;
+        };
+        let request: WsClientRequest = match serde_json::from_str(text.as_str()) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = outgoing_tx.send(WsOutboundMessage::Text(ws_response_text(
+                    "unknown".to_string(),
+                    false,
+                    None,
+                    Some(app_error(error)),
+                )));
+                continue;
+            }
+        };
+
+        if authenticated_client_id.is_none() {
+            if request.method != "auth.connect" {
+                let _ = outgoing_tx.send(WsOutboundMessage::Text(ws_response_text(
+                    request.id,
+                    false,
+                    None,
+                    Some("Conexao websocket nao autenticada.".to_string()),
+                )));
+                break;
+            }
+
+            let auth: WsAuthParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = outgoing_tx.send(WsOutboundMessage::Text(ws_response_text(
+                        request.id,
+                        false,
+                        None,
+                        Some(app_error(error)),
+                    )));
+                    break;
+                }
+            };
+
+            if auth.token != expected_token {
+                let _ = outgoing_tx.send(WsOutboundMessage::Text(ws_response_text(
+                    request.id,
+                    false,
+                    None,
+                    Some("Token websocket invalido.".to_string()),
+                )));
+                break;
+            }
+
+            let client_id = Uuid::new_v4().to_string();
+            if let Ok(mut bridge) = app.state::<AppState>().ws_bridge.lock() {
+                bridge.clients.insert(client_id.clone(), outgoing_tx.clone());
+            }
+
+            authenticated_client_id = Some(client_id.clone());
+            let _ = outgoing_tx.send(WsOutboundMessage::Text(ws_response_text(
+                request.id,
+                true,
+                Some(serde_json::json!({
+                    "client_id": client_id,
+                    "protocol_version": WS_PROTOCOL_VERSION,
+                })),
+                None,
+            )));
+            continue;
+        }
+
+        let client_id = authenticated_client_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let response_text = ws_handle_authenticated_request(&app, client_id.as_str(), request).await;
+        let _ = outgoing_tx.send(WsOutboundMessage::Text(response_text));
+    }
+
+    if let Some(client_id) = authenticated_client_id {
+        let app_state = app.state::<AppState>();
+        let sessions = ws_take_owned_sessions(app_state.inner(), client_id.as_str());
+        for session_id in sessions {
+            let mut manager = app_state.rdp_streams.lock().await;
+            let _ = manager.stop(session_id.as_str());
+        }
+    }
+
+    drop(outgoing_tx);
+    let _ = writer.await;
+}
+
+async fn ws_run_accept_loop(app: tauri::AppHandle, listener: TcpListener, expected_token: String) {
+    loop {
+        let accepted = listener.accept().await;
+        let Ok((stream, _addr)) = accepted else {
+            continue;
+        };
+        let app_handle = app.clone();
+        let token = expected_token.clone();
+        tokio::spawn(async move {
+            ws_handle_connection(app_handle, stream, token).await;
+        });
+    }
+}
+
+#[tauri::command]
+async fn ws_bootstrap(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<WsBootstrapResult, String> {
+    if let Ok(bridge) = state.ws_bridge.lock() {
+        if let (Some(token), Some(port)) = (bridge.token.clone(), bridge.port) {
+            return Ok(WsBootstrapResult {
+                url: format!("ws://127.0.0.1:{port}"),
+                token,
+                protocol_version: WS_PROTOCOL_VERSION,
+            });
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| format!("Falha ao iniciar websocket local: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("Falha ao resolver porta websocket: {error}"))?
+        .port();
+    let token = generate_ws_access_token();
+
+    if let Ok(mut bridge) = state.ws_bridge.lock() {
+        bridge.token = Some(token.clone());
+        bridge.port = Some(port);
+    }
+
+    let app_handle = app.clone();
+    let expected_token = token.clone();
+    tokio::spawn(async move {
+        ws_run_accept_loop(app_handle, listener, expected_token).await;
+    });
+
+    Ok(WsBootstrapResult {
+        url: format!("ws://127.0.0.1:{port}"),
+        token,
+        protocol_version: WS_PROTOCOL_VERSION,
+    })
 }
 
 #[tauri::command]
@@ -470,7 +1042,7 @@ async fn rdp_capture(
     input_actions: Option<Vec<RdpInputAction>>,
 ) -> Result<RdpCaptureResult, String> {
     let resolved = match resolve_rdp_profile(
-        &state,
+        state.inner(),
         profile_id,
         password_override,
         keychain_id_override,
@@ -539,94 +1111,6 @@ async fn rdp_capture(
             Ok(RdpCaptureResult::Error { message })
         }
     }
-}
-
-#[tauri::command]
-async fn rdp_stream_start(
-    state: State<'_, AppState>,
-    profile_id: String,
-    width: Option<u16>,
-    height: Option<u16>,
-    password_override: Option<String>,
-    keychain_id_override: Option<String>,
-    save_auth_choice: Option<bool>,
-    preferred_codec: Option<RdpFrameCodec>,
-    channel: tauri::ipc::Channel<RdpStreamEvent>,
-    frame_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-) -> Result<RdpStreamStartResult, String> {
-    let resolved = match resolve_rdp_profile(
-        &state,
-        profile_id,
-        password_override,
-        keychain_id_override,
-        save_auth_choice,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(result) => return Ok(result),
-    };
-
-    let target_width = width
-        .unwrap_or(DEFAULT_RDP_WIDTH)
-        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
-    let target_height = height
-        .unwrap_or(DEFAULT_RDP_HEIGHT)
-        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
-
-    let options = RdpCaptureOptions {
-        host: resolved.host,
-        port: resolved.port,
-        username: resolved.username,
-        password: resolved.password,
-        domain: resolved.domain,
-        width: target_width,
-        height: target_height,
-        timeout_seconds: 20,
-        input_actions: Vec::new(),
-        stream_codec: preferred_codec.unwrap_or(RdpFrameCodec::Png),
-    };
-
-    let control_state = StreamControlState::new(StreamViewport {
-        width: target_width,
-        height: target_height,
-    });
-
-    let mut manager = state.rdp_streams.lock().await;
-    Ok(manager.start(options, control_state, channel, frame_channel))
-}
-
-#[tauri::command]
-async fn rdp_stream_input(
-    state: State<'_, AppState>,
-    session_id: String,
-    input_actions: Vec<RdpInputAction>,
-) -> Result<(), String> {
-    let mut manager = state.rdp_streams.lock().await;
-    manager
-        .input(
-            session_id.as_str(),
-            input_actions.into_iter().take(64).collect(),
-        )
-        .map_err(app_error)
-}
-
-#[tauri::command]
-async fn rdp_stream_control(
-    state: State<'_, AppState>,
-    session_id: String,
-    control: StreamControlInput,
-) -> Result<(), String> {
-    let mut manager = state.rdp_streams.lock().await;
-    manager
-        .control(session_id.as_str(), control)
-        .map_err(app_error)
-}
-
-#[tauri::command]
-async fn rdp_stream_stop(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let mut manager = state.rdp_streams.lock().await;
-    manager.stop(session_id.as_str()).map_err(app_error)
 }
 
 #[tauri::command]
@@ -1792,6 +2276,7 @@ pub fn run() {
         rdp_streams: Mutex::new(RdpStreamManager::default()),
         sync: Mutex::new(SyncManager::new()),
         deeplink_queue: StdMutex::new(Vec::new()),
+        ws_bridge: StdMutex::new(WsBridgeState::default()),
     });
 
     #[cfg(desktop)]
@@ -1845,11 +2330,8 @@ pub fn run() {
             settings_update,
             ssh_connect,
             ssh_connect_ex,
+            ws_bootstrap,
             rdp_capture,
-            rdp_stream_start,
-            rdp_stream_input,
-            rdp_stream_control,
-            rdp_stream_stop,
             ssh_write,
             ssh_resize,
             ssh_disconnect,

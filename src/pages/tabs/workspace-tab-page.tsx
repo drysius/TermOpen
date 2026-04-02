@@ -1,4 +1,3 @@
-import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -29,6 +28,13 @@ import {
   formatBytes,
 } from "@/functions/editor-file-utils";
 import { useT } from "@/langs";
+import {
+  rdpSocketControl,
+  rdpSocketInput,
+  rdpSocketStart,
+  rdpSocketStop,
+  subscribeRdpStreamSocket,
+} from "@/lib/backend-socket";
 import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
@@ -115,6 +121,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const rdpInputQueueByBlockRef = useRef<Map<string, RdpInputAction[]>>(new Map());
   const rdpInputFlushTimerByBlockRef = useRef<Map<string, number>>(new Map());
   const rdpLastFrameAtByBlockRef = useRef<Map<string, number>>(new Map());
+  const rdpStreamUnsubscribeByBlockRef = useRef<Map<string, () => void>>(new Map());
 
   const clearBlockRetryTimers = useCallback((blockId: string) => {
     const active = connectRetryTimersRef.current[blockId];
@@ -445,6 +452,11 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       if (rdpBlock?.imageUrl) {
         URL.revokeObjectURL(rdpBlock.imageUrl);
       }
+      const unsubscribe = rdpStreamUnsubscribeByBlockRef.current.get(id);
+      if (unsubscribe) {
+        unsubscribe();
+        rdpStreamUnsubscribeByBlockRef.current.delete(id);
+      }
       rdpStreamTokenByBlockRef.current.delete(id);
       rdpLastFrameAtByBlockRef.current.delete(id);
       const sessionId = rdpStreamSessionByBlockRef.current.get(id);
@@ -456,7 +468,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           rdpInputFlushTimerByBlockRef.current.delete(id);
         }
         rdpInputQueueByBlockRef.current.delete(id);
-        void api.rdpStreamStop(sessionId).catch(() => undefined);
+        void rdpSocketStop(sessionId).catch(() => undefined);
       }
       setBlocks((current) => current.filter((block) => block.id !== id));
     },
@@ -1248,7 +1260,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
             if (!currentSessionId || pending.length === 0) {
               return;
             }
-            void api.rdpStreamInput(currentSessionId, pending).catch((error) => {
+            void rdpSocketInput(currentSessionId, pending).catch((error) => {
               appendWorkspaceLog("warn", "Falha ao enviar input RDP", getError(error));
             });
           }, 22);
@@ -1285,7 +1297,12 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       const previousSessionId = rdpStreamSessionByBlockRef.current.get(blockId) ?? target.streamSessionId;
       if (previousSessionId) {
         rdpStreamSessionByBlockRef.current.delete(blockId);
-        void api.rdpStreamStop(previousSessionId).catch(() => undefined);
+        const previousUnsubscribe = rdpStreamUnsubscribeByBlockRef.current.get(blockId);
+        if (previousUnsubscribe) {
+          previousUnsubscribe();
+          rdpStreamUnsubscribeByBlockRef.current.delete(blockId);
+        }
+        void rdpSocketStop(previousSessionId).catch(() => undefined);
       }
       const pendingFlush = rdpInputFlushTimerByBlockRef.current.get(blockId);
       if (pendingFlush) {
@@ -1316,7 +1333,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       const streamToken = createId("rdpstream");
       rdpStreamTokenByBlockRef.current.set(blockId, streamToken);
 
-      const channel = new Channel<RdpStreamEvent>((event) => {
+      const handleStreamEvent = (event: RdpStreamEvent) => {
         if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
           return;
         }
@@ -1437,15 +1454,17 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           const current = rdpStreamSessionByBlockRef.current.get(blockId);
           if (current === event.data.session_id) {
             rdpStreamSessionByBlockRef.current.delete(blockId);
+            const unsubscribe = rdpStreamUnsubscribeByBlockRef.current.get(blockId);
+            if (unsubscribe) {
+              unsubscribe();
+              rdpStreamUnsubscribeByBlockRef.current.delete(blockId);
+            }
           }
         }
-      });
+      };
 
-      const frameChannel = new Channel<ArrayBuffer>((message) => {
+      const handleFrameMessage = (message: ArrayBuffer) => {
         if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
-          return;
-        }
-        if (!(message instanceof ArrayBuffer)) {
           return;
         }
 
@@ -1469,10 +1488,11 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
         const imageUrl = URL.createObjectURL(new Blob([packet.payload], { type: "image/png" }));
         replaceRdpFrameForBlock(blockId, imageUrl, packet.width, packet.height);
-      });
+      };
 
       try {
-        const result = await api.rdpStreamStart(profile.id, channel, frameChannel, {
+        const result = await rdpSocketStart({
+          profileId: profile.id,
           width: 1280,
           height: 720,
           passwordOverride,
@@ -1485,6 +1505,18 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         }
 
         if (result.status === "started") {
+          const previousUnsubscribe = rdpStreamUnsubscribeByBlockRef.current.get(blockId);
+          if (previousUnsubscribe) {
+            previousUnsubscribe();
+          }
+
+          const unsubscribe = subscribeRdpStreamSocket(result.session_id, {
+            onEvent: handleStreamEvent,
+            onFrame: (packet) => {
+              handleFrameMessage(packet.payload);
+            },
+          });
+          rdpStreamUnsubscribeByBlockRef.current.set(blockId, unsubscribe);
           rdpStreamSessionByBlockRef.current.set(blockId, result.session_id);
           setBlocks((current) =>
             current.map((block) =>
@@ -1641,10 +1673,14 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       });
       rdpInputFlushTimerByBlockRef.current.clear();
       rdpInputQueueByBlockRef.current.clear();
+      rdpStreamUnsubscribeByBlockRef.current.forEach((unsubscribe) => {
+        unsubscribe();
+      });
+      rdpStreamUnsubscribeByBlockRef.current.clear();
       rdpStreamTokenByBlockRef.current.clear();
       rdpLastFrameAtByBlockRef.current.clear();
       rdpStreamSessionByBlockRef.current.forEach((sessionId) => {
-        void api.rdpStreamStop(sessionId).catch(() => undefined);
+        void rdpSocketStop(sessionId).catch(() => undefined);
       });
       rdpStreamSessionByBlockRef.current.clear();
     };
@@ -3254,7 +3290,12 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                     const activeSessionId = rdpStreamSessionByBlockRef.current.get(block.id) ?? block.streamSessionId;
                     if (activeSessionId) {
                       rdpStreamSessionByBlockRef.current.delete(block.id);
-                      void api.rdpStreamStop(activeSessionId).catch(() => undefined);
+                      const unsubscribe = rdpStreamUnsubscribeByBlockRef.current.get(block.id);
+                      if (unsubscribe) {
+                        unsubscribe();
+                        rdpStreamUnsubscribeByBlockRef.current.delete(block.id);
+                      }
+                      void rdpSocketStop(activeSessionId).catch(() => undefined);
                       setBlocks((current) =>
                         current.map((item) =>
                           item.id === block.id && item.kind === "rdp"
@@ -3269,7 +3310,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                     if (!sessionId) {
                       return;
                     }
-                    void api.rdpStreamControl(sessionId, control).catch((error) => {
+                    void rdpSocketControl(sessionId, control).catch((error) => {
                       appendWorkspaceLog("warn", "Falha ao atualizar controle RDP", getError(error));
                     });
                   },

@@ -75,6 +75,12 @@ export interface SshSessionInfo {
 export type RdpMouseButton = "left" | "right" | "middle";
 export type RdpFrameCodec = "png" | "h264";
 
+export interface WsBootstrapResult {
+  url: string;
+  token: string;
+  protocol_version: number;
+}
+
 export type RdpInputAction =
   | {
       kind: "mouse_move";
