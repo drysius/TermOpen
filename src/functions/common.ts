@@ -1,12 +1,19 @@
 import type { ConnectionProfile, ConnectionProtocol } from "@/types/termopen";
+import { logFrontendDebug } from "@/lib/debug-logs";
 
 export function getError(error: unknown): string {
   if (error instanceof Error) {
+    logFrontendDebug("error", error.message || "Erro desconhecido", {
+      source: "frontend.catch",
+      context: error.stack ?? null,
+    });
     return error.message;
   }
   if (typeof error === "string") {
+    logFrontendDebug("error", error, { source: "frontend.catch" });
     return error;
   }
+  logFrontendDebug("error", "Erro desconhecido", { source: "frontend.catch" });
   return "Erro desconhecido";
 }
 
@@ -53,6 +60,11 @@ export function supportsProtocol(profile: ConnectionProfile, protocol: Connectio
           ? ["rdp"]
         : ["ssh", "sftp"];
   const protocols = rawProtocols.includes("rdp") ? (["rdp"] as ConnectionProtocol[]) : rawProtocols;
+  if (protocol === "sftp") {
+    return protocols.some(
+      (item) => item === "sftp" || item === "ftp" || item === "ftps" || item === "smb",
+    );
+  }
   return protocols.includes(protocol);
 }
 

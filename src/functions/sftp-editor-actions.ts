@@ -2,13 +2,24 @@ import { toast } from "sonner";
 
 import { baseName, getError, joinPath, slug } from "@/functions/common";
 import { detectEditorFileMeta, formatBytes } from "@/functions/editor-file-utils";
+import { formatProfileSourceId } from "@/pages/tabs/workspace/natives/runtime";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions, PaneSide } from "@/store/app-store.types";
-import type { ConnectionProfile, SftpEntry } from "@/types/termopen";
+import type { ConnectionProfile, ConnectionProtocol, SftpEntry } from "@/types/termopen";
 
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
+
+function resolveWorkspaceFileProtocol(profile: ConnectionProfile): "sftp" | "ftp" | "ftps" | "smb" {
+  const ordered = profile.protocols?.length ? profile.protocols : (["sftp"] as ConnectionProtocol[]);
+  for (const protocol of ordered) {
+    if (protocol === "sftp" || protocol === "ftp" || protocol === "ftps" || protocol === "smb") {
+      return protocol;
+    }
+  }
+  return "sftp";
+}
 
 async function listEntries(sourceId: string, path: string): Promise<SftpEntry[]> {
   if (sourceId === "local") {
@@ -78,6 +89,7 @@ export function createSftpEditorActions(
 
     openSftpWorkspace: async (profile: ConnectionProfile) => {
       try {
+        const protocol = resolveWorkspaceFileProtocol(profile);
         get().openTab({
           id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
           type: "workspace",
@@ -85,7 +97,7 @@ export function createSftpEditorActions(
           closable: true,
           profileId: profile.id,
           initialBlock: "sftp",
-          initialSourceId: `profile:${profile.id}`,
+          initialSourceId: formatProfileSourceId(profile.id, protocol),
         });
       } catch (error) {
         toast.error(getError(error));

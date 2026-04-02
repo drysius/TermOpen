@@ -4,18 +4,20 @@ import type {
   AppSettings,
   AuthServer,
   BinaryPreviewResult,
+  ClipboardLocalItem,
   ConnectionProfile,
+  DebugLogEntry,
   KnownHostEntry,
   KeychainEntry,
+  LocalPathStat,
+  RemoteTransferEndpoint,
   RecoveryProbeResult,
   ReleaseCheckResult,
-  RdpCaptureResult,
-  RdpFrameCodec,
-  RdpStreamEvent,
-  RdpStreamStartResult,
-  RdpInputAction,
+  RdpInputBatch,
+  RdpSessionControlEvent,
+  RdpSessionFocusInput,
+  RdpSessionStartResult,
   SftpEntry,
-  StreamControlInput,
   SyncLoggedUser,
   SyncConflictDecision,
   SyncConflictPreview,
@@ -50,6 +52,23 @@ export const api = {
 
   settingsGet: () => invoke<AppSettings>("settings_get"),
   settingsUpdate: (settings: AppSettings) => invoke<AppSettings>("settings_update", { settings }),
+  debugLogsList: () => invoke<DebugLogEntry[]>("debug_logs_list"),
+  debugLogsClear: () => invoke<void>("debug_logs_clear"),
+  debugLogsSetEnabled: (enabled: boolean) => invoke<void>("debug_logs_set_enabled", { enabled }),
+  debugLogFrontend: (
+    level: string,
+    message: string,
+    options?: {
+      source?: string;
+      context?: string | null;
+    },
+  ) =>
+    invoke<void>("debug_log_frontend", {
+      level,
+      source: options?.source,
+      message,
+      context: options?.context,
+    }),
 
   sshConnect: (profileId: string) => invoke<SshSessionInfo>("ssh_connect", { profileId }),
   sshConnectEx: (
@@ -68,55 +87,37 @@ export const api = {
       keychainIdOverride: options?.keychainIdOverride,
       saveAuthChoice: options?.saveAuthChoice,
     }),
-  rdpCapture: (
+  rdpSessionStart: (
     profileId: string,
+    controlChannel: Channel<RdpSessionControlEvent>,
+    videoRectsChannel: Channel<ArrayBuffer>,
+    cursorChannel: Channel<ArrayBuffer>,
+    audioPcmChannel: Channel<ArrayBuffer>,
     options?: {
       width?: number;
       height?: number;
       passwordOverride?: string | null;
       keychainIdOverride?: string | null;
       saveAuthChoice?: boolean;
-      inputActions?: RdpInputAction[];
     },
   ) =>
-    invoke<RdpCaptureResult>("rdp_capture", {
+    invoke<RdpSessionStartResult>("rdp_session_start", {
       profileId,
       width: options?.width,
       height: options?.height,
       passwordOverride: options?.passwordOverride,
       keychainIdOverride: options?.keychainIdOverride,
       saveAuthChoice: options?.saveAuthChoice,
-      inputActions: options?.inputActions,
+      controlChannel,
+      videoRectsChannel,
+      cursorChannel,
+      audioPcmChannel,
     }),
-  rdpStreamStart: (
-    profileId: string,
-    channel: Channel<RdpStreamEvent>,
-    frameChannel: Channel<ArrayBuffer>,
-    options?: {
-      width?: number;
-      height?: number;
-      passwordOverride?: string | null;
-      keychainIdOverride?: string | null;
-      saveAuthChoice?: boolean;
-      preferredCodec?: RdpFrameCodec;
-    },
-  ) =>
-    invoke<RdpStreamStartResult>("rdp_stream_start", {
-      profileId,
-      width: options?.width,
-      height: options?.height,
-      passwordOverride: options?.passwordOverride,
-      keychainIdOverride: options?.keychainIdOverride,
-      saveAuthChoice: options?.saveAuthChoice,
-      preferredCodec: options?.preferredCodec,
-      channel,
-      frameChannel,
-    }),
-  rdpStreamInput: (sessionId: string, inputActions: RdpInputAction[]) =>
-    invoke<void>("rdp_stream_input", { sessionId, inputActions }),
-  rdpStreamControl: (sessionId: string, control: StreamControlInput) =>
-    invoke<void>("rdp_stream_control", { sessionId, control }),
-  rdpStreamStop: (sessionId: string) => invoke<void>("rdp_stream_stop", { sessionId }),
+  rdpSessionFocus: (sessionId: string, focus: RdpSessionFocusInput) =>
+    invoke<void>("rdp_session_focus", { sessionId, focus }),
+  rdpInputBatch: (sessionId: string, batch: RdpInputBatch) =>
+    invoke<void>("rdp_input_batch", { sessionId, batch }),
+  rdpSessionStop: (sessionId: string) => invoke<void>("rdp_session_stop", { sessionId }),
   sshWrite: (sessionId: string, data: string) => invoke<string>("ssh_write", { sessionId, data }),
   sshResize: (sessionId: string, cols: number, rows: number) => invoke<void>("ssh_resize", { sessionId, cols, rows }),
   sshDisconnect: (sessionId: string) => invoke<void>("ssh_disconnect", { sessionId }),
@@ -156,6 +157,36 @@ export const api = {
   sftpCreateFile: (sessionId: string, path: string) => invoke<void>("sftp_create_file", { sessionId, path }),
   sftpReadBinaryPreview: (sessionId: string, path: string, maxBytes?: number | null) =>
     invoke<BinaryPreviewResult>("sftp_read_binary_preview", { sessionId, path, maxBytes }),
+  remoteProfileList: (profileId: string, protocol: "ftp" | "ftps" | "smb", path: string) =>
+    invoke<SftpEntry[]>("remote_profile_list", { profileId, protocol, path }),
+  remoteProfileRead: (profileId: string, protocol: "ftp" | "ftps" | "smb", path: string) =>
+    invoke<string>("remote_profile_read", { profileId, protocol, path }),
+  remoteProfileReadChunk: (
+    profileId: string,
+    protocol: "ftp" | "ftps" | "smb",
+    path: string,
+    offset: number,
+  ) => invoke<TextReadChunk>("remote_profile_read_chunk", { profileId, protocol, path, offset }),
+  remoteProfileWrite: (profileId: string, protocol: "ftp" | "ftps" | "smb", path: string, content: string) =>
+    invoke<void>("remote_profile_write", { profileId, protocol, path, content }),
+  remoteProfileRename: (
+    profileId: string,
+    protocol: "ftp" | "ftps" | "smb",
+    fromPath: string,
+    toPath: string,
+  ) => invoke<void>("remote_profile_rename", { profileId, protocol, fromPath, toPath }),
+  remoteProfileDelete: (profileId: string, protocol: "ftp" | "ftps" | "smb", path: string, isDir: boolean) =>
+    invoke<void>("remote_profile_delete", { profileId, protocol, path, isDir }),
+  remoteProfileMkdir: (profileId: string, protocol: "ftp" | "ftps" | "smb", path: string) =>
+    invoke<void>("remote_profile_mkdir", { profileId, protocol, path }),
+  remoteProfileCreateFile: (profileId: string, protocol: "ftp" | "ftps" | "smb", path: string) =>
+    invoke<void>("remote_profile_create_file", { profileId, protocol, path }),
+  remoteProfileReadBinaryPreview: (
+    profileId: string,
+    protocol: "ftp" | "ftps" | "smb",
+    path: string,
+    maxBytes?: number | null,
+  ) => invoke<BinaryPreviewResult>("remote_profile_read_binary_preview", { profileId, protocol, path, maxBytes }),
   sftpTransfer: (
     transferId: string,
     fromSessionId: string | null,
@@ -170,6 +201,20 @@ export const api = {
       toSessionId,
       toPath,
     }),
+  remoteTransfer: (
+    transferId: string,
+    fromEndpoint: RemoteTransferEndpoint,
+    fromPath: string,
+    toEndpoint: RemoteTransferEndpoint,
+    toPath: string,
+  ) =>
+    invoke<void>("remote_transfer", {
+      transferId,
+      fromEndpoint,
+      fromPath,
+      toEndpoint,
+      toPath,
+    }),
   localList: (path?: string | null) => invoke<SftpEntry[]>("local_list", { path }),
   localRead: (path: string) => invoke<string>("local_read", { path }),
   localReadChunk: (path: string, offset: number) =>
@@ -181,6 +226,8 @@ export const api = {
   localReadBinaryPreview: (path: string, maxBytes?: number | null) =>
     invoke<BinaryPreviewResult>("local_read_binary_preview", { path, maxBytes }),
   localWrite: (path: string, content: string) => invoke<void>("local_write", { path, content }),
+  localStat: (path: string) => invoke<LocalPathStat>("local_stat", { path }),
+  clipboardLocalItems: () => invoke<ClipboardLocalItem[]>("clipboard_local_items"),
 
   authServersList: () => invoke<AuthServer[]>("auth_servers_list"),
   authServerSave: (server: AuthServer) => invoke<AuthServer>("auth_server_save", { server }),

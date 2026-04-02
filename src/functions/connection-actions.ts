@@ -132,6 +132,17 @@ export function createConnectionActions(
       }),
 
     openHostDrawer: (profile, protocol: ConnectionProtocol = "ssh") => {
+      const initialProtocols = protocol === "rdp" ? (["rdp"] as ConnectionProtocol[]) : ([protocol] as ConnectionProtocol[]);
+      const isFileProtocol =
+        protocol === "sftp" || protocol === "ftp" || protocol === "ftps" || protocol === "smb";
+      const defaultPort =
+        protocol === "rdp"
+          ? 3389
+          : protocol === "smb"
+            ? 445
+            : protocol === "ftp" || protocol === "ftps"
+              ? 21
+              : BLANK_PROFILE.port;
       const draft: ConnectionProfile = profile
         ? {
             ...profile,
@@ -139,9 +150,9 @@ export function createConnectionActions(
           }
         : {
             ...BLANK_PROFILE,
-            protocols: protocol === "ssh" ? ["ssh"] : protocol === "sftp" ? ["sftp"] : ["rdp"],
-            port: protocol === "rdp" ? 3389 : BLANK_PROFILE.port,
-            remote_path: protocol === "sftp" ? "/" : BLANK_PROFILE.remote_path,
+            protocols: initialProtocols,
+            port: defaultPort,
+            remote_path: isFileProtocol ? "/" : BLANK_PROFILE.remote_path,
           };
       set({
         hostDrawerOpen: true,

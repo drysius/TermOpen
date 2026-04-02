@@ -1,23 +1,25 @@
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::{
+    collections::VecDeque,
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::Mutex as StdMutex,
+    sync::{Mutex as StdMutex, OnceLock},
     time::UNIX_EPOCH,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use models::{
-    AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, KeychainEntry, KnownHostEntry,
-    RdpCaptureResult, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult,
-    SshSessionInfo, SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState,
-    VaultStatus, WindowState,
+    AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol,
+    KeychainEntry, KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry,
+    SshConnectResult, SshSessionInfo,
+    SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState, VaultStatus, WindowState,
 };
-use protocol_stream::{StreamControlInput, StreamControlState, StreamViewport};
 use rdp::{
-    capture_png_once, RdpCaptureOptions, RdpFrameCodec, RdpInputAction, RdpStreamEvent,
-    RdpStreamManager, RdpStreamStartResult,
+    RdpInputBatch, RdpSessionControlEvent, RdpSessionFocusInput, RdpSessionManager,
+    RdpSessionOptions, RdpSessionStartResult,
 };
 use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
 use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
@@ -27,9 +29,11 @@ use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use vault::VaultManager;
 
+mod keyboard;
 mod models;
-mod protocol_stream;
+mod mouse;
 mod rdp;
+mod remote_fs;
 mod ssh;
 mod sync;
 #[cfg(test)]
@@ -39,7 +43,7 @@ mod vault;
 struct AppState {
     vault: Mutex<VaultManager>,
     ssh: Mutex<SshManager>,
-    rdp_streams: Mutex<RdpStreamManager>,
+    rdp_sessions: Mutex<RdpSessionManager>,
     sync: Mutex<SyncManager>,
     deeplink_queue: StdMutex<Vec<String>>,
 }
@@ -59,6 +63,7 @@ const DEFAULT_WORKSPACE_WIDTH: f64 = 1440.0;
 const DEFAULT_WORKSPACE_HEIGHT: f64 = 900.0;
 const LEGACY_COMPACT_WIDTH: u32 = 380;
 const LEGACY_COMPACT_HEIGHT: u32 = 600;
+const DEBUG_LOG_CAPACITY: usize = 2000;
 
 #[derive(serde::Serialize)]
 struct TextReadChunkPayload {
@@ -68,14 +73,173 @@ struct TextReadChunkPayload {
     eof: bool,
 }
 
+#[derive(serde::Serialize)]
+struct ClipboardLocalItemPayload {
+    path: String,
+    is_dir: bool,
+}
+
+#[derive(serde::Serialize)]
+struct LocalPathStatPayload {
+    is_dir: bool,
+    size: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RemoteTransferEndpointInput {
+    Local,
+    SftpSession { session_id: String },
+    Profile {
+        profile_id: String,
+        protocol: ConnectionProtocol,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DebugLogEntryPayload {
+    id: u64,
+    timestamp_ms: i64,
+    level: String,
+    source: String,
+    message: String,
+    context: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct DebugLogState {
+    enabled: bool,
+    sequence: u64,
+    entries: VecDeque<DebugLogEntryPayload>,
+}
+
+static DEBUG_LOGS: OnceLock<StdMutex<DebugLogState>> = OnceLock::new();
+
+fn debug_log_state() -> &'static StdMutex<DebugLogState> {
+    DEBUG_LOGS.get_or_init(|| StdMutex::new(DebugLogState::default()))
+}
+
+fn set_debug_logs_enabled(enabled: bool) {
+    if let Ok(mut state) = debug_log_state().lock() {
+        state.enabled = enabled;
+    }
+}
+
+fn push_debug_log(
+    level: impl Into<String>,
+    source: impl Into<String>,
+    message: impl Into<String>,
+    context: Option<String>,
+) {
+    if let Ok(mut state) = debug_log_state().lock() {
+        if !state.enabled {
+            return;
+        }
+
+        state.sequence = state.sequence.wrapping_add(1);
+        let id = state.sequence;
+        state.entries.push_back(DebugLogEntryPayload {
+            id,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            level: level.into(),
+            source: source.into(),
+            message: message.into(),
+            context,
+        });
+
+        while state.entries.len() > DEBUG_LOG_CAPACITY {
+            let _ = state.entries.pop_front();
+        }
+    }
+}
+
+fn normalize_debug_level(level: &str) -> &'static str {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "error" => "error",
+        "warn" | "warning" => "warn",
+        "debug" => "debug",
+        _ => "info",
+    }
+}
+
 fn app_error(error: impl ToString) -> String {
-    error.to_string()
+    let message = error.to_string();
+    push_debug_log(
+        "error",
+        "backend",
+        "Falha no backend",
+        Some(message.clone()),
+    );
+    message
 }
 
 fn normalize_optional_input(value: Option<String>) -> Option<String> {
     value
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+}
+
+fn protocol_label(protocol: &ConnectionProtocol) -> &'static str {
+    match protocol {
+        ConnectionProtocol::Ssh => "SSH",
+        ConnectionProtocol::Sftp => "SFTP",
+        ConnectionProtocol::Ftp => "FTP",
+        ConnectionProtocol::Ftps => "FTPS",
+        ConnectionProtocol::Smb => "SMB",
+        ConnectionProtocol::Rdp => "RDP",
+    }
+}
+
+fn supports_profile_protocol(profile: &ConnectionProfile, protocol: &ConnectionProtocol) -> bool {
+    let mut normalized = profile.clone();
+    normalized.normalize_protocols();
+    normalized.protocols.iter().any(|item| item == protocol)
+}
+
+fn ensure_file_protocol(protocol: &ConnectionProtocol) -> Result<(), String> {
+    match protocol {
+        ConnectionProtocol::Ftp | ConnectionProtocol::Ftps | ConnectionProtocol::Smb => Ok(()),
+        _ => Err(format!(
+            "Protocolo {} nao e suportado para sistema de arquivos remoto.",
+            protocol_label(protocol)
+        )),
+    }
+}
+
+async fn resolve_profile_with_keychain(
+    state: &State<'_, AppState>,
+    profile_id: &str,
+) -> Result<ConnectionProfile, String> {
+    let vault = state.vault.lock().await;
+    let mut profile = vault.profile_by_id(profile_id).map_err(app_error)?;
+
+    if let Some(keychain_id) = profile.keychain_id.clone() {
+        let key = vault.keychain_by_id(&keychain_id).map_err(app_error)?;
+        if profile.private_key.is_none() {
+            profile.private_key = key.private_key;
+        }
+        if profile.password.is_none() {
+            profile.password = key.password.or(key.passphrase);
+        }
+    }
+
+    Ok(profile)
+}
+
+async fn resolve_profile_for_file_protocol(
+    state: &State<'_, AppState>,
+    profile_id: &str,
+    protocol: &ConnectionProtocol,
+) -> Result<ConnectionProfile, String> {
+    ensure_file_protocol(protocol)?;
+    let profile = resolve_profile_with_keychain(state, profile_id).await?;
+    if !supports_profile_protocol(&profile, protocol) {
+        return Err(format!(
+            "Perfil nao suporta o protocolo {} solicitado.",
+            protocol_label(protocol)
+        ));
+    }
+    Ok(profile)
 }
 
 fn split_domain_username(username: &str) -> (Option<String>, String) {
@@ -99,20 +263,6 @@ fn split_domain_username(username: &str) -> (Option<String>, String) {
     (None, trimmed.to_string())
 }
 
-fn looks_like_rdp_auth_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("logon")
-        || lower.contains("logon failure")
-        || lower.contains("authentication")
-        || lower.contains("credssp")
-        || lower.contains("sec_e_logon_denied")
-        || lower.contains("status_logon_failure")
-        || lower.contains("nla")
-        || lower.contains("access denied")
-        || lower.contains("password")
-        || lower.contains("account restriction")
-}
-
 struct ResolvedRdpProfile {
     host: String,
     port: u16,
@@ -127,13 +277,13 @@ async fn resolve_rdp_profile(
     password_override: Option<String>,
     keychain_id_override: Option<String>,
     save_auth_choice: Option<bool>,
-) -> Result<ResolvedRdpProfile, RdpStreamStartResult> {
+) -> Result<ResolvedRdpProfile, RdpSessionStartResult> {
     let profile = {
         let mut vault = state.vault.lock().await;
         let mut profile = match vault.profile_by_id(&profile_id) {
             Ok(value) => value,
             Err(error) => {
-                return Err(RdpStreamStartResult::Error {
+                return Err(RdpSessionStartResult::Error {
                     message: app_error(error),
                 });
             }
@@ -146,7 +296,7 @@ async fn resolve_rdp_profile(
             let key = match vault.keychain_by_id(&keychain_id) {
                 Ok(value) => value,
                 Err(error) => {
-                    return Err(RdpStreamStartResult::Error {
+                    return Err(RdpSessionStartResult::Error {
                         message: app_error(error),
                     });
                 }
@@ -181,20 +331,20 @@ async fn resolve_rdp_profile(
 
     let host = profile.host.trim().to_string();
     if host.is_empty() {
-        return Err(RdpStreamStartResult::Error {
+        return Err(RdpSessionStartResult::Error {
             message: "Host RDP invalido.".to_string(),
         });
     }
 
     let (domain_from_user, username) = split_domain_username(profile.username.as_str());
     if username.trim().is_empty() {
-        return Err(RdpStreamStartResult::AuthRequired {
+        return Err(RdpSessionStartResult::AuthRequired {
             message: "Usuario RDP nao informado.".to_string(),
         });
     }
 
     let Some(password) = normalize_optional_input(profile.password.clone()) else {
-        return Err(RdpStreamStartResult::AuthRequired {
+        return Err(RdpSessionStartResult::AuthRequired {
             message: "Senha RDP necessaria para conectar.".to_string(),
         });
     };
@@ -249,6 +399,224 @@ fn emit_transfer_progress(
     if let Some(total_bytes) = total.filter(|value| *value > 0) {
         let percent = ((transferred.saturating_mul(100)) / total_bytes).min(100) as u8;
         let _ = app.emit(progress_event, percent);
+    }
+}
+
+fn endpoint_is_local(endpoint: &RemoteTransferEndpointInput) -> bool {
+    matches!(endpoint, RemoteTransferEndpointInput::Local)
+}
+
+async fn endpoint_file_size(
+    state: &State<'_, AppState>,
+    endpoint: &RemoteTransferEndpointInput,
+    path: &str,
+) -> Result<Option<u64>, String> {
+    match endpoint {
+        RemoteTransferEndpointInput::Local => {
+            let source = resolve_local_path(Some(path))?;
+            let metadata = fs::metadata(&source).map_err(|error| {
+                format!(
+                    "Falha ao obter metadata de arquivo local {}: {}",
+                    source.display(),
+                    error
+                )
+            })?;
+            Ok(Some(metadata.len()))
+        }
+        RemoteTransferEndpointInput::SftpSession { session_id } => {
+            let mut ssh = state.ssh.lock().await;
+            ssh.sftp_file_size(session_id, path).map_err(app_error)
+        }
+        RemoteTransferEndpointInput::Profile {
+            profile_id,
+            protocol,
+        } => {
+            let profile = resolve_profile_for_file_protocol(state, profile_id, protocol).await?;
+            match protocol {
+                ConnectionProtocol::Ftp => remote_fs::ftp_file_size(&profile, path, false)
+                    .map_err(app_error),
+                ConnectionProtocol::Ftps => remote_fs::ftp_file_size(&profile, path, true)
+                    .map_err(app_error),
+                ConnectionProtocol::Smb => remote_fs::smb_file_size(&profile, path)
+                    .await
+                    .map_err(app_error),
+                _ => Err(format!(
+                    "Protocolo {} nao suportado para leitura remota.",
+                    protocol_label(protocol)
+                )),
+            }
+        }
+    }
+}
+
+async fn endpoint_download_to_writer<W, F>(
+    state: &State<'_, AppState>,
+    endpoint: &RemoteTransferEndpointInput,
+    path: &str,
+    writer: &mut W,
+    chunk_size: usize,
+    mut on_chunk: F,
+) -> Result<(), String>
+where
+    W: Write,
+    F: FnMut(u64),
+{
+    match endpoint {
+        RemoteTransferEndpointInput::Local => {
+            let source = resolve_local_path(Some(path))?;
+            let mut reader = fs::File::open(&source).map_err(|error| {
+                format!(
+                    "Falha ao abrir arquivo local {}: {}",
+                    source.display(),
+                    error
+                )
+            })?;
+            let mut buffer = vec![0u8; chunk_size];
+            loop {
+                let size = reader.read(&mut buffer).map_err(app_error)?;
+                if size == 0 {
+                    break;
+                }
+                writer.write_all(&buffer[..size]).map_err(app_error)?;
+                on_chunk(size as u64);
+            }
+            Ok(())
+        }
+        RemoteTransferEndpointInput::SftpSession { session_id } => {
+            let mut ssh = state.ssh.lock().await;
+            ssh.sftp_download_to_writer(session_id, path, writer, chunk_size, |bytes| on_chunk(bytes))
+                .map_err(app_error)
+                .map(|_| ())
+        }
+        RemoteTransferEndpointInput::Profile {
+            profile_id,
+            protocol,
+        } => {
+            let profile = resolve_profile_for_file_protocol(state, profile_id, protocol).await?;
+            match protocol {
+                ConnectionProtocol::Ftp => remote_fs::ftp_download_to_writer(
+                    &profile,
+                    path,
+                    writer,
+                    chunk_size,
+                    false,
+                    |bytes| on_chunk(bytes),
+                )
+                .map_err(app_error)
+                .map(|_| ()),
+                ConnectionProtocol::Ftps => remote_fs::ftp_download_to_writer(
+                    &profile,
+                    path,
+                    writer,
+                    chunk_size,
+                    true,
+                    |bytes| on_chunk(bytes),
+                )
+                .map_err(app_error)
+                .map(|_| ()),
+                ConnectionProtocol::Smb => remote_fs::smb_download_to_writer(
+                    &profile,
+                    path,
+                    writer,
+                    chunk_size,
+                    |bytes| on_chunk(bytes),
+                )
+                .await
+                .map_err(app_error)
+                .map(|_| ()),
+                _ => Err(format!(
+                    "Protocolo {} nao suportado para download remoto.",
+                    protocol_label(protocol)
+                )),
+            }
+        }
+    }
+}
+
+async fn endpoint_upload_from_reader<R, F>(
+    state: &State<'_, AppState>,
+    endpoint: &RemoteTransferEndpointInput,
+    path: &str,
+    reader: &mut R,
+    chunk_size: usize,
+    mut on_chunk: F,
+) -> Result<(), String>
+where
+    R: Read,
+    F: FnMut(u64),
+{
+    match endpoint {
+        RemoteTransferEndpointInput::Local => {
+            let target = resolve_local_path(Some(path))?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(app_error)?;
+            }
+            let mut writer = fs::File::create(&target).map_err(|error| {
+                format!(
+                    "Falha ao criar arquivo local {}: {}",
+                    target.display(),
+                    error
+                )
+            })?;
+            let mut buffer = vec![0u8; chunk_size];
+            loop {
+                let size = reader.read(&mut buffer).map_err(app_error)?;
+                if size == 0 {
+                    break;
+                }
+                writer.write_all(&buffer[..size]).map_err(app_error)?;
+                on_chunk(size as u64);
+            }
+            Ok(())
+        }
+        RemoteTransferEndpointInput::SftpSession { session_id } => {
+            let mut ssh = state.ssh.lock().await;
+            ssh.sftp_upload_from_reader(session_id, path, reader, chunk_size, |bytes| on_chunk(bytes))
+                .map_err(app_error)
+                .map(|_| ())
+        }
+        RemoteTransferEndpointInput::Profile {
+            profile_id,
+            protocol,
+        } => {
+            let profile = resolve_profile_for_file_protocol(state, profile_id, protocol).await?;
+            match protocol {
+                ConnectionProtocol::Ftp => remote_fs::ftp_upload_from_reader(
+                    &profile,
+                    path,
+                    reader,
+                    chunk_size,
+                    false,
+                    |bytes| on_chunk(bytes),
+                )
+                .map_err(app_error)
+                .map(|_| ()),
+                ConnectionProtocol::Ftps => remote_fs::ftp_upload_from_reader(
+                    &profile,
+                    path,
+                    reader,
+                    chunk_size,
+                    true,
+                    |bytes| on_chunk(bytes),
+                )
+                .map_err(app_error)
+                .map(|_| ()),
+                ConnectionProtocol::Smb => remote_fs::smb_upload_from_reader(
+                    &profile,
+                    path,
+                    reader,
+                    chunk_size,
+                    |bytes| on_chunk(bytes),
+                )
+                .await
+                .map_err(app_error)
+                .map(|_| ()),
+                _ => Err(format!(
+                    "Protocolo {} nao suportado para upload remoto.",
+                    protocol_label(protocol)
+                )),
+            }
+        }
     }
 }
 
@@ -352,7 +720,9 @@ async fn keychain_delete(state: State<'_, AppState>, id: String) -> Result<(), S
 #[tauri::command]
 async fn settings_get(state: State<'_, AppState>) -> Result<AppSettings, String> {
     let vault = state.vault.lock().await;
-    vault.settings_get().map_err(app_error)
+    let settings = vault.settings_get().map_err(app_error)?;
+    set_debug_logs_enabled(settings.debug_logs_enabled);
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -361,7 +731,61 @@ async fn settings_update(
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
     let mut vault = state.vault.lock().await;
-    vault.settings_update(settings).map_err(app_error)
+    let saved = vault.settings_update(settings).map_err(app_error)?;
+    set_debug_logs_enabled(saved.debug_logs_enabled);
+    Ok(saved)
+}
+
+#[tauri::command]
+fn debug_logs_list() -> Result<Vec<DebugLogEntryPayload>, String> {
+    let state = debug_log_state()
+        .lock()
+        .map_err(|_| "Falha ao acessar logs de depuracao.".to_string())?;
+    Ok(state.entries.iter().cloned().collect())
+}
+
+#[tauri::command]
+fn debug_logs_clear() -> Result<(), String> {
+    let mut state = debug_log_state()
+        .lock()
+        .map_err(|_| "Falha ao limpar logs de depuracao.".to_string())?;
+    state.entries.clear();
+    Ok(())
+}
+
+#[tauri::command]
+fn debug_logs_set_enabled(enabled: bool) -> Result<(), String> {
+    set_debug_logs_enabled(enabled);
+    if enabled {
+        push_debug_log("info", "backend", "Logs de depuracao habilitados", None);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn debug_log_frontend(
+    level: String,
+    source: Option<String>,
+    message: String,
+    context: Option<String>,
+) -> Result<(), String> {
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        return Ok(());
+    }
+
+    let source = source
+        .and_then(|value| normalize_optional_input(Some(value)))
+        .unwrap_or_else(|| "frontend".to_string());
+    let context = context.and_then(|value| normalize_optional_input(Some(value)));
+
+    push_debug_log(
+        normalize_debug_level(level.as_str()),
+        source,
+        message,
+        context,
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -459,7 +883,7 @@ async fn ssh_connect_ex(
 }
 
 #[tauri::command]
-async fn rdp_capture(
+async fn rdp_session_start(
     state: State<'_, AppState>,
     profile_id: String,
     width: Option<u16>,
@@ -467,93 +891,11 @@ async fn rdp_capture(
     password_override: Option<String>,
     keychain_id_override: Option<String>,
     save_auth_choice: Option<bool>,
-    input_actions: Option<Vec<RdpInputAction>>,
-) -> Result<RdpCaptureResult, String> {
-    let resolved = match resolve_rdp_profile(
-        &state,
-        profile_id,
-        password_override,
-        keychain_id_override,
-        save_auth_choice,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(RdpStreamStartResult::AuthRequired { message }) => {
-            return Ok(RdpCaptureResult::AuthRequired { message });
-        }
-        Err(RdpStreamStartResult::Error { message }) => {
-            return Ok(RdpCaptureResult::Error { message });
-        }
-        Err(RdpStreamStartResult::Started { .. }) => {
-            return Ok(RdpCaptureResult::Error {
-                message: "Estado de stream RDP invalido.".to_string(),
-            });
-        }
-    };
-
-    let target_width = width
-        .unwrap_or(DEFAULT_RDP_WIDTH)
-        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
-    let target_height = height
-        .unwrap_or(DEFAULT_RDP_HEIGHT)
-        .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
-
-    let has_input_actions = input_actions
-        .as_ref()
-        .is_some_and(|actions| !actions.is_empty());
-
-    let options = RdpCaptureOptions {
-        host: resolved.host,
-        port: resolved.port,
-        username: resolved.username,
-        password: resolved.password,
-        domain: resolved.domain,
-        width: target_width,
-        height: target_height,
-        timeout_seconds: if has_input_actions { 6 } else { 20 },
-        input_actions: input_actions
-            .unwrap_or_default()
-            .into_iter()
-            .take(32)
-            .collect(),
-        stream_codec: RdpFrameCodec::Png,
-    };
-
-    let captured = tokio::task::spawn_blocking(move || capture_png_once(options))
-        .await
-        .map_err(|error| error.to_string())?;
-
-    match captured {
-        Ok(frame) => Ok(RdpCaptureResult::Ready {
-            image_base64: BASE64.encode(frame.png_bytes),
-            width: frame.width,
-            height: frame.height,
-            captured_at: chrono::Utc::now().timestamp(),
-        }),
-        Err(error) => {
-            let message = format!("{error:#}");
-            if looks_like_rdp_auth_error(&message) {
-                return Ok(RdpCaptureResult::AuthRequired { message });
-            }
-            Ok(RdpCaptureResult::Error { message })
-        }
-    }
-}
-
-#[tauri::command]
-async fn rdp_stream_start(
-    state: State<'_, AppState>,
-    profile_id: String,
-    width: Option<u16>,
-    height: Option<u16>,
-    password_override: Option<String>,
-    keychain_id_override: Option<String>,
-    save_auth_choice: Option<bool>,
-    preferred_codec: Option<RdpFrameCodec>,
-    channel: tauri::ipc::Channel<RdpStreamEvent>,
-    frame_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-) -> Result<RdpStreamStartResult, String> {
+    control_channel: tauri::ipc::Channel<RdpSessionControlEvent>,
+    video_rects_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    cursor_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    audio_pcm_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<RdpSessionStartResult, String> {
     let resolved = match resolve_rdp_profile(
         &state,
         profile_id,
@@ -574,7 +916,7 @@ async fn rdp_stream_start(
         .unwrap_or(DEFAULT_RDP_HEIGHT)
         .clamp(MIN_RDP_DIMENSION, MAX_RDP_DIMENSION);
 
-    let options = RdpCaptureOptions {
+    let options = RdpSessionOptions {
         host: resolved.host,
         port: resolved.port,
         username: resolved.username,
@@ -583,49 +925,43 @@ async fn rdp_stream_start(
         width: target_width,
         height: target_height,
         timeout_seconds: 20,
-        input_actions: Vec::new(),
-        stream_codec: preferred_codec.unwrap_or(RdpFrameCodec::Png),
     };
 
-    let control_state = StreamControlState::new(StreamViewport {
-        width: target_width,
-        height: target_height,
-    });
-
-    let mut manager = state.rdp_streams.lock().await;
-    Ok(manager.start(options, control_state, channel, frame_channel))
+    let mut manager = state.rdp_sessions.lock().await;
+    Ok(manager.start(
+        options,
+        control_channel,
+        video_rects_channel,
+        cursor_channel,
+        audio_pcm_channel,
+    ))
 }
 
 #[tauri::command]
-async fn rdp_stream_input(
+async fn rdp_session_focus(
     state: State<'_, AppState>,
     session_id: String,
-    input_actions: Vec<RdpInputAction>,
+    focus: RdpSessionFocusInput,
 ) -> Result<(), String> {
-    let mut manager = state.rdp_streams.lock().await;
+    let mut manager = state.rdp_sessions.lock().await;
+    manager.focus(session_id.as_str(), focus).map_err(app_error)
+}
+
+#[tauri::command]
+async fn rdp_input_batch(
+    state: State<'_, AppState>,
+    session_id: String,
+    batch: RdpInputBatch,
+) -> Result<(), String> {
+    let mut manager = state.rdp_sessions.lock().await;
     manager
-        .input(
-            session_id.as_str(),
-            input_actions.into_iter().take(64).collect(),
-        )
+        .input_batch(session_id.as_str(), batch)
         .map_err(app_error)
 }
 
 #[tauri::command]
-async fn rdp_stream_control(
-    state: State<'_, AppState>,
-    session_id: String,
-    control: StreamControlInput,
-) -> Result<(), String> {
-    let mut manager = state.rdp_streams.lock().await;
-    manager
-        .control(session_id.as_str(), control)
-        .map_err(app_error)
-}
-
-#[tauri::command]
-async fn rdp_stream_stop(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let mut manager = state.rdp_streams.lock().await;
+async fn rdp_session_stop(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let mut manager = state.rdp_sessions.lock().await;
     manager.stop(session_id.as_str()).map_err(app_error)
 }
 
@@ -862,6 +1198,404 @@ async fn sftp_create_file(
 }
 
 #[tauri::command]
+async fn remote_profile_list(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+) -> Result<Vec<SftpEntry>, String> {
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    match protocol {
+        ConnectionProtocol::Ftp => remote_fs::ftp_list(&profile, &path, false).map_err(app_error),
+        ConnectionProtocol::Ftps => remote_fs::ftp_list(&profile, &path, true).map_err(app_error),
+        ConnectionProtocol::Smb => remote_fs::smb_list(&profile, &path).await.map_err(app_error),
+        _ => Err(format!(
+            "Protocolo {} nao suportado para listagem remota.",
+            protocol_label(&protocol)
+        )),
+    }
+}
+
+#[tauri::command]
+async fn remote_profile_read(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+) -> Result<String, String> {
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    match protocol {
+        ConnectionProtocol::Ftp => remote_fs::ftp_read(&profile, &path, false).map_err(app_error),
+        ConnectionProtocol::Ftps => remote_fs::ftp_read(&profile, &path, true).map_err(app_error),
+        ConnectionProtocol::Smb => remote_fs::smb_read(&profile, &path, chunk_size)
+            .await
+            .map_err(app_error),
+        _ => Err(format!(
+            "Protocolo {} nao suportado para leitura remota.",
+            protocol_label(&protocol)
+        )),
+    }
+}
+
+#[tauri::command]
+async fn remote_profile_read_chunk(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+    offset: u64,
+) -> Result<TextReadChunkPayload, String> {
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    let (chunk, total, eof) = match protocol {
+        ConnectionProtocol::Ftp => {
+            remote_fs::ftp_read_chunk(&profile, &path, offset, chunk_size, false).map_err(app_error)?
+        }
+        ConnectionProtocol::Ftps => {
+            remote_fs::ftp_read_chunk(&profile, &path, offset, chunk_size, true).map_err(app_error)?
+        }
+        ConnectionProtocol::Smb => remote_fs::smb_read_chunk(&profile, &path, offset, chunk_size)
+            .await
+            .map_err(app_error)?,
+        _ => {
+            return Err(format!(
+                "Protocolo {} nao suportado para leitura remota em blocos.",
+                protocol_label(&protocol)
+            ))
+        }
+    };
+    let bytes_read = offset.saturating_add(chunk.len() as u64);
+    Ok(TextReadChunkPayload {
+        chunk_base64: BASE64.encode(chunk),
+        bytes_read,
+        total_bytes: total,
+        eof,
+    })
+}
+
+#[tauri::command]
+async fn remote_profile_write(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    match protocol {
+        ConnectionProtocol::Ftp => {
+            remote_fs::ftp_write(&profile, &path, &content, chunk_size, false).map_err(app_error)
+        }
+        ConnectionProtocol::Ftps => {
+            remote_fs::ftp_write(&profile, &path, &content, chunk_size, true).map_err(app_error)
+        }
+        ConnectionProtocol::Smb => remote_fs::smb_write(&profile, &path, &content, chunk_size)
+            .await
+            .map_err(app_error),
+        _ => Err(format!(
+            "Protocolo {} nao suportado para escrita remota.",
+            protocol_label(&protocol)
+        )),
+    }
+}
+
+#[tauri::command]
+async fn remote_profile_rename(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    from_path: String,
+    to_path: String,
+) -> Result<(), String> {
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    match protocol {
+        ConnectionProtocol::Ftp => {
+            remote_fs::ftp_rename(&profile, &from_path, &to_path, false).map_err(app_error)
+        }
+        ConnectionProtocol::Ftps => {
+            remote_fs::ftp_rename(&profile, &from_path, &to_path, true).map_err(app_error)
+        }
+        ConnectionProtocol::Smb => remote_fs::smb_rename(&profile, &from_path, &to_path)
+            .await
+            .map_err(app_error),
+        _ => Err(format!(
+            "Protocolo {} nao suportado para renomeacao remota.",
+            protocol_label(&protocol)
+        )),
+    }
+}
+
+#[tauri::command]
+async fn remote_profile_delete(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+    is_dir: bool,
+) -> Result<(), String> {
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    match protocol {
+        ConnectionProtocol::Ftp => {
+            remote_fs::ftp_delete(&profile, &path, is_dir, false).map_err(app_error)
+        }
+        ConnectionProtocol::Ftps => {
+            remote_fs::ftp_delete(&profile, &path, is_dir, true).map_err(app_error)
+        }
+        ConnectionProtocol::Smb => remote_fs::smb_delete(&profile, &path).await.map_err(app_error),
+        _ => Err(format!(
+            "Protocolo {} nao suportado para remocao remota.",
+            protocol_label(&protocol)
+        )),
+    }
+}
+
+#[tauri::command]
+async fn remote_profile_mkdir(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+) -> Result<(), String> {
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    match protocol {
+        ConnectionProtocol::Ftp => remote_fs::ftp_mkdir(&profile, &path, false).map_err(app_error),
+        ConnectionProtocol::Ftps => remote_fs::ftp_mkdir(&profile, &path, true).map_err(app_error),
+        ConnectionProtocol::Smb => remote_fs::smb_mkdir(&profile, &path).await.map_err(app_error),
+        _ => Err(format!(
+            "Protocolo {} nao suportado para criacao de pasta remota.",
+            protocol_label(&protocol)
+        )),
+    }
+}
+
+#[tauri::command]
+async fn remote_profile_create_file(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+) -> Result<(), String> {
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+    match protocol {
+        ConnectionProtocol::Ftp => {
+            remote_fs::ftp_create_file(&profile, &path, false).map_err(app_error)
+        }
+        ConnectionProtocol::Ftps => {
+            remote_fs::ftp_create_file(&profile, &path, true).map_err(app_error)
+        }
+        ConnectionProtocol::Smb => remote_fs::smb_create_file(&profile, &path)
+            .await
+            .map_err(app_error),
+        _ => Err(format!(
+            "Protocolo {} nao suportado para criacao de arquivo remoto.",
+            protocol_label(&protocol)
+        )),
+    }
+}
+
+#[tauri::command]
+async fn remote_profile_read_binary_preview(
+    state: State<'_, AppState>,
+    profile_id: String,
+    protocol: ConnectionProtocol,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<BinaryPreviewResult, String> {
+    let limit = resolve_preview_limit(max_bytes);
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
+    let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
+
+    let remote_size = match protocol {
+        ConnectionProtocol::Ftp => remote_fs::ftp_file_size(&profile, &path, false).map_err(app_error)?,
+        ConnectionProtocol::Ftps => remote_fs::ftp_file_size(&profile, &path, true).map_err(app_error)?,
+        ConnectionProtocol::Smb => remote_fs::smb_file_size(&profile, &path).await.map_err(app_error)?,
+        _ => {
+            return Err(format!(
+                "Protocolo {} nao suportado para preview remoto.",
+                protocol_label(&protocol)
+            ))
+        }
+    };
+
+    if let Some(size) = remote_size.filter(|size| *size > limit) {
+        return Ok(BinaryPreviewResult::TooLarge { size, limit });
+    }
+
+    let content = match protocol {
+        ConnectionProtocol::Ftp => {
+            remote_fs::ftp_read_bytes_with_limit(&profile, &path, limit, false).map_err(app_error)?
+        }
+        ConnectionProtocol::Ftps => {
+            remote_fs::ftp_read_bytes_with_limit(&profile, &path, limit, true).map_err(app_error)?
+        }
+        ConnectionProtocol::Smb => remote_fs::smb_read_bytes_with_limit(&profile, &path, chunk_size, limit)
+            .await
+            .map_err(app_error)?,
+        _ => None,
+    };
+
+    match content {
+        Some(bytes) => {
+            let size = bytes.len() as u64;
+            Ok(BinaryPreviewResult::Ready {
+                base64: BASE64.encode(bytes),
+                size,
+            })
+        }
+        None => Ok(BinaryPreviewResult::TooLarge {
+            size: remote_size.unwrap_or(limit.saturating_add(1)),
+            limit,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn remote_transfer(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    transfer_id: String,
+    from_endpoint: RemoteTransferEndpointInput,
+    from_path: String,
+    to_endpoint: RemoteTransferEndpointInput,
+    to_path: String,
+) -> Result<(), String> {
+    let progress_event = format!("transfer:progress:{}", transfer_id);
+    let state_event = format!("transfer:state:{}", transfer_id);
+    let _ = app.emit(&progress_event, 0u8);
+    let _ = app.emit(&state_event, "queued");
+    let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
+
+    let source_size = endpoint_file_size(&state, &from_endpoint, &from_path).await?;
+    let progress_total = if !endpoint_is_local(&from_endpoint) && !endpoint_is_local(&to_endpoint) {
+        source_size.map(|size| size.saturating_mul(2))
+    } else {
+        source_size
+    };
+    let mut transferred = 0u64;
+    let _ = app.emit(&state_event, "running");
+
+    match (&from_endpoint, &to_endpoint) {
+        (
+            RemoteTransferEndpointInput::SftpSession { session_id: from_session },
+            RemoteTransferEndpointInput::SftpSession { session_id: to_session },
+        ) => {
+            let should_try_remote_copy = {
+                let ssh = state.ssh.lock().await;
+                from_session == to_session || ssh.sessions_share_profile(from_session, to_session)
+            };
+
+            if should_try_remote_copy {
+                let remote_copy = {
+                    let mut ssh = state.ssh.lock().await;
+                    ssh.sftp_copy_between_sessions(from_session, to_session, &from_path, &to_path)
+                };
+
+                if remote_copy.is_ok() {
+                    let _ = app.emit(&progress_event, 100u8);
+                    let _ = app.emit(&state_event, "completed");
+                    return Ok(());
+                }
+            }
+
+            let mut temp_file = NamedTempFile::new().map_err(app_error)?;
+            endpoint_download_to_writer(
+                &state,
+                &from_endpoint,
+                &from_path,
+                temp_file.as_file_mut(),
+                chunk_size,
+                |bytes| {
+                    transferred = transferred.saturating_add(bytes);
+                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+                },
+            )
+            .await?;
+
+            let mut reader = temp_file.reopen().map_err(app_error)?;
+            reader.seek(SeekFrom::Start(0)).map_err(app_error)?;
+            endpoint_upload_from_reader(
+                &state,
+                &to_endpoint,
+                &to_path,
+                &mut reader,
+                chunk_size,
+                |bytes| {
+                    transferred = transferred.saturating_add(bytes);
+                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+                },
+            )
+            .await?;
+        }
+        _ if !endpoint_is_local(&from_endpoint) && !endpoint_is_local(&to_endpoint) => {
+            let mut temp_file = NamedTempFile::new().map_err(app_error)?;
+            endpoint_download_to_writer(
+                &state,
+                &from_endpoint,
+                &from_path,
+                temp_file.as_file_mut(),
+                chunk_size,
+                |bytes| {
+                    transferred = transferred.saturating_add(bytes);
+                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+                },
+            )
+            .await?;
+
+            let mut reader = temp_file.reopen().map_err(app_error)?;
+            reader.seek(SeekFrom::Start(0)).map_err(app_error)?;
+            endpoint_upload_from_reader(
+                &state,
+                &to_endpoint,
+                &to_path,
+                &mut reader,
+                chunk_size,
+                |bytes| {
+                    transferred = transferred.saturating_add(bytes);
+                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+                },
+            )
+            .await?;
+        }
+        _ => {
+            let mut temp_file = NamedTempFile::new().map_err(app_error)?;
+            endpoint_download_to_writer(
+                &state,
+                &from_endpoint,
+                &from_path,
+                temp_file.as_file_mut(),
+                chunk_size,
+                |bytes| {
+                    transferred = transferred.saturating_add(bytes);
+                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+                },
+            )
+            .await?;
+
+            let mut reader = temp_file.reopen().map_err(app_error)?;
+            reader.seek(SeekFrom::Start(0)).map_err(app_error)?;
+            endpoint_upload_from_reader(
+                &state,
+                &to_endpoint,
+                &to_path,
+                &mut reader,
+                chunk_size,
+                |bytes| {
+                    transferred = transferred.saturating_add(bytes);
+                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
+                },
+            )
+            .await?;
+        }
+    }
+
+    let _ = app.emit(&progress_event, 100u8);
+    let _ = app.emit(&state_event, "completed");
+    Ok(())
+}
+
+#[tauri::command]
 async fn sftp_transfer(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -872,7 +1606,9 @@ async fn sftp_transfer(
     to_path: String,
 ) -> Result<(), String> {
     let progress_event = format!("transfer:progress:{}", transfer_id);
+    let state_event = format!("transfer:state:{}", transfer_id);
     let _ = app.emit(&progress_event, 0u8);
+    let _ = app.emit(&state_event, "queued");
     let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
 
     let source_size = if let Some(session_id) = from_session_id.as_ref() {
@@ -897,9 +1633,28 @@ async fn sftp_transfer(
         source_size
     };
     let mut transferred = 0u64;
+    let _ = app.emit(&state_event, "running");
 
     match (from_session_id.as_ref(), to_session_id.as_ref()) {
         (Some(from_session), Some(to_session)) => {
+            let should_try_remote_copy = {
+                let ssh = state.ssh.lock().await;
+                from_session == to_session || ssh.sessions_share_profile(from_session, to_session)
+            };
+
+            if should_try_remote_copy {
+                let remote_copy = {
+                    let mut ssh = state.ssh.lock().await;
+                    ssh.sftp_copy_between_sessions(from_session, to_session, &from_path, &to_path)
+                };
+
+                if remote_copy.is_ok() {
+                    let _ = app.emit(&progress_event, 100u8);
+                    let _ = app.emit(&state_event, "completed");
+                    return Ok(());
+                }
+            }
+
             let mut temp_file = NamedTempFile::new().map_err(app_error)?;
             {
                 let mut ssh = state.ssh.lock().await;
@@ -998,6 +1753,7 @@ async fn sftp_transfer(
     }
 
     let _ = app.emit(&progress_event, 100u8);
+    let _ = app.emit(&state_event, "completed");
     Ok(())
 }
 
@@ -1209,6 +1965,113 @@ async fn local_read_binary_preview(
         base64: BASE64.encode(bytes),
         size,
     })
+}
+
+#[tauri::command]
+async fn local_stat(path: String) -> Result<LocalPathStatPayload, String> {
+    let target = resolve_local_path(Some(&path))?;
+    let metadata = fs::metadata(&target).map_err(|error| {
+        format!(
+            "Falha ao obter metadata do caminho local {}: {}",
+            target.display(),
+            error
+        )
+    })?;
+
+    Ok(LocalPathStatPayload {
+        is_dir: metadata.is_dir(),
+        size: metadata.len(),
+    })
+}
+
+#[cfg(windows)]
+fn clipboard_file_drop_paths_windows() -> Result<Vec<String>, String> {
+    let script = "$ErrorActionPreference='SilentlyContinue'; $items = Get-Clipboard -Format FileDropList; if ($null -eq $items) { '[]' } else { @($items | ForEach-Object { $_.ToString() }) | ConvertTo-Json -Compress }";
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()
+        .map_err(|error| {
+            format!(
+                "Falha ao consultar area de transferencia do Windows: {}",
+                error
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "Falha ao ler arquivos copiados da area de transferencia: {}",
+            detail
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = stdout.trim();
+    if json.is_empty() || json == "null" {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str::<Vec<String>>(json).map_err(|error| {
+        format!(
+            "Falha ao interpretar arquivos do clipboard do Windows: {}",
+            error
+        )
+    })
+}
+
+#[tauri::command]
+async fn clipboard_local_items() -> Result<Vec<ClipboardLocalItemPayload>, String> {
+    #[cfg(windows)]
+    {
+        let raw_paths = clipboard_file_drop_paths_windows()?;
+        if raw_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::new();
+        let mut output = Vec::new();
+        for raw_path in raw_paths {
+            let trimmed = raw_path.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let canonical = trimmed.to_string();
+            if !visited.insert(canonical.clone()) {
+                continue;
+            }
+
+            let path = PathBuf::from(&canonical);
+            let metadata = fs::metadata(&path).map_err(|error| {
+                format!(
+                    "Falha ao ler metadata do item copiado {}: {}",
+                    path.display(),
+                    error
+                )
+            })?;
+
+            output.push(ClipboardLocalItemPayload {
+                path: path.to_string_lossy().to_string(),
+                is_dir: metadata.is_dir(),
+            });
+        }
+        return Ok(output);
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(Vec::new())
+    }
 }
 
 #[tauri::command]
@@ -1789,7 +2652,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default().manage(AppState {
         vault: Mutex::new(vault),
         ssh: Mutex::new(SshManager::new()),
-        rdp_streams: Mutex::new(RdpStreamManager::default()),
+        rdp_sessions: Mutex::new(RdpSessionManager::default()),
         sync: Mutex::new(SyncManager::new()),
         deeplink_queue: StdMutex::new(Vec::new()),
     });
@@ -1843,13 +2706,16 @@ pub fn run() {
             keychain_delete,
             settings_get,
             settings_update,
+            debug_logs_list,
+            debug_logs_clear,
+            debug_logs_set_enabled,
+            debug_log_frontend,
             ssh_connect,
             ssh_connect_ex,
-            rdp_capture,
-            rdp_stream_start,
-            rdp_stream_input,
-            rdp_stream_control,
-            rdp_stream_stop,
+            rdp_session_start,
+            rdp_session_focus,
+            rdp_input_batch,
+            rdp_session_stop,
             ssh_write,
             ssh_resize,
             ssh_disconnect,
@@ -1867,7 +2733,17 @@ pub fn run() {
             sftp_delete,
             sftp_mkdir,
             sftp_create_file,
+            remote_profile_list,
+            remote_profile_read,
+            remote_profile_read_chunk,
+            remote_profile_write,
+            remote_profile_rename,
+            remote_profile_delete,
+            remote_profile_mkdir,
+            remote_profile_create_file,
+            remote_profile_read_binary_preview,
             sftp_transfer,
+            remote_transfer,
             sftp_read_binary_preview,
             local_list,
             local_read,
@@ -1878,6 +2754,8 @@ pub fn run() {
             local_mkdir,
             local_create_file,
             local_read_binary_preview,
+            local_stat,
+            clipboard_local_items,
             auth_servers_list,
             auth_server_save,
             auth_server_delete,

@@ -7,7 +7,6 @@ import {
   Maximize2,
   Minimize2,
   Monitor,
-  MonitorUp,
   Plus,
   TerminalSquare,
   X,
@@ -32,9 +31,15 @@ import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
-import type { RdpFrameCodec, RdpInputAction, RdpStreamEvent, SftpEntry } from "@/types/termopen";
+import type {
+  ClipboardLocalItem,
+  RemoteTransferEndpoint,
+  RdpInputBatch,
+  RdpInputEvent,
+  RdpSessionControlEvent,
+  SftpEntry,
+} from "@/types/termopen";
 import editorWorkspace from "@/pages/tabs/workspace/editor";
-import logsWorkspace from "@/pages/tabs/workspace/logs";
 import rdpWorkspace from "@/pages/tabs/workspace/rdp";
 import sftpWorkspace from "@/pages/tabs/workspace/sftp";
 import terminalWorkspace from "@/pages/tabs/workspace/terminal";
@@ -42,7 +47,6 @@ import type {
   BlockTransferItem,
   DragPayload,
   EditorBlock,
-  LogsBlock,
   RdpBlock,
   SftpBlock,
   SftpContextAction,
@@ -58,21 +62,52 @@ import type {
 import { snapLayoutToWorkspace, workspaceDefaultLayout } from "@/pages/tabs/workspace/natives/layout";
 import { joinPathBySource, joinRelativePathBySource, normalizeAnyPath, parentDirectory, shellQuote } from "@/pages/tabs/workspace/natives/paths";
 import {
-  detectPreferredRdpCodec,
-  emitRdpVideoChunk,
-  onRdpVideoDecoderError,
-  parseRdpStreamFramePacket,
+  emitRdpAudio,
+  emitRdpCursor,
+  emitRdpVideoRects,
+  parseRdpAudioPacket,
+  parseRdpCursorPacket,
+  parseRdpVideoRectsPacket,
 } from "@/pages/tabs/workspace/natives/rdp-stream";
 import { createSourceFile, createSourceFolder, decodeBase64Chunk, deleteSourceEntry, listSourceEntries, readSourceBinaryPreview, readSourceFile, readSourceTextChunk, renameSourceEntry, writeSourceFile } from "@/pages/tabs/workspace/natives/source-io";
-import { createId, isTimeoutErrorMessage, MAX_CONNECT_RETRY_ATTEMPTS, parseProfileSourceId } from "@/pages/tabs/workspace/natives/runtime";
+import {
+  createId,
+  formatProfileSourceId,
+  isTimeoutErrorMessage,
+  MAX_CONNECT_RETRY_ATTEMPTS,
+  parseProfileSourceId,
+  parseProfileSourceRef,
+} from "@/pages/tabs/workspace/natives/runtime";
 
 const workspaceModules = {
   terminal: terminalWorkspace,
   sftp: sftpWorkspace,
   rdp: rdpWorkspace,
   editor: editorWorkspace,
-  logs: logsWorkspace,
 } as const;
+
+function profileProtocols(profile: { protocols?: string[]; kind?: string | null }): string[] {
+  if (Array.isArray(profile.protocols) && profile.protocols.length > 0) {
+    return profile.protocols;
+  }
+  if (profile.kind === "host") {
+    return ["ssh"];
+  }
+  if (profile.kind === "sftp") {
+    return ["sftp"];
+  }
+  if (profile.kind === "rdp") {
+    return ["rdp"];
+  }
+  return ["ssh", "sftp"];
+}
+
+function supportsExactProfileProtocol(
+  profile: { protocols?: string[]; kind?: string | null },
+  protocol: "ssh" | "sftp" | "ftp" | "ftps" | "smb" | "rdp",
+): boolean {
+  return profileProtocols(profile).includes(protocol);
+}
 
 export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: WorkspaceTabPageProps) {
   const t = useT();
@@ -91,7 +126,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const blocksRef = useRef<WorkspaceBlock[]>([]);
   const initialBlocks =
     workspaceSnapshot?.workspaceMode === "free" && Array.isArray(workspaceSnapshot.blocks)
-      ? (workspaceSnapshot.blocks as WorkspaceBlock[])
+      ? (workspaceSnapshot.blocks as WorkspaceBlock[]).filter(
+          (item) => (item as { kind?: string }).kind !== "logs",
+        )
       : [];
   const initialLogs = Array.isArray(workspaceSnapshot?.logs)
     ? (workspaceSnapshot.logs as WorkspaceLogEntry[])
@@ -104,7 +141,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const [workspaceLogs, setWorkspaceLogs] = useState<WorkspaceLogEntry[]>(initialLogs);
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [createBlockModalOpen, setCreateBlockModalOpen] = useState(false);
-  const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "rdp" | "editor" | "logs">("terminal");
+  const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "rdp" | "editor">("terminal");
   const [createSourceDraft, setCreateSourceDraft] = useState("local");
   const [focusedBlockId, setFocusedBlockId] = useState<string | null>(initialBlocks[0]?.id ?? null);
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
@@ -112,7 +149,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const connectRetryTimersRef = useRef<Record<string, { retryTimer: number; countdownTimer: number }>>({});
   const rdpStreamSessionByBlockRef = useRef<Map<string, string>>(new Map());
   const rdpStreamTokenByBlockRef = useRef<Map<string, string>>(new Map());
-  const rdpInputQueueByBlockRef = useRef<Map<string, RdpInputAction[]>>(new Map());
+  const rdpInputQueueByBlockRef = useRef<Map<string, RdpInputEvent[]>>(new Map());
   const rdpInputFlushTimerByBlockRef = useRef<Map<string, number>>(new Map());
   const rdpLastFrameAtByBlockRef = useRef<Map<string, number>>(new Map());
 
@@ -234,7 +271,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
               return [block.sessionId];
             }
             if (block.kind === "sftp" && block.sourceId !== "local") {
-              return [block.sourceId];
+              if (!parseProfileSourceRef(block.sourceId)) {
+                return [block.sourceId];
+              }
             }
             return [];
           })
@@ -296,6 +335,15 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     });
     return map;
   }, [connections, sessions]);
+  const sessionProfileById = useMemo(() => {
+    const map = new Map<string, string>();
+    sessions.forEach((session) => {
+      if (session.session_kind !== "local") {
+        map.set(session.session_id, session.profile_id);
+      }
+    });
+    return map;
+  }, [sessions]);
   const localSessionIds = useMemo(
     () => new Set(sessions.filter((item) => item.session_kind === "local").map((item) => item.session_id)),
     [sessions],
@@ -306,19 +354,56 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     [connections],
   );
   const sftpProfiles = useMemo(
-    () => connections.filter((profile) => supportsProtocol(profile, "sftp")),
+    () => connections.filter((profile) => supportsExactProfileProtocol(profile, "sftp")),
+    [connections],
+  );
+  const ftpProfiles = useMemo(
+    () => connections.filter((profile) => supportsExactProfileProtocol(profile, "ftp")),
+    [connections],
+  );
+  const ftpsProfiles = useMemo(
+    () => connections.filter((profile) => supportsExactProfileProtocol(profile, "ftps")),
+    [connections],
+  );
+  const smbProfiles = useMemo(
+    () => connections.filter((profile) => supportsExactProfileProtocol(profile, "smb")),
     [connections],
   );
   const rdpProfiles = useMemo(
     () => connections.filter((profile) => supportsProtocol(profile, "rdp")),
     [connections],
   );
+  const sftpProfileSourceOptions = useMemo(
+    () =>
+      sftpProfiles.map((profile) => ({
+        id: formatProfileSourceId(profile.id, "sftp"),
+        label: `${profile.host} (${profile.username}) · SFTP`,
+      })),
+    [sftpProfiles],
+  );
+  const externalFileProfileSourceOptions = useMemo(
+    () => [
+      ...ftpProfiles.map((profile) => ({
+        id: formatProfileSourceId(profile.id, "ftp"),
+        label: `${profile.host} (${profile.username}) · FTP`,
+      })),
+      ...ftpsProfiles.map((profile) => ({
+        id: formatProfileSourceId(profile.id, "ftps"),
+        label: `${profile.host} (${profile.username}) · FTPS`,
+      })),
+      ...smbProfiles.map((profile) => ({
+        id: formatProfileSourceId(profile.id, "smb"),
+        label: `${profile.host} (${profile.username}) · SMB`,
+      })),
+    ],
+    [ftpProfiles, ftpsProfiles, smbProfiles],
+  );
   const createSourceOptions = useMemo(() => {
     if (createBlockKind === "terminal") {
       return [
         { id: "local", label: "Local Terminal" },
         ...sshProfiles.map((profile) => ({
-          id: `profile:${profile.id}`,
+          id: formatProfileSourceId(profile.id, "sftp"),
           label: `${profile.host} (${profile.username})`,
         })),
       ];
@@ -326,20 +411,18 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     if (createBlockKind === "sftp") {
       return [
         { id: "local", label: "Local File System" },
-        ...sftpProfiles.map((profile) => ({
-          id: `profile:${profile.id}`,
-          label: `${profile.host} (${profile.username})`,
-        })),
+        ...sftpProfileSourceOptions,
+        ...externalFileProfileSourceOptions,
       ];
     }
     if (createBlockKind === "rdp") {
       return rdpProfiles.map((profile) => ({
-        id: `profile:${profile.id}`,
+        id: formatProfileSourceId(profile.id, "sftp"),
         label: `${profile.host} (${profile.username})`,
       }));
     }
     return [];
-  }, [createBlockKind, rdpProfiles, sftpProfiles, sshProfiles]);
+  }, [createBlockKind, externalFileProfileSourceOptions, rdpProfiles, sftpProfileSourceOptions, sshProfiles]);
 
   const sourceOptions = useMemo(
     () => [
@@ -350,8 +433,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           id: session.session_id,
           label: sessionLabelById.get(session.session_id) ?? session.session_id,
         })),
+      ...externalFileProfileSourceOptions,
     ],
-    [sessionLabelById, sessions],
+    [externalFileProfileSourceOptions, sessionLabelById, sessions],
   );
   const terminalOptions = useMemo(
     () =>
@@ -438,29 +522,57 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
   const closeBlock = useCallback(
     (id: string) => {
+      const targetBlock = blocksRef.current.find((block) => block.id === id);
+      const remainingBlocks = blocksRef.current.filter((block) => block.id !== id);
       clearBlockRetryTimers(id);
-      const rdpBlock = blocksRef.current.find(
-        (item): item is RdpBlock => item.id === id && item.kind === "rdp",
-      );
-      if (rdpBlock?.imageUrl) {
-        URL.revokeObjectURL(rdpBlock.imageUrl);
-      }
       rdpStreamTokenByBlockRef.current.delete(id);
       rdpLastFrameAtByBlockRef.current.delete(id);
-      const sessionId = rdpStreamSessionByBlockRef.current.get(id);
-      if (sessionId) {
-        rdpStreamSessionByBlockRef.current.delete(id);
-        const flushTimer = rdpInputFlushTimerByBlockRef.current.get(id);
-        if (flushTimer) {
-          window.clearTimeout(flushTimer);
-          rdpInputFlushTimerByBlockRef.current.delete(id);
+
+      if (targetBlock?.kind === "rdp") {
+        const sessionId = rdpStreamSessionByBlockRef.current.get(id) ?? targetBlock.sessionId;
+        if (sessionId) {
+          void api.rdpSessionStop(sessionId).catch(() => undefined);
         }
-        rdpInputQueueByBlockRef.current.delete(id);
-        void api.rdpStreamStop(sessionId).catch(() => undefined);
       }
+
+      const flushTimer = rdpInputFlushTimerByBlockRef.current.get(id);
+      if (flushTimer) {
+        window.clearTimeout(flushTimer);
+      }
+      rdpInputFlushTimerByBlockRef.current.delete(id);
+      rdpInputQueueByBlockRef.current.delete(id);
+      rdpStreamSessionByBlockRef.current.delete(id);
+
+      const resolveSessionInUse = (sessionId: string) =>
+        remainingBlocks.some((block) => {
+          if (block.kind === "terminal") {
+            return block.sessionId === sessionId;
+          }
+          if (block.kind === "sftp") {
+            return block.sourceId === sessionId;
+          }
+          return false;
+        });
+
+      if (targetBlock?.kind === "terminal" && targetBlock.sessionId) {
+        if (!resolveSessionInUse(targetBlock.sessionId)) {
+          void disconnectSession(targetBlock.sessionId).catch(() => undefined);
+        }
+      }
+
+      if (
+        targetBlock?.kind === "sftp" &&
+        targetBlock.sourceId !== "local" &&
+        !parseProfileSourceRef(targetBlock.sourceId)
+      ) {
+        if (!resolveSessionInUse(targetBlock.sourceId)) {
+          void disconnectSession(targetBlock.sourceId).catch(() => undefined);
+        }
+      }
+
       setBlocks((current) => current.filter((block) => block.id !== id));
     },
-    [clearBlockRetryTimers],
+    [clearBlockRetryTimers, disconnectSession],
   );
 
   const toggleMaximize = useCallback((id: string) => {
@@ -524,7 +636,19 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       }
 
       const nextSourceId = sourceOverride ?? target.sourceId;
-      const rawPath = pathOverride ?? target.path;
+      const sourceChanged = nextSourceId !== target.sourceId;
+      const profileSource = parseProfileSourceRef(nextSourceId);
+      const sourceProfile =
+        profileSource
+          ? connections.find((item) => item.id === profileSource.profileId) ?? null
+          : null;
+      const defaultPathForSource =
+        nextSourceId === "local"
+          ? ""
+          : sourceProfile?.remote_path?.trim()
+            ? normalizeRemotePath(sourceProfile.remote_path)
+            : normalizeRemotePath("/");
+      const rawPath = sourceChanged ? defaultPathForSource : pathOverride ?? target.path;
       const normalizedPath = nextSourceId === "local" ? rawPath.trim() : normalizeRemotePath(rawPath);
 
       setBlocks((current) =>
@@ -567,7 +691,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         );
       }
     },
-    [notifyModuleFailure, notifyModuleNotFound],
+    [connections, notifyModuleFailure, notifyModuleNotFound],
   );
 
   const saveEditorBlock = useCallback(
@@ -821,7 +945,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           from: fromPath,
           to: toPath,
           label: label ?? baseName(fromPath),
-          status: "running",
+          status: "queued",
           errorMessage: null,
           sourceBlockId,
           targetBlockId,
@@ -834,7 +958,25 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       appendWorkspaceLog("info", "Transferencia iniciada", `${fromPath} -> ${toPath}`);
 
       let unlisten: UnlistenFn | null = null;
+      let stateUnlisten: UnlistenFn | null = null;
       try {
+        stateUnlisten = await listen<string>(`transfer:state:${transferId}`, (event) => {
+          const state = String(event.payload ?? "").trim().toLowerCase();
+          if (!state) {
+            return;
+          }
+          if (state !== "queued" && state !== "running" && state !== "completed" && state !== "error") {
+            return;
+          }
+          setTransferSnapshot((current) =>
+            current.map((item) =>
+              item.id === transferId
+                ? { ...item, status: state, updatedAt: Date.now() }
+                : item,
+            ),
+          );
+        });
+
         unlisten = await listen<number>(`transfer:progress:${transferId}`, (event) => {
           const progress = Number(event.payload ?? 0);
           setTransferSnapshot((current) =>
@@ -846,11 +988,40 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           );
         });
 
-        await api.sftpTransfer(
+        setTransferSnapshot((current) =>
+          current.map((item) =>
+            item.id === transferId
+              ? { ...item, status: "running", updatedAt: Date.now() }
+              : item,
+          ),
+        );
+
+        const toEndpoint = (sourceId: string): RemoteTransferEndpoint => {
+          if (sourceId === "local") {
+            return { kind: "local" };
+          }
+          const profileSource = parseProfileSourceRef(sourceId);
+          if (profileSource) {
+            if (profileSource.protocol === "sftp") {
+              throw new Error("Fonte SFTP por perfil requer sessao ativa antes de transferir.");
+            }
+            return {
+              kind: "profile",
+              profile_id: profileSource.profileId,
+              protocol: profileSource.protocol,
+            };
+          }
+          return {
+            kind: "sftp_session",
+            session_id: sourceId,
+          };
+        };
+
+        await api.remoteTransfer(
           transferId,
-          fromSourceId === "local" ? null : fromSourceId,
+          toEndpoint(fromSourceId),
           fromPath,
-          toSourceId === "local" ? null : toSourceId,
+          toEndpoint(toSourceId),
           toPath,
         );
 
@@ -890,6 +1061,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         throw error;
       } finally {
         unlisten?.();
+        stateUnlisten?.();
       }
     },
     [appendWorkspaceLog, setTransferSnapshot],
@@ -973,6 +1145,18 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
       const targetBasePath = targetDirectory || target.path;
       const droppedName = baseName(payload.path);
+      const sourceProfileId =
+        payload.sourceId === "local"
+          ? null
+          : sessionProfileById.get(payload.sourceId) ?? null;
+      const targetProfileId =
+        target.sourceId === "local"
+          ? null
+          : sessionProfileById.get(target.sourceId) ?? null;
+      const sameRemoteProfile =
+        sourceProfileId !== null &&
+        targetProfileId !== null &&
+        sourceProfileId === targetProfileId;
 
       try {
         if (!payload.isDir) {
@@ -1009,6 +1193,27 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         }
 
         appendWorkspaceLog("info", "Preparando transferencia de pasta", `${payload.path} -> ${destinationRoot}`);
+
+        if (sameRemoteProfile) {
+          await executeTransfer({
+            fromSourceId: payload.sourceId,
+            fromPath: payload.path,
+            toSourceId: target.sourceId,
+            toPath: destinationRoot,
+            sourceBlockId: payload.sourceBlockId,
+            targetBlockId,
+            notifySuccess: false,
+          });
+          await refreshSftpBlock(targetBlockId, target.path, target.sourceId);
+          toast.success("Pasta transferida por copia remota otimizada.");
+          appendWorkspaceLog(
+            "success",
+            "Transferencia de pasta concluida",
+            `${payload.path} -> ${destinationRoot} (copia remota otimizada)`,
+          );
+          return;
+        }
+
         const plan = await buildDirectoryTransferPlan(payload.sourceId, payload.path);
         await ensureTargetFolderExists(target.sourceId, destinationRoot);
         for (const relativeDir of plan.directories) {
@@ -1049,17 +1254,107 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       ensureTargetFolderExists,
       executeTransfer,
       refreshSftpBlock,
+      sessionProfileById,
     ],
+  );
+
+  const pasteClipboardFilesIntoSftpBlock = useCallback(
+    async (targetBlockId: string) => {
+      const target = blocksRef.current.find(
+        (block): block is SftpBlock => block.id === targetBlockId && block.kind === "sftp",
+      );
+      if (!target || target.connectStage !== "ready") {
+        return;
+      }
+
+      try {
+        const clipboardItems = await api.clipboardLocalItems();
+        const uniqueItems = new Map<string, ClipboardLocalItem>();
+        for (const item of clipboardItems) {
+          const normalizedPath = item.path.trim();
+          if (!normalizedPath) {
+            continue;
+          }
+          if (!uniqueItems.has(normalizedPath)) {
+            uniqueItems.set(normalizedPath, { path: normalizedPath, is_dir: item.is_dir });
+          }
+        }
+
+        if (uniqueItems.size === 0) {
+          toast.error("Nenhum arquivo local copiado na area de transferencia.");
+          return;
+        }
+
+        for (const item of uniqueItems.values()) {
+          const payload: DragPayload = {
+            sourceBlockId: "clipboard-local",
+            sourceId: "local",
+            path: item.path,
+            isDir: item.is_dir,
+          };
+          await transferBetweenBlocks(payload, targetBlockId, target.path);
+        }
+      } catch (error) {
+        toast.error(getError(error));
+      }
+    },
+    [transferBetweenBlocks],
+  );
+
+  const dropLocalPathsIntoSftpBlock = useCallback(
+    async (targetBlockId: string, targetPath: string, paths: string[]) => {
+      if (paths.length === 0) {
+        return;
+      }
+
+      const unique = Array.from(
+        new Set(
+          paths
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0),
+        ),
+      );
+
+      for (const localPath of unique) {
+        try {
+          const stat = await api.localStat(localPath);
+          const payload: DragPayload = {
+            sourceBlockId: "external-drop-local",
+            sourceId: "local",
+            path: localPath,
+            isDir: stat.is_dir,
+          };
+          await transferBetweenBlocks(payload, targetBlockId, targetPath);
+        } catch (error) {
+          toast.error(getError(error));
+        }
+      }
+    },
+    [transferBetweenBlocks],
   );
 
   const addSftpBlock = useCallback(
     (sourceId?: string) => {
       const firstSession = sessions.find((item) => item.session_kind !== "local")?.session_id ?? sessions[0]?.session_id;
       const resolvedSource = sourceId ?? firstSession ?? "local";
-      const host = resolvedSource === "local" ? "Local" : sessionHostById.get(resolvedSource) ?? resolvedSource.slice(0, 8);
-      const baseTitle = `SFTP - ${host}`;
+      const profileSource = parseProfileSourceRef(resolvedSource);
+      const profile =
+        profileSource
+          ? connections.find((item) => item.id === profileSource.profileId) ?? null
+          : null;
+      const host =
+        resolvedSource === "local"
+          ? "Local"
+          : profile?.host ?? sessionHostById.get(resolvedSource) ?? resolvedSource.slice(0, 8);
+      const label = profileSource ? profileSource.protocol.toUpperCase() : "SFTP";
+      const baseTitle = `${label} - ${host}`;
       const count = blocksRef.current.filter((item) => item.kind === "sftp" && item.title.startsWith(baseTitle)).length;
-      const initialPath = resolvedSource === "local" ? "" : normalizeRemotePath("/");
+      const initialPath =
+        resolvedSource === "local"
+          ? ""
+          : profile?.remote_path?.trim()
+            ? normalizeRemotePath(profile.remote_path)
+            : normalizeRemotePath("/");
       const id = createId("sftp");
       const block: SftpBlock = {
         id,
@@ -1093,75 +1388,15 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         void refreshSftpBlock(id, block.path, block.sourceId);
       }, 0);
     },
-    [appendWorkspaceLog, refreshSftpBlock, sessions, sessionHostById, workspaceSize.height, workspaceSize.width],
-  );
-
-  const addLogsBlock = useCallback(() => {
-    const existing = blocksRef.current.find((item): item is LogsBlock => item.kind === "logs");
-    if (existing) {
-      focusBlock(existing.id);
-      return;
-    }
-
-    const block: LogsBlock = {
-      id: createId("logs"),
-      kind: "logs",
-      title: "Workspace Logs",
-      layout: workspaceDefaultLayout("logs", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
-      zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
-      maximized: false,
-    };
-    setBlocks((current) => [...current, block]);
-    appendWorkspaceLog("info", "Bloco de logs aberto");
-  }, [appendWorkspaceLog, focusBlock, workspaceSize.height, workspaceSize.width]);
-
-  const replaceRdpFrameForBlock = useCallback(
-    (blockId: string, imageUrl: string, width?: number, height?: number) => {
-      const previous = blocksRef.current.find(
-        (item): item is RdpBlock => item.id === blockId && item.kind === "rdp",
-      )?.imageUrl;
-      if (previous && previous !== imageUrl) {
-        URL.revokeObjectURL(previous);
-      }
-
-      setBlocks((current) =>
-        current.map((block) =>
-          block.id === blockId && block.kind === "rdp"
-            ? {
-                ...block,
-                imageUrl,
-                imageWidth: width && width > 0 ? width : block.imageWidth,
-                imageHeight: height && height > 0 ? height : block.imageHeight,
-                capturedAt: Math.floor(Date.now() / 1000),
-                connectStage: "ready",
-                connectMessage: t.workspace.rdp.ready,
-                connectError: null,
-                retryAttempt: 0,
-                retryInSeconds: null,
-              }
-            : block,
-        ),
-      );
-
-      if (!(width && width > 0 && height && height > 0)) {
-        const probe = new Image();
-        probe.onload = () => {
-          setBlocks((current) =>
-            current.map((block) =>
-              block.id === blockId && block.kind === "rdp"
-                ? {
-                    ...block,
-                    imageWidth: probe.naturalWidth || block.imageWidth,
-                    imageHeight: probe.naturalHeight || block.imageHeight,
-                  }
-                : block,
-            ),
-          );
-        };
-        probe.src = imageUrl;
-      }
-    },
-    [t.workspace.rdp.ready],
+    [
+      appendWorkspaceLog,
+      connections,
+      refreshSftpBlock,
+      sessions,
+      sessionHostById,
+      workspaceSize.height,
+      workspaceSize.width,
+    ],
   );
 
   const touchRdpFrameForBlock = useCallback(
@@ -1216,8 +1451,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         passwordOverride?: string | null;
         saveAuthChoice?: boolean;
         retryAttempt?: number;
-        inputActions?: RdpInputAction[];
-        preferredCodec?: RdpFrameCodec;
+        inputEvents?: RdpInputEvent[];
       },
     ) => {
       const target = blocksRef.current.find((item): item is RdpBlock => item.id === blockId && item.kind === "rdp");
@@ -1225,15 +1459,15 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         return;
       }
 
-      const inputActions = options?.inputActions ?? [];
-      if (inputActions.length > 0) {
+      const inputEvents = options?.inputEvents ?? [];
+      if (inputEvents.length > 0) {
         const sessionId = rdpStreamSessionByBlockRef.current.get(blockId);
         if (!sessionId) {
           return;
         }
 
         const queue = rdpInputQueueByBlockRef.current.get(blockId) ?? [];
-        queue.push(...inputActions.slice(0, 24));
+        queue.push(...inputEvents.slice(0, 32));
         if (queue.length > 96) {
           queue.splice(0, queue.length - 96);
         }
@@ -1248,10 +1482,11 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
             if (!currentSessionId || pending.length === 0) {
               return;
             }
-            void api.rdpStreamInput(currentSessionId, pending).catch((error) => {
+            const batch: RdpInputBatch = { events: pending };
+            void api.rdpInputBatch(currentSessionId, batch).catch((error) => {
               appendWorkspaceLog("warn", "Falha ao enviar input RDP", getError(error));
             });
-          }, 22);
+          }, 14);
           rdpInputFlushTimerByBlockRef.current.set(blockId, timer);
         }
         return;
@@ -1269,7 +1504,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                   connectError: "Perfil RDP nao encontrado.",
                   retryAttempt: 0,
                   retryInSeconds: null,
-                  streamSessionId: null,
+                  sessionId: null,
                 }
               : block,
           ),
@@ -1279,13 +1514,12 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
       const passwordOverride = options?.passwordOverride ?? null;
       const saveAuthChoice = options?.saveAuthChoice ?? false;
-      const preferredCodec = options?.preferredCodec ?? (await detectPreferredRdpCodec());
       const currentAttempt = Math.max(0, options?.retryAttempt ?? target.retryAttempt);
       const connectingMessage = passwordOverride ? "Logando..." : t.workspace.rdp.connecting;
-      const previousSessionId = rdpStreamSessionByBlockRef.current.get(blockId) ?? target.streamSessionId;
+      const previousSessionId = rdpStreamSessionByBlockRef.current.get(blockId) ?? target.sessionId;
       if (previousSessionId) {
         rdpStreamSessionByBlockRef.current.delete(blockId);
-        void api.rdpStreamStop(previousSessionId).catch(() => undefined);
+        void api.rdpSessionStop(previousSessionId).catch(() => undefined);
       }
       const pendingFlush = rdpInputFlushTimerByBlockRef.current.get(blockId);
       if (pendingFlush) {
@@ -1306,7 +1540,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                 connectError: null,
                 retryAttempt: currentAttempt,
                 retryInSeconds: null,
-                streamSessionId: null,
+                sessionId: null,
               }
             : block,
         ),
@@ -1316,20 +1550,19 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       const streamToken = createId("rdpstream");
       rdpStreamTokenByBlockRef.current.set(blockId, streamToken);
 
-      const channel = new Channel<RdpStreamEvent>((event) => {
+      const controlChannel = new Channel<RdpSessionControlEvent>((event) => {
         if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
           return;
         }
 
         if (event.event === "ready") {
-          const activeCodec = event.data.frame_codec ?? preferredCodec;
           clearBlockRetryTimers(blockId);
           setBlocks((current) =>
             current.map((block) =>
               block.id === blockId && block.kind === "rdp"
                 ? {
                     ...block,
-                    streamSessionId: event.data.session_id,
+                    sessionId: event.data.session_id,
                     connectStage: "ready",
                     connectMessage: t.workspace.rdp.ready,
                     connectError: null,
@@ -1344,7 +1577,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           appendWorkspaceLog(
             "success",
             "Sessao RDP conectada",
-            `${profile.host} ${event.data.width}x${event.data.height} (${activeCodec.toUpperCase()})`,
+            `${profile.host} ${event.data.width}x${event.data.height}`,
           );
           return;
         }
@@ -1373,7 +1606,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
               block.id === blockId && block.kind === "rdp"
                 ? {
                     ...block,
-                    streamSessionId: null,
+                    sessionId: null,
                     connectStage: "awaiting_password",
                     connectMessage: t.workspace.rdp.authRequired,
                     connectError: event.data.message,
@@ -1402,7 +1635,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
               block.id === blockId && block.kind === "rdp"
                 ? {
                     ...block,
-                    streamSessionId: null,
+                    sessionId: null,
                     connectStage: "error",
                     connectMessage: timeoutDetected ? "Timeout na conexao RDP." : t.workspace.rdp.error,
                     connectError: timeoutDetected ? `${event.data.message} ${retryLabel}`.trim() : event.data.message,
@@ -1425,7 +1658,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                   passwordOverride,
                   saveAuthChoice,
                   retryAttempt: nextAttempt,
-                  preferredCodec,
                 });
               },
             });
@@ -1441,7 +1673,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         }
       });
 
-      const frameChannel = new Channel<ArrayBuffer>((message) => {
+      const videoRectsChannel = new Channel<ArrayBuffer>((message) => {
         if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
           return;
         }
@@ -1449,36 +1681,56 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           return;
         }
 
-        const packet = parseRdpStreamFramePacket(message);
+        const packet = parseRdpVideoRectsPacket(message);
         if (!packet) {
           return;
         }
+        touchRdpFrameForBlock(blockId, packet.width, packet.height);
+        emitRdpVideoRects({ blockId, packet });
+      });
 
-        if (packet.codec === "h264") {
-          touchRdpFrameForBlock(blockId, packet.width, packet.height);
-          emitRdpVideoChunk({
-            blockId,
-            keyframe: packet.keyframe,
-            width: packet.width,
-            height: packet.height,
-            ptsUs: packet.ptsUs,
-            payload: packet.payload,
-          });
+      const cursorChannel = new Channel<ArrayBuffer>((message) => {
+        if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
           return;
         }
+        if (!(message instanceof ArrayBuffer)) {
+          return;
+        }
+        const packet = parseRdpCursorPacket(message);
+        if (!packet) {
+          return;
+        }
+        emitRdpCursor({ blockId, packet });
+      });
 
-        const imageUrl = URL.createObjectURL(new Blob([packet.payload], { type: "image/png" }));
-        replaceRdpFrameForBlock(blockId, imageUrl, packet.width, packet.height);
+      const audioPcmChannel = new Channel<ArrayBuffer>((message) => {
+        if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
+          return;
+        }
+        if (!(message instanceof ArrayBuffer)) {
+          return;
+        }
+        const packet = parseRdpAudioPacket(message);
+        if (!packet) {
+          return;
+        }
+        emitRdpAudio({ blockId, packet });
       });
 
       try {
-        const result = await api.rdpStreamStart(profile.id, channel, frameChannel, {
+        const result = await api.rdpSessionStart(
+          profile.id,
+          controlChannel,
+          videoRectsChannel,
+          cursorChannel,
+          audioPcmChannel,
+          {
           width: 1280,
           height: 720,
           passwordOverride,
           saveAuthChoice,
-          preferredCodec,
-        });
+          },
+        );
 
         if (rdpStreamTokenByBlockRef.current.get(blockId) !== streamToken) {
           return;
@@ -1489,7 +1741,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           setBlocks((current) =>
             current.map((block) =>
               block.id === blockId && block.kind === "rdp"
-                ? { ...block, streamSessionId: result.session_id, connectMessage: connectingMessage }
+                ? { ...block, sessionId: result.session_id, connectMessage: connectingMessage }
                 : block,
             ),
           );
@@ -1502,7 +1754,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
               block.id === blockId && block.kind === "rdp"
                 ? {
                     ...block,
-                    streamSessionId: null,
+                    sessionId: null,
                     connectStage: "awaiting_password",
                     connectMessage: t.workspace.rdp.authRequired,
                     connectError: result.message,
@@ -1520,7 +1772,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
             block.id === blockId && block.kind === "rdp"
               ? {
                   ...block,
-                  streamSessionId: null,
+                  sessionId: null,
                   connectStage: "error",
                   connectMessage: t.workspace.rdp.error,
                   connectError: result.message,
@@ -1537,7 +1789,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
             block.id === blockId && block.kind === "rdp"
               ? {
                   ...block,
-                  streamSessionId: null,
+                  sessionId: null,
                   connectStage: "error",
                   connectMessage: t.workspace.rdp.error,
                   connectError: message,
@@ -1554,7 +1806,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       appendWorkspaceLog,
       clearBlockRetryTimers,
       connections,
-      replaceRdpFrameForBlock,
       settings.auto_reconnect_enabled,
       settings.reconnect_delay_seconds,
       scheduleBlockAutoRetry,
@@ -1565,26 +1816,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       t.workspace.rdp.ready,
     ],
   );
-
-  useEffect(() => {
-    const detach = onRdpVideoDecoderError(({ blockId }) => {
-      const target = blocksRef.current.find(
-        (item): item is RdpBlock => item.id === blockId && item.kind === "rdp",
-      );
-      if (!target) {
-        return;
-      }
-      appendWorkspaceLog("warn", "Decoder de video RDP falhou", "Alternando para stream PNG.");
-      void resolvePendingRdpConnection(blockId, {
-        retryAttempt: 0,
-        preferredCodec: "png",
-      });
-    });
-
-    return () => {
-      detach();
-    };
-  }, [appendWorkspaceLog, resolvePendingRdpConnection]);
 
   const addPendingRdpBlock = useCallback(
     (profileId: string) => {
@@ -1603,7 +1834,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         kind: "rdp",
         title: count > 0 ? `${baseTitle} (${count + 1})` : baseTitle,
         profileId,
-        streamSessionId: null,
+        sessionId: null,
         connectStage: "connecting",
         connectMessage: t.workspace.rdp.connecting,
         connectError: null,
@@ -1611,11 +1842,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         savePasswordChoice: false,
         retryAttempt: 0,
         retryInSeconds: null,
-        imageUrl: null,
         imageWidth: 0,
         imageHeight: 0,
         capturedAt: null,
-        autoRefresh: true,
         layout: workspaceDefaultLayout("rdp", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
         maximized: false,
@@ -1631,11 +1860,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
   useEffect(() => {
     return () => {
-      blocksRef.current.forEach((block) => {
-        if (block.kind === "rdp" && block.imageUrl) {
-          URL.revokeObjectURL(block.imageUrl);
-        }
-      });
       rdpInputFlushTimerByBlockRef.current.forEach((timer) => {
         window.clearTimeout(timer);
       });
@@ -1644,7 +1868,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       rdpStreamTokenByBlockRef.current.clear();
       rdpLastFrameAtByBlockRef.current.clear();
       rdpStreamSessionByBlockRef.current.forEach((sessionId) => {
-        void api.rdpStreamStop(sessionId).catch(() => undefined);
+        void api.rdpSessionStop(sessionId).catch(() => undefined);
       });
       rdpStreamSessionByBlockRef.current.clear();
     };
@@ -2527,9 +2751,13 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       return;
     }
     if (initialBlock === "sftp") {
-      const profileId = parseProfileSourceId(initialSourceId);
-      if (profileId) {
-        addPendingSftpBlock(profileId);
+      const profileSource = parseProfileSourceRef(initialSourceId);
+      if (profileSource?.protocol === "sftp") {
+        addPendingSftpBlock(profileSource.profileId);
+        return;
+      }
+      if (profileSource) {
+        addSftpBlock(initialSourceId ?? "local");
         return;
       }
       addSftpBlock(initialSourceId ?? "local");
@@ -2564,6 +2792,10 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
   const openPathInTerminal = useCallback(
     async (sourceId: string, path: string) => {
+      if (parseProfileSourceRef(sourceId)) {
+        toast.warning("Esse tipo de origem nao possui terminal SSH associado.");
+        return;
+      }
       const targetPath = path || (sourceId === "local" ? "." : "/");
       let sessionId: string;
 
@@ -2723,18 +2955,13 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         setCreateBlockModalOpen(false);
         return;
       }
-      if (createBlockKind === "logs") {
-        addLogsBlock();
-        setCreateBlockModalOpen(false);
-        return;
-      }
       if (createBlockKind === "rdp") {
-        if (!createSourceDraft.startsWith("profile:")) {
+        const profileSource = parseProfileSourceRef(createSourceDraft);
+        if (!profileSource) {
           toast.error(t.workspace.rdp.selectProfile);
           return;
         }
-        const profileId = createSourceDraft.replace("profile:", "");
-        addPendingRdpBlock(profileId);
+        addPendingRdpBlock(profileSource.profileId);
         setCreateBlockModalOpen(false);
         return;
       }
@@ -2742,16 +2969,25 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       let sourceId = createSourceDraft;
       if (createSourceDraft === "local" && createBlockKind === "terminal") {
         sourceId = await connectLocalTerminal();
-      } else if (createSourceDraft.startsWith("profile:") && createBlockKind === "terminal") {
-        const profileId = createSourceDraft.replace("profile:", "");
-        addPendingTerminalBlock(profileId);
-        setCreateBlockModalOpen(false);
-        return;
-      } else if (createSourceDraft.startsWith("profile:") && createBlockKind === "sftp") {
-        const profileId = createSourceDraft.replace("profile:", "");
-        addPendingSftpBlock(profileId);
-        setCreateBlockModalOpen(false);
-        return;
+      } else if (createBlockKind === "terminal") {
+        const profileSource = parseProfileSourceRef(createSourceDraft);
+        if (profileSource) {
+          addPendingTerminalBlock(profileSource.profileId);
+          setCreateBlockModalOpen(false);
+          return;
+        }
+      } else if (createBlockKind === "sftp") {
+        const profileSource = parseProfileSourceRef(createSourceDraft);
+        if (profileSource?.protocol === "sftp") {
+          addPendingSftpBlock(profileSource.profileId);
+          setCreateBlockModalOpen(false);
+          return;
+        }
+        if (profileSource) {
+          addSftpBlock(createSourceDraft);
+          setCreateBlockModalOpen(false);
+          return;
+        }
       }
 
       if (createBlockKind === "terminal") {
@@ -2764,7 +3000,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       toast.error(getError(error));
     }
   }, [
-    addLogsBlock,
     addPendingRdpBlock,
     addPendingSftpBlock,
     addPendingTerminalBlock,
@@ -2781,7 +3016,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     if (!createBlockModalOpen) {
       return;
     }
-    if (createBlockKind === "editor" || createBlockKind === "logs") {
+    if (createBlockKind === "editor") {
       return;
     }
     if (!createSourceOptions.some((item) => item.id === createSourceDraft)) {
@@ -2824,8 +3059,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     [blocks, workspaceSize.height, workspaceSize.width],
   );
 
-  const activeTransfers = transfers.filter((item) => item.status === "running").length;
-  const hasLogsBlock = useMemo(() => blocks.some((block) => block.kind === "logs"), [blocks]);
+  const activeTransfers = transfers.filter((item) => item.status === "running" || item.status === "queued").length;
   const draggingBlockZIndex = useMemo(() => {
     if (!draggingBlockId) {
       return 1;
@@ -2849,23 +3083,10 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           <Plus className="h-4 w-4" />
         </button>
 
-        <button
-          type="button"
-          className={cn(
-            "flex h-7 items-center gap-1 rounded border px-2 text-xs transition",
-            hasLogsBlock
-              ? "border-cyan-400/70 bg-cyan-500/15 text-cyan-100 shadow-[0_0_14px_rgba(34,211,238,0.35)]"
-              : "border-white/10 text-zinc-300 hover:border-cyan-400/50 hover:bg-zinc-900",
-          )}
-          onClick={() => addLogsBlock()}
-        >
-          <FileText className="h-3.5 w-3.5" /> Logs
-        </button>
-
         <div className="ml-auto flex items-center gap-2 text-xs text-zinc-300">
           {activeTransfers > 0 ? (
             <div className="flex items-center gap-2 rounded border border-cyan-400/40 bg-cyan-500/10 px-2 py-1 text-cyan-200">
-              <MonitorUp className="h-3.5 w-3.5 animate-pulse" />
+              <Folder className="h-3.5 w-3.5 animate-pulse" />
               <span>{activeTransfers} transferencia(s)</span>
             </div>
           ) : null}
@@ -2901,13 +3122,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                 >
                   <TerminalSquare className="h-3.5 w-3.5" /> Terminal
                 </button>
-                <button
-                  type="button"
-                  className="flex h-8 items-center gap-2 rounded border border-white/15 px-3 text-xs text-zinc-200 hover:bg-zinc-900"
-                  onClick={() => addLogsBlock()}
-                >
-                  <MonitorUp className="h-3.5 w-3.5" /> Logs
-                </button>
               </div>
             </div>
           </div>
@@ -2940,8 +3154,8 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
             onDragPreview={onBlockDragPreview}
             onDragEnd={onBlockDragEnd}
             onLayoutChange={onLayoutChange}
-            minWidth={block.kind === "terminal" || block.kind === "rdp" ? 420 : block.kind === "logs" ? 460 : 360}
-            minHeight={block.kind === "terminal" || block.kind === "rdp" ? 260 : block.kind === "logs" ? 220 : 240}
+            minWidth={block.kind === "terminal" || block.kind === "rdp" ? 420 : 360}
+            minHeight={block.kind === "terminal" || block.kind === "rdp" ? 260 : 240}
             headerRight={
               <>
                 <button
@@ -3066,6 +3280,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                   sourceOptions,
                   transferItems: transferItemsByBlock.get(block.id) ?? [],
                   onFocus: () => focusBlock(block.id),
+                  onPasteClipboardFiles: () => {
+                    void pasteClipboardFilesIntoSftpBlock(block.id);
+                  },
                   onRefresh: (path, sourceId) => {
                     if (sourceId !== block.sourceId) {
                       notifyModuleDropdownSelect("sftp", block.id, "source_select", sourceId);
@@ -3109,6 +3326,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                     void openFile(block.sourceId, entry.path);
                   },
                   onDropTransfer: (payload, targetPath) => void transferBetweenBlocks(payload, block.id, targetPath),
+                  onDropLocalPaths: (paths, targetPath) => {
+                    void dropLocalPathsIntoSftpBlock(block.id, targetPath, paths);
+                  },
                   onContextAction: (action, entry) => void handleSftpContextAction(block, action, entry),
                   onTrustHost: () => {
                     clearBlockRetryTimers(block.id);
@@ -3188,20 +3408,16 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                   onProfileChange: (profileId) => {
                     notifyModuleDropdownSelect("rdp", block.id, "profile_select", profileId);
                     clearBlockRetryTimers(block.id);
-                    if (block.imageUrl) {
-                      URL.revokeObjectURL(block.imageUrl);
-                    }
                     setBlocks((current) =>
                       current.map((item) =>
                         item.id === block.id && item.kind === "rdp"
                           ? {
                               ...item,
                               profileId,
-                              streamSessionId: null,
+                              sessionId: null,
                               connectStage: "connecting",
                               connectMessage: t.workspace.rdp.connecting,
                               connectError: null,
-                              imageUrl: null,
                               imageWidth: 0,
                               imageHeight: 0,
                               capturedAt: null,
@@ -3213,18 +3429,14 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                     );
                     void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
                   },
-                  onRefresh: () => {
-                    clearBlockRetryTimers(block.id);
-                    void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
-                  },
-                  onInteract: (inputActions) => {
-                    if (inputActions.length === 0) {
+                  onInteract: (inputEvents) => {
+                    if (inputEvents.length === 0) {
                       return;
                     }
                     clearBlockRetryTimers(block.id);
                     void resolvePendingRdpConnection(block.id, {
                       retryAttempt: 0,
-                      inputActions,
+                      inputEvents,
                     });
                   },
                   onRetry: () => {
@@ -3238,39 +3450,13 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                     );
                     void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
                   },
-                  onToggleAutoRefresh: () => {
-                    const nextEnabled = !block.autoRefresh;
-                    setBlocks((current) =>
-                      current.map((item) =>
-                        item.id === block.id && item.kind === "rdp"
-                          ? { ...item, autoRefresh: nextEnabled }
-                          : item,
-                      ),
-                    );
-                    if (nextEnabled) {
-                      void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
-                      return;
-                    }
-                    const activeSessionId = rdpStreamSessionByBlockRef.current.get(block.id) ?? block.streamSessionId;
-                    if (activeSessionId) {
-                      rdpStreamSessionByBlockRef.current.delete(block.id);
-                      void api.rdpStreamStop(activeSessionId).catch(() => undefined);
-                      setBlocks((current) =>
-                        current.map((item) =>
-                          item.id === block.id && item.kind === "rdp"
-                            ? { ...item, streamSessionId: null, connectMessage: "Pausado" }
-                            : item,
-                        ),
-                      );
-                    }
-                  },
-                  onControlChange: (control) => {
-                    const sessionId = rdpStreamSessionByBlockRef.current.get(block.id) ?? block.streamSessionId;
+                  onFocusChange: (focus) => {
+                    const sessionId = rdpStreamSessionByBlockRef.current.get(block.id) ?? block.sessionId;
                     if (!sessionId) {
                       return;
                     }
-                    void api.rdpStreamControl(sessionId, control).catch((error) => {
-                      appendWorkspaceLog("warn", "Falha ao atualizar controle RDP", getError(error));
+                    void api.rdpSessionFocus(sessionId, focus).catch((error) => {
+                      appendWorkspaceLog("warn", "Falha ao atualizar foco RDP", getError(error));
                     });
                   },
                   onPasswordDraftChange: (value) =>
@@ -3326,13 +3512,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                   onOpenExternal: () => void openEditorBlockExternal(block.id),
                 })
               : null}
-
-            {block.kind === "logs"
-              ? logsWorkspace.render({
-                  entries: workspaceLogs,
-                  onClear: () => setWorkspaceLogs([]),
-                })
-              : null}
           </WorkspaceBlockController>
         ))}
       </div>
@@ -3362,7 +3541,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         }
       >
         <div className="space-y-3">
-          <div className="grid grid-cols-5 gap-2">
+          <div className="grid grid-cols-4 gap-2">
             <button
               type="button"
               className={cn(
@@ -3415,19 +3594,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
               <FileText className="mx-auto h-4 w-4" />
               <p className="mt-1">Editor</p>
             </button>
-            <button
-              type="button"
-              className={cn(
-                "rounded border p-2 text-xs transition",
-                createBlockKind === "logs"
-                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
-              )}
-              onClick={() => setCreateBlockKind("logs")}
-            >
-              <MonitorUp className="mx-auto h-4 w-4" />
-              <p className="mt-1">Logs</p>
-            </button>
           </div>
 
           {createBlockKind === "terminal" || createBlockKind === "sftp" || createBlockKind === "rdp" ? (
@@ -3454,9 +3620,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
             </div>
           ) : createBlockKind === "editor" ? (
             <p className="text-xs text-zinc-500">O editor abre arquivo local selecionado pelo sistema.</p>
-          ) : (
-            <p className="text-xs text-zinc-500">O bloco de logs mostra eventos e progresso do workspace.</p>
-          )}
+          ) : null}
         </div>
       </Dialog>
     </div>

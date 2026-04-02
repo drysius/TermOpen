@@ -33,6 +33,9 @@ impl Default for ConnectionKind {
 pub enum ConnectionProtocol {
     Ssh,
     Sftp,
+    Ftp,
+    Ftps,
+    Smb,
     Rdp,
 }
 
@@ -182,6 +185,8 @@ pub struct AppSettings {
     pub terminal_right_click_paste: bool,
     #[serde(default = "default_terminal_ctrl_shift_shortcuts")]
     pub terminal_ctrl_shift_shortcuts: bool,
+    #[serde(default = "default_debug_logs_enabled")]
+    pub debug_logs_enabled: bool,
     #[serde(default)]
     pub modified_files_upload_policy: ModifiedUploadPolicy,
     #[serde(default = "default_known_hosts_path")]
@@ -242,6 +247,10 @@ fn default_terminal_ctrl_shift_shortcuts() -> bool {
     true
 }
 
+fn default_debug_logs_enabled() -> bool {
+    false
+}
+
 fn default_known_hosts_path() -> String {
     String::new()
 }
@@ -263,6 +272,7 @@ impl Default for AppSettings {
             terminal_copy_on_select: default_terminal_copy_on_select(),
             terminal_right_click_paste: default_terminal_right_click_paste(),
             terminal_ctrl_shift_shortcuts: default_terminal_ctrl_shift_shortcuts(),
+            debug_logs_enabled: default_debug_logs_enabled(),
             modified_files_upload_policy: ModifiedUploadPolicy::Ask,
             known_hosts_path: default_known_hosts_path(),
             selected_auth_server_id: None,
@@ -422,23 +432,6 @@ pub struct SyncState {
     pub last_sync_at: Option<String>,
     pub pending_user_code: Option<String>,
     pub verification_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum RdpCaptureResult {
-    Ready {
-        image_base64: String,
-        width: u16,
-        height: u16,
-        captured_at: i64,
-    },
-    AuthRequired {
-        message: String,
-    },
-    Error {
-        message: String,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

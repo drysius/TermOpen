@@ -38,6 +38,7 @@ export interface AppDictionary {
     keychain: string;
     knownHosts: string;
     settings: string;
+    debugLogs: string;
     about: string;
   };
   vault: {
@@ -149,6 +150,9 @@ export interface AppDictionary {
       cardHint: string;
       protocolSsh: string;
       protocolSftp: string;
+      protocolFtp: string;
+      protocolFtps: string;
+      protocolSmb: string;
       protocolRdp: string;
       protocolBoth: string;
     };
@@ -228,6 +232,10 @@ export interface AppDictionary {
       description: string;
     };
     ctrlShiftShortcuts: {
+      title: string;
+      description: string;
+    };
+    debugLogs: {
       title: string;
       description: string;
     };
@@ -345,6 +353,18 @@ export interface AppDictionary {
     stackSection: string;
     newPackagesSection: string;
     newPackagesDescription: string;
+    licensesSection: string;
+    licensesDescription: string;
+  };
+  debugLogs: {
+    title: string;
+    description: string;
+    followTail: string;
+    refresh: string;
+    clear: string;
+    empty: string;
+    disabledTitle: string;
+    disabledDescription: string;
   };
   hostDrawer: {
     titleEdit: string;
@@ -361,6 +381,9 @@ export interface AppDictionary {
       placeholder: string;
       sshDescription: string;
       sftpDescription: string;
+      ftpDescription: string;
+      ftpsDescription: string;
+      smbDescription: string;
       rdpDescription: string;
     };
     password: { label: string; description: string; placeholder: string };

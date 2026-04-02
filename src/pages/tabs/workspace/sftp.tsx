@@ -46,6 +46,53 @@ function writeDragPayload(dataTransfer: DataTransfer, payload: DragPayload): voi
   dataTransfer.setData("text/plain", raw);
 }
 
+function parseFileUriPath(uri: string): string | null {
+  const trimmed = uri.trim();
+  if (!trimmed || !trimmed.startsWith("file://")) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    let path = decodeURIComponent(parsed.pathname || "");
+    if (!path) {
+      return null;
+    }
+    // file:///C:/path -> C:/path on Windows.
+    if (/^\/[A-Za-z]:\//.test(path)) {
+      path = path.slice(1);
+    }
+    return path;
+  } catch {
+    return null;
+  }
+}
+
+function parseExternalLocalPaths(dataTransfer: DataTransfer): string[] {
+  const paths = new Set<string>();
+
+  const uriList = dataTransfer.getData("text/uri-list");
+  if (uriList) {
+    for (const line of uriList.split(/\r?\n/)) {
+      if (!line || line.startsWith("#")) {
+        continue;
+      }
+      const parsed = parseFileUriPath(line);
+      if (parsed) {
+        paths.add(parsed);
+      }
+    }
+  }
+
+  for (const file of Array.from(dataTransfer.files ?? [])) {
+    const candidate = (file as File & { path?: string }).path;
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      paths.add(candidate.trim());
+    }
+  }
+
+  return Array.from(paths);
+}
+
 function formatSize(size: number): string {
   if (!Number.isFinite(size) || size <= 0) {
     return "-";
@@ -144,6 +191,8 @@ export interface SftpBlockViewProps {
   sourceOptions: Array<{ id: string; label: string }>;
   transferItems: BlockTransferItem[];
   onFocus: () => void;
+  onPasteClipboardFiles: () => void;
+  onDropLocalPaths: (paths: string[], targetPath: string) => void;
   onRefresh: (path: string, sourceId: string) => void;
   onSelectSort: (sortKey: SortKey) => void;
   onSelectEntry: (path: string) => void;
@@ -162,6 +211,8 @@ export function SftpBlockView({
   sourceOptions,
   transferItems,
   onFocus,
+  onPasteClipboardFiles,
+  onDropLocalPaths,
   onRefresh,
   onSelectSort,
   onSelectEntry,
@@ -366,10 +417,11 @@ export function SftpBlockView({
 
   const menuItems = useMemo(() => {
     const entry = contextMenu?.entry ?? null;
+    const hasSessionBackedTerminal = block.sourceId === "local" || !block.sourceId.startsWith("profile:");
     return [
       { action: "refresh" as const, label: "Atualizar", disabled: false },
       { action: "copy_path" as const, label: "Copiar caminho", disabled: false },
-      { action: "open_terminal" as const, label: "Abrir no terminal", disabled: false },
+      { action: "open_terminal" as const, label: "Abrir no terminal", disabled: !hasSessionBackedTerminal },
       { action: "open_editor" as const, label: "Abrir no editor", disabled: !entry || entry.is_dir },
       { action: "rename" as const, label: "Renomear", disabled: !entry },
       { action: "move" as const, label: "Mover", disabled: !entry },
@@ -385,7 +437,10 @@ export function SftpBlockView({
   }, [block.sourceId, contextMenu?.entry]);
 
   const runningTransfers = useMemo(
-    () => transferItems.filter((item) => item.transfer.status === "running").length,
+    () =>
+      transferItems.filter(
+        (item) => item.transfer.status === "running" || item.transfer.status === "queued",
+      ).length,
     [transferItems],
   );
   const isConnected = block.connectStage === "ready" && !block.pendingProfileId;
@@ -402,8 +457,30 @@ export function SftpBlockView({
   return (
     <div
       ref={containerRef}
-      className="relative flex h-full min-h-0 flex-col"
-      onMouseDown={onFocus}
+      tabIndex={0}
+      className="relative flex h-full min-h-0 flex-col outline-none"
+      onMouseDown={(event) => {
+        onFocus();
+        const target = event.target as HTMLElement | null;
+        if (!target) {
+          return;
+        }
+        if (target.closest("input, textarea, select, button, [contenteditable='true']")) {
+          return;
+        }
+        containerRef.current?.focus();
+      }}
+      onPaste={(event) => {
+        if (!isConnected) {
+          return;
+        }
+        const target = event.target as HTMLElement | null;
+        if (target?.closest("input, textarea, [contenteditable='true']")) {
+          return;
+        }
+        event.preventDefault();
+        onPasteClipboardFiles();
+      }}
       onContextMenu={(event) => openContextMenu(event, null)}
       onDragOver={(event) => {
         event.preventDefault();
@@ -414,6 +491,12 @@ export function SftpBlockView({
         const payload = parseDragPayload(event.dataTransfer);
         if (payload) {
           onDropTransfer(payload, block.path);
+          return;
+        }
+
+        const localPaths = parseExternalLocalPaths(event.dataTransfer);
+        if (localPaths.length > 0) {
+          onDropLocalPaths(localPaths, block.path);
         }
       }}
     >
@@ -504,12 +587,16 @@ export function SftpBlockView({
                         ? "text-red-300"
                         : item.transfer.status === "completed"
                           ? "text-emerald-300"
+                          : item.transfer.status === "queued"
+                            ? "text-amber-200"
                           : "text-cyan-200";
                     const barColor =
                       item.transfer.status === "error"
                         ? "bg-red-500/70"
                         : item.transfer.status === "completed"
                           ? "bg-emerald-500/80"
+                          : item.transfer.status === "queued"
+                            ? "bg-amber-500/70"
                           : "bg-cyan-500/80";
 
                     return (
@@ -526,6 +613,8 @@ export function SftpBlockView({
                               ? `${item.transfer.progress}%`
                               : item.transfer.status === "completed"
                                 ? "Concluido"
+                                : item.transfer.status === "queued"
+                                  ? "Na fila"
                                 : "Erro"}
                           </span>
                         </div>
@@ -629,6 +718,12 @@ export function SftpBlockView({
                     const payload = parseDragPayload(event.dataTransfer);
                     if (payload) {
                       onDropTransfer(payload, entry.path);
+                      return;
+                    }
+
+                    const localPaths = parseExternalLocalPaths(event.dataTransfer);
+                    if (localPaths.length > 0) {
+                      onDropLocalPaths(localPaths, entry.path);
                     }
                   }}
                 >

@@ -12,6 +12,8 @@ const coreDependencies = [
   { name: "Monaco Editor", url: "https://github.com/microsoft/monaco-editor" },
   { name: "ssh2 (Rust)", url: "https://github.com/alexcrichton/ssh2-rs" },
   { name: "IronRDP (Rust)", url: "https://github.com/Devolutions/IronRDP" },
+  { name: "smb-rs (Rust)", url: "https://github.com/afiffon/smb-rs" },
+  { name: "suppaftp (Rust)", url: "https://github.com/veeso/suppaftp" },
 ];
 
 const recentPackages = [
@@ -19,6 +21,21 @@ const recentPackages = [
   { name: "tauri-plugin-deep-link", url: "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/deep-link" },
   { name: "@tauri-apps/plugin-dialog", url: "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/dialog" },
   { name: "@tauri-apps/plugin-opener", url: "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/opener" },
+  { name: "smb-rs", url: "https://github.com/afiffon/smb-rs?tab=License-1-ov-file" },
+  { name: "suppaftp", url: "https://github.com/veeso/suppaftp" },
+];
+
+const licensePackages = [
+  {
+    name: "smb-rs",
+    license: "MIT",
+    url: "https://github.com/afiffon/smb-rs?tab=License-1-ov-file",
+  },
+  {
+    name: "suppaftp",
+    license: "MIT OR Apache-2.0",
+    url: "https://github.com/veeso/suppaftp",
+  },
 ];
 
 export function AboutPage() {
@@ -63,6 +80,21 @@ export function AboutPage() {
                 <a className="text-cyan-300 hover:text-cyan-200" href={item.url} target="_blank" rel="noreferrer">
                   {item.name}
                 </a>
+              </li>
+            ))}
+          </ul>
+        </article>
+
+        <article className="rounded-xl border border-white/10 bg-zinc-950/70 p-4 xl:col-span-1">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.licensesSection}</h3>
+          <p className="mt-2 text-sm text-zinc-400">{t.about.licensesDescription}</p>
+          <ul className="mt-3 space-y-2 text-sm text-zinc-300">
+            {licensePackages.map((item) => (
+              <li key={item.name} className="rounded border border-white/10 bg-zinc-900/50 px-2 py-1.5">
+                <a className="text-cyan-300 hover:text-cyan-200" href={item.url} target="_blank" rel="noreferrer">
+                  {item.name}
+                </a>
+                <p className="text-[11px] text-zinc-400">{item.license}</p>
               </li>
             ))}
           </ul>

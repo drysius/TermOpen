@@ -35,6 +35,9 @@ export const hostDrawer: AppDictionary["hostDrawer"] = {
     placeholder: "Select",
     sshDescription: "Opens remote terminal blocks in the workspace.",
     sftpDescription: "Opens remote file explorer and transfers.",
+    ftpDescription: "Opens plain FTP remote file explorer and transfers.",
+    ftpsDescription: "Opens FTP over TLS (FTPS) explorer and transfers.",
+    smbDescription: "Opens SMB shares for remote file browsing and transfers.",
     rdpDescription: "Opens remote desktop access (RDP) in the workspace.",
   },
   password: {

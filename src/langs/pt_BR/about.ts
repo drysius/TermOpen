@@ -18,4 +18,6 @@ export const about: AppDictionary["about"] = {
   stackSection: "Stack e Bibliotecas",
   newPackagesSection: "Pacotes recentes",
   newPackagesDescription: "Inclui novas integracoes para HTTP e Deep Link nativos no Tauri.",
+  licensesSection: "Licencas",
+  licensesDescription: "SMB (`smb-rs`) usa licenca MIT. FTP/FTPS (`suppaftp`) usa licenciamento duplo MIT OR Apache-2.0.",
 };

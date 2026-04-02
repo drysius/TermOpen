@@ -1,6 +1,6 @@
 export type KeyMode = "password" | "keychain";
 export type ConnectionKind = "host" | "sftp" | "rdp" | "both";
-export type ConnectionProtocol = "ssh" | "sftp" | "rdp";
+export type ConnectionProtocol = "ssh" | "sftp" | "ftp" | "ftps" | "smb" | "rdp";
 export type KeychainEntryType = "password" | "ssh_key" | "secret";
 export type EditorPreference = "internal" | "vscode" | "system";
 export type ModifiedUploadPolicy = "auto" | "ask" | "manual";
@@ -60,9 +60,19 @@ export interface AppSettings {
   terminal_copy_on_select: boolean;
   terminal_right_click_paste: boolean;
   terminal_ctrl_shift_shortcuts: boolean;
+  debug_logs_enabled: boolean;
   modified_files_upload_policy: ModifiedUploadPolicy;
   known_hosts_path: string;
   selected_auth_server_id?: string | null;
+}
+
+export interface DebugLogEntry {
+  id: number;
+  timestamp_ms: number;
+  level: string;
+  source: string;
+  message: string;
+  context?: string | null;
 }
 
 export interface SshSessionInfo {
@@ -73,13 +83,47 @@ export interface SshSessionInfo {
 }
 
 export type RdpMouseButton = "left" | "right" | "middle";
-export type RdpFrameCodec = "png" | "h264";
+export interface RdpViewportRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
-export type RdpInputAction =
+export interface RdpSessionFocusInput {
+  focused: boolean;
+  viewport_rect?: RdpViewportRect | null;
+  dpi_scale?: number | null;
+}
+
+export interface RdpPathPoint {
+  x: number;
+  y: number;
+  t_ms?: number | null;
+}
+
+export type RdpInputEvent =
   | {
       kind: "mouse_move";
       x: number;
       y: number;
+      t_ms?: number | null;
+    }
+  | {
+      kind: "mouse_button_down";
+      x: number;
+      y: number;
+      button: RdpMouseButton;
+    }
+  | {
+      kind: "mouse_button_up";
+      x: number;
+      y: number;
+      button: RdpMouseButton;
+    }
+  | {
+      kind: "mouse_path";
+      points: RdpPathPoint[];
     }
   | {
       kind: "mouse_click";
@@ -87,6 +131,13 @@ export type RdpInputAction =
       y: number;
       button: RdpMouseButton;
       double_click?: boolean;
+    }
+  | {
+      kind: "mouse_scroll";
+      x: number;
+      y: number;
+      delta_x?: number;
+      delta_y?: number;
     }
   | {
       kind: "key_press";
@@ -98,35 +149,11 @@ export type RdpInputAction =
       meta?: boolean;
     };
 
-export type RdpCaptureResult =
-  | {
-      status: "ready";
-      image_base64: string;
-      width: number;
-      height: number;
-      captured_at: number;
-    }
-  | {
-      status: "auth_required";
-      message: string;
-    }
-  | {
-      status: "error";
-      message: string;
-    };
-
-export interface StreamViewport {
-  width: number;
-  height: number;
+export interface RdpInputBatch {
+  events: RdpInputEvent[];
 }
 
-export interface StreamControlInput {
-  viewport?: StreamViewport | null;
-  active?: boolean | null;
-  pointer_inside?: boolean | null;
-}
-
-export type RdpStreamStartResult =
+export type RdpSessionStartResult =
   | {
       status: "started";
       session_id: string;
@@ -140,7 +167,7 @@ export type RdpStreamStartResult =
       message: string;
     };
 
-export type RdpStreamEvent =
+export type RdpSessionControlEvent =
   | {
       event: "connecting";
       data: {
@@ -154,7 +181,6 @@ export type RdpStreamEvent =
         session_id: string;
         width: number;
         height: number;
-        frame_codec: RdpFrameCodec;
       };
     }
   | {
@@ -176,6 +202,13 @@ export type RdpStreamEvent =
       data: {
         session_id: string;
       };
+    }
+  | {
+      event: "released_capture";
+      data: {
+        session_id: string;
+        message: string;
+      };
     };
 
 export interface SftpEntry {
@@ -186,6 +219,30 @@ export interface SftpEntry {
   permissions?: number | null;
   modified_at?: number | null;
 }
+
+export interface ClipboardLocalItem {
+  path: string;
+  is_dir: boolean;
+}
+
+export interface LocalPathStat {
+  is_dir: boolean;
+  size: number;
+}
+
+export type RemoteTransferEndpoint =
+  | {
+      kind: "local";
+    }
+  | {
+      kind: "sftp_session";
+      session_id: string;
+    }
+  | {
+      kind: "profile";
+      profile_id: string;
+      protocol: ConnectionProtocol;
+    };
 
 export type BinaryPreviewResult =
   | {

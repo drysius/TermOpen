@@ -21,9 +21,9 @@ export function SftpSectionPage() {
   return (
     <div className="h-full overflow-auto p-3">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-100">SFTP</h2>
+        <h2 className="text-sm font-semibold text-zinc-100">Arquivos Remotos</h2>
         <Button size="sm" onClick={() => openHostDrawer(undefined, "sftp")}>
-          <Plus className="mr-1 h-4 w-4" /> Novo SFTP
+          <Plus className="mr-1 h-4 w-4" /> Novo Perfil
         </Button>
       </div>
 
@@ -38,7 +38,13 @@ export function SftpSectionPage() {
               <CardTitle className="flex items-center justify-between text-sm">
                 <span>{profile.name}</span>
                 <div className="flex items-center gap-2">
-                  <Badge variant="outline">SFTP</Badge>
+                  {(profile.protocols ?? [])
+                    .filter((protocol) => protocol === "sftp" || protocol === "ftp" || protocol === "ftps" || protocol === "smb")
+                    .map((protocol) => (
+                      <Badge key={`${profile.id}-${protocol}`} variant="outline">
+                        {protocol.toUpperCase()}
+                      </Badge>
+                    ))}
                   <details className="relative" onClick={(event) => event.stopPropagation()}>
                     <summary className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded border border-white/15 text-zinc-300 hover:bg-zinc-900 [&::-webkit-details-marker]:hidden">
                       <MoreHorizontal className="h-4 w-4" />
@@ -68,7 +74,7 @@ export function SftpSectionPage() {
             </CardHeader>
             <CardContent className="pt-0">
               <p className="text-xs text-zinc-500">
-                Clique no host para abrir no workspace SFTP.
+                Clique no host para abrir o workspace de arquivos remotos.
               </p>
             </CardContent>
           </Card>

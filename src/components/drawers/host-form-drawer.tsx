@@ -26,6 +26,25 @@ interface HostFormValues {
 }
 
 const RDP_DEFAULT_PORT = 3389;
+const FTP_DEFAULT_PORT = 21;
+const SMB_DEFAULT_PORT = 445;
+
+function hasFileProtocol(protocols: ConnectionProtocol[]): boolean {
+  return protocols.some((item) => item === "sftp" || item === "ftp" || item === "ftps" || item === "smb");
+}
+
+function preferredPortForProtocols(protocols: ConnectionProtocol[]): number {
+  if (protocols.includes("rdp")) {
+    return RDP_DEFAULT_PORT;
+  }
+  if (protocols.includes("smb")) {
+    return SMB_DEFAULT_PORT;
+  }
+  if (protocols.includes("ftp") || protocols.includes("ftps")) {
+    return FTP_DEFAULT_PORT;
+  }
+  return 22;
+}
 
 function normalizeProtocolList(protocols: ConnectionProtocol[]): ConnectionProtocol[] {
   const unique = Array.from(new Set(protocols));
@@ -41,6 +60,15 @@ function protocolLabel(protocol: ConnectionProtocol): string {
   }
   if (protocol === "sftp") {
     return "SFTP";
+  }
+  if (protocol === "ftp") {
+    return "FTP";
+  }
+  if (protocol === "ftps") {
+    return "FTPS";
+  }
+  if (protocol === "smb") {
+    return "SMB";
   }
   return "RDP";
 }
@@ -110,7 +138,7 @@ export function HostFormDrawer() {
   const [privateKeyPath, setPrivateKeyPath] = useState("");
   const protocolMenuRef = useRef<HTMLDivElement | null>(null);
   const keychainMenuRef = useRef<HTMLDivElement | null>(null);
-  const previousHasRdpRef = useRef(false);
+  const previousPreferredPortRef = useRef(preferredPortForProtocols(normalizeProtocols(initialProfile)));
 
   const { register, handleSubmit, reset, watch, setValue, control } = useForm<HostFormValues>({
     defaultValues: {
@@ -118,7 +146,7 @@ export function HostFormDrawer() {
       name: initialProfile.name ?? "",
       protocols: normalizeProtocols(initialProfile),
       host: initialProfile.host ?? "",
-      port: initialProfile.port ?? (normalizeProtocols(initialProfile).includes("rdp") ? RDP_DEFAULT_PORT : 22),
+      port: initialProfile.port ?? preferredPortForProtocols(normalizeProtocols(initialProfile)),
       username: initialProfile.username ?? "",
       password: initialProfile.password ?? "",
       private_key: initialProfile.private_key ?? "",
@@ -131,7 +159,7 @@ export function HostFormDrawer() {
   const watchedUser = watch("username");
   const watchedProtocols = watch("protocols");
   const watchedPort = watch("port");
-  const hasSftp = watchedProtocols.includes("sftp");
+  const hasSftp = hasFileProtocol(watchedProtocols);
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
@@ -153,7 +181,7 @@ export function HostFormDrawer() {
       name: initialProfile.name ?? "",
       protocols: normalizeProtocols(initialProfile),
       host: initialProfile.host ?? "",
-      port: initialProfile.port ?? (normalizeProtocols(initialProfile).includes("rdp") ? RDP_DEFAULT_PORT : 22),
+      port: initialProfile.port ?? preferredPortForProtocols(normalizeProtocols(initialProfile)),
       username: initialProfile.username ?? "",
       password: initialProfile.password ?? "",
       private_key: initialProfile.private_key ?? "",
@@ -163,6 +191,7 @@ export function HostFormDrawer() {
     setPrivateKeyPath("");
     setProtocolMenuOpen(false);
     setKeychainMenuOpen(false);
+    previousPreferredPortRef.current = preferredPortForProtocols(normalizeProtocols(initialProfile));
   }, [initialProfile, openState, reset]);
 
   useEffect(() => {
@@ -175,14 +204,11 @@ export function HostFormDrawer() {
       return;
     }
 
-    const currentHasRdp = normalized.includes("rdp");
-    if (currentHasRdp && (!previousHasRdpRef.current || !Number.isFinite(watchedPort) || watchedPort <= 0)) {
-      setValue("port", RDP_DEFAULT_PORT, { shouldDirty: true, shouldTouch: true });
+    const preferredPort = preferredPortForProtocols(normalized);
+    if (!Number.isFinite(watchedPort) || watchedPort <= 0 || watchedPort === previousPreferredPortRef.current) {
+      setValue("port", preferredPort, { shouldDirty: true, shouldTouch: true });
     }
-    if (!currentHasRdp && previousHasRdpRef.current && watchedPort === RDP_DEFAULT_PORT) {
-      setValue("port", 22, { shouldDirty: true, shouldTouch: true });
-    }
-    previousHasRdpRef.current = currentHasRdp;
+    previousPreferredPortRef.current = preferredPort;
   }, [setValue, watchedPort, watchedProtocols]);
 
   const onSubmit = (values: HostFormValues) => {
@@ -192,12 +218,12 @@ export function HostFormDrawer() {
       name: values.name.trim(),
       protocols: normalizeProtocolList(values.protocols),
       host: values.host.trim(),
-      port: normalizeProtocolList(values.protocols).includes("rdp") ? values.port || RDP_DEFAULT_PORT : values.port || 22,
+      port: values.port || preferredPortForProtocols(normalizeProtocolList(values.protocols)),
       username: values.username.trim(),
       password: values.password.trim() ? values.password : null,
       private_key: values.private_key.trim() ? values.private_key : null,
       keychain_id: values.keychain_id || null,
-      remote_path: normalizeProtocolList(values.protocols).includes("sftp") ? values.remote_path.trim() || "/" : null,
+      remote_path: hasFileProtocol(normalizeProtocolList(values.protocols)) ? values.remote_path.trim() || "/" : null,
       kind: undefined,
     };
     void saveHost(profile);
@@ -254,7 +280,7 @@ export function HostFormDrawer() {
                 </button>
                 {protocolMenuOpen ? (
                   <div className="absolute z-[240] mt-1 w-full rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
-                    {(["ssh", "sftp", "rdp"] as ConnectionProtocol[]).map((protocol) => {
+                    {(["ssh", "sftp", "ftp", "ftps", "smb", "rdp"] as ConnectionProtocol[]).map((protocol) => {
                       const active = field.value.includes(protocol);
                       return (
                         <button
@@ -284,6 +310,12 @@ export function HostFormDrawer() {
                                 ? t.hostDrawer.protocols.sshDescription
                                 : protocol === "sftp"
                                   ? t.hostDrawer.protocols.sftpDescription
+                                  : protocol === "ftp"
+                                    ? t.hostDrawer.protocols.ftpDescription
+                                    : protocol === "ftps"
+                                      ? t.hostDrawer.protocols.ftpsDescription
+                                      : protocol === "smb"
+                                        ? t.hostDrawer.protocols.smbDescription
                                   : t.hostDrawer.protocols.rdpDescription}
                             </span>
                           </span>
