@@ -93,6 +93,15 @@ Backend (Rust/Tauri):
 - PTY-backed SSH channel is required for interactive remote shell.
 - Transfer progress events follow `transfer:progress:{id}` naming.
 - Workspace close must close associated sessions; if no workspace remains, close all active sessions.
+
+## Input and Transfer Architecture Defaults
+- Prefer backend-first input normalization (`src-tauri/src/keyboard.rs` and `src-tauri/src/mouse.rs`) and keep frontend focused on capture/render.
+- For pointer input, support full state transitions (`down`/`move`/`up`/`scroll`) and preserve last known pointer position to avoid teleport/snap.
+- For wheel input, accumulate and normalize deltas in backend before protocol emission.
+- Keep protocol adapters thin: RDP/SSH/SFTP should reuse shared input mapping utilities instead of duplicating key/button maps.
+- Prefer path-based transfer operations over byte upload when path information is available (clipboard/drop file paths).
+- For same-remote-profile SFTP copy/move, prefer remote-side command copy (`cp`) before fallback to download+upload streaming.
+- Transfer UI should show lifecycle states (`queued`, `running`, `completed`, `error`) and progress events from backend.
 ## Portuguese Translation
 
 ## Acentuação e UTF-8
