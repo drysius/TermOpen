@@ -2,7 +2,7 @@ import type { WorkspaceBlockLayout } from "@/components/workspace/workspace-bloc
 import type { EditorViewMode } from "@/functions/editor-file-utils";
 import type { SftpEntry } from "@/types/termopen";
 
-export type WorkspaceKind = "terminal" | "sftp" | "rdp" | "editor" | "logs";
+export type WorkspaceKind = "terminal" | "sftp" | "rdp" | "editor";
 export type WorkspaceMode = "free";
 export type SortKey = "name" | "size" | "permissions" | "modified_at";
 export type SortDirection = "asc" | "desc";
@@ -86,14 +86,10 @@ export interface EditorBlock extends BaseBlock {
   saving: boolean;
 }
 
-export interface LogsBlock extends BaseBlock {
-  kind: "logs";
-}
-
 export interface RdpBlock extends BaseBlock {
   kind: "rdp";
   profileId: string;
-  streamSessionId: string | null;
+  sessionId: string | null;
   connectStage: ConnectStage;
   connectMessage: string;
   connectError: string | null;
@@ -101,16 +97,14 @@ export interface RdpBlock extends BaseBlock {
   savePasswordChoice: boolean;
   retryAttempt: number;
   retryInSeconds: number | null;
-  imageUrl: string | null;
   imageWidth: number;
   imageHeight: number;
   capturedAt: number | null;
-  autoRefresh: boolean;
 }
 
-export type WorkspaceBlock = TerminalBlock | SftpBlock | RdpBlock | EditorBlock | LogsBlock;
+export type WorkspaceBlock = TerminalBlock | SftpBlock | RdpBlock | EditorBlock;
 export type WorkspaceLogLevel = "info" | "success" | "warn" | "error";
-export type TransferStatus = "running" | "completed" | "error";
+export type TransferStatus = "queued" | "running" | "completed" | "error";
 
 export interface WorkspaceLogEntry {
   id: string;

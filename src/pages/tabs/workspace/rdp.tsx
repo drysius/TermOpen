@@ -3,15 +3,22 @@ import {
   useCallback,
   useEffect,
   useRef,
-  useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 
 import { useT } from "@/langs";
 import { cn } from "@/lib/utils";
-import type { ConnectionProfile, RdpInputAction, StreamControlInput } from "@/types/termopen";
-import { emitRdpVideoDecoderError, onRdpVideoChunk } from "@/pages/tabs/workspace/natives/rdp-stream";
+import type {
+  ConnectionProfile,
+  RdpInputEvent,
+  RdpSessionFocusInput,
+} from "@/types/termopen";
+import {
+  onRdpCursor,
+  onRdpVideoRects,
+} from "@/pages/tabs/workspace/natives/rdp-stream";
 
 import type { RdpBlock } from "./types";
 import type { WorkspaceBlockModule } from "./block-module";
@@ -22,11 +29,9 @@ export interface RdpBlockViewProps {
   profiles: ConnectionProfile[];
   onFocus: () => void;
   onProfileChange: (profileId: string) => void;
-  onRefresh: () => void;
-  onInteract: (inputActions: RdpInputAction[]) => void;
-  onControlChange: (control: StreamControlInput) => void;
+  onInteract: (inputEvents: RdpInputEvent[]) => void;
+  onFocusChange: (focus: RdpSessionFocusInput) => void;
   onRetry: () => void;
-  onToggleAutoRefresh: () => void;
   onPasswordDraftChange: (value: string) => void;
   onSavePasswordChange: (checked: boolean) => void;
   onSubmitPassword: () => void;
@@ -39,28 +44,45 @@ function formatCapturedAt(timestamp: number | null): string {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
+interface CursorState {
+  kind: "default" | "hidden" | "position" | "bitmap";
+  x: number;
+  y: number;
+  hotspotX: number;
+  hotspotY: number;
+  width: number;
+  height: number;
+  bitmap: Uint8ClampedArray | null;
+}
+
+const EMPTY_CURSOR: CursorState = {
+  kind: "default",
+  x: 0,
+  y: 0,
+  hotspotX: 0,
+  hotspotY: 0,
+  width: 0,
+  height: 0,
+  bitmap: null,
+};
+
 export function RdpBlockView({
   block,
   active,
   profiles,
   onFocus,
   onProfileChange,
-  onRefresh,
   onInteract,
-  onControlChange,
+  onFocusChange,
   onRetry,
-  onToggleAutoRefresh,
   onPasswordDraftChange,
   onSavePasswordChange,
   onSubmitPassword,
 }: RdpBlockViewProps) {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const frameImageRef = useRef<HTMLImageElement | null>(null);
-  const decodedFrameRef = useRef<VideoFrame | null>(null);
-  const videoDecoderRef = useRef<VideoDecoder | null>(null);
-  const decoderStartedRef = useRef(false);
-  const decoderFailedRef = useRef(false);
+  const surfaceCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cursorRef = useRef<CursorState>(EMPTY_CURSOR);
   const drawRectRef = useRef({
     x: 0,
     y: 0,
@@ -69,45 +91,45 @@ export function RdpBlockView({
     canvasWidth: 0,
     canvasHeight: 0,
   });
-  const drawFrameRef = useRef<() => void>(() => undefined);
   const lastMoveSentAtRef = useRef(0);
-  const [localPointer, setLocalPointer] = useState<{ x: number; y: number } | null>(null);
+  const pressedButtonsRef = useRef<Record<"left" | "right" | "middle", boolean>>({
+    left: false,
+    right: false,
+    middle: false,
+  });
+  const lastInputPointerRef = useRef<{ x: number; y: number } | null>(null);
   const isConnected = block.connectStage === "ready" && block.imageWidth > 0 && block.imageHeight > 0;
-  const emitControlWithViewport = useCallback(
-    (control: StreamControlInput) => {
-      const canvas = canvasRef.current;
-      const viewport = canvas
-        ? {
-            width: Math.max(1, Math.floor(canvas.clientWidth)),
-            height: Math.max(1, Math.floor(canvas.clientHeight)),
-          }
-        : null;
-      onControlChange({
-        ...control,
-        viewport,
-      });
-    },
-    [onControlChange],
-  );
-  const clearVideoDecoder = useCallback(() => {
-    decoderStartedRef.current = false;
-    const decoder = videoDecoderRef.current;
-    videoDecoderRef.current = null;
-    if (decoder && decoder.state !== "closed") {
-      decoder.close();
+
+  const pointerButtonToMouseButton = useCallback((button: number): "left" | "right" | "middle" | null => {
+    if (button === 0) {
+      return "left";
     }
-    if (decodedFrameRef.current) {
-      decodedFrameRef.current.close();
-      decodedFrameRef.current = null;
+    if (button === 1) {
+      return "middle";
     }
+    if (button === 2) {
+      return "right";
+    }
+    return null;
   }, []);
-  const reportDecoderFailure = useCallback(() => {
-    if (decoderFailedRef.current) {
-      return;
+
+  const ensureSurface = useCallback((width: number, height: number): HTMLCanvasElement | null => {
+    if (width <= 0 || height <= 0) {
+      return null;
     }
-    decoderFailedRef.current = true;
-    emitRdpVideoDecoderError({ blockId: block.id });
-  }, [block.id]);
+    const current = surfaceCanvasRef.current ?? document.createElement("canvas");
+    if (current.width !== width || current.height !== height) {
+      current.width = width;
+      current.height = height;
+      const context = current.getContext("2d");
+      if (context) {
+        context.fillStyle = "#000000";
+        context.fillRect(0, 0, width, height);
+      }
+    }
+    surfaceCanvasRef.current = current;
+    return current;
+  }, []);
 
   const drawFrame = useCallback(() => {
     const canvas = canvasRef.current;
@@ -131,12 +153,11 @@ export function RdpBlockView({
       canvas.height = renderHeight;
     }
 
-    context.clearRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = "#09090b";
     context.fillRect(0, 0, canvas.width, canvas.height);
 
-    const frame = decodedFrameRef.current ?? frameImageRef.current;
-    if (frame && block.imageWidth > 0 && block.imageHeight > 0) {
+    const surface = surfaceCanvasRef.current;
+    if (surface && block.imageWidth > 0 && block.imageHeight > 0) {
       const scale = Math.min(canvas.width / block.imageWidth, canvas.height / block.imageHeight);
       const drawWidth = Math.max(1, Math.floor(block.imageWidth * scale));
       const drawHeight = Math.max(1, Math.floor(block.imageHeight * scale));
@@ -153,24 +174,8 @@ export function RdpBlockView({
       };
 
       context.imageSmoothingEnabled = false;
-      context.drawImage(frame as unknown as CanvasImageSource, offsetX, offsetY, drawWidth, drawHeight);
+      context.drawImage(surface, offsetX, offsetY, drawWidth, drawHeight);
 
-      if (localPointer) {
-        const normalizedX = block.imageWidth > 1 ? localPointer.x / (block.imageWidth - 1) : 0;
-        const normalizedY = block.imageHeight > 1 ? localPointer.y / (block.imageHeight - 1) : 0;
-        const pointerX = offsetX + normalizedX * drawWidth;
-        const pointerY = offsetY + normalizedY * drawHeight;
-
-        context.save();
-        context.strokeStyle = "rgba(34, 211, 238, 0.85)";
-        context.fillStyle = "rgba(34, 211, 238, 0.18)";
-        context.lineWidth = Math.max(1.5, dpr);
-        context.beginPath();
-        context.arc(pointerX, pointerY, Math.max(4, dpr * 3), 0, Math.PI * 2);
-        context.fill();
-        context.stroke();
-        context.restore();
-      }
       return;
     }
 
@@ -182,120 +187,89 @@ export function RdpBlockView({
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
     };
-  }, [block.imageHeight, block.imageWidth, localPointer]);
+  }, [block.imageHeight, block.imageWidth]);
 
   useEffect(() => {
-    drawFrameRef.current = drawFrame;
-  }, [drawFrame]);
-
-  useEffect(() => {
-    if (!block.imageUrl) {
-      frameImageRef.current = null;
-      drawFrame();
-      return;
-    }
-
-    clearVideoDecoder();
-    const frame = new Image();
-    frame.onload = () => {
-      frameImageRef.current = frame;
-      drawFrame();
-    };
-    frame.src = block.imageUrl;
-  }, [block.imageUrl, clearVideoDecoder, drawFrame]);
-
-  useEffect(() => {
-    if (block.connectStage === "ready") {
-      return;
-    }
-    decoderFailedRef.current = false;
-    clearVideoDecoder();
-    drawFrameRef.current();
-  }, [block.connectStage, clearVideoDecoder]);
-
-  useEffect(() => {
-    const videoDecoderCtor = (globalThis as typeof globalThis & { VideoDecoder?: typeof VideoDecoder }).VideoDecoder;
-    const encodedVideoChunkCtor = (globalThis as typeof globalThis & { EncodedVideoChunk?: typeof EncodedVideoChunk })
-      .EncodedVideoChunk;
-    if (!videoDecoderCtor || !encodedVideoChunkCtor) {
-      return () => undefined;
-    }
-
-    const ensureDecoder = (): VideoDecoder | null => {
-      const current = videoDecoderRef.current;
-      if (current && current.state !== "closed") {
-        return current;
-      }
-
-      try {
-        const decoder = new videoDecoderCtor({
-          output: (frame) => {
-            if (decodedFrameRef.current) {
-              decodedFrameRef.current.close();
-            }
-            decodedFrameRef.current = frame;
-            drawFrameRef.current();
-          },
-          error: () => {
-            reportDecoderFailure();
-            clearVideoDecoder();
-            drawFrameRef.current();
-          },
-        });
-        decoder.configure({
-          codec: "avc1.42E01F",
-          optimizeForLatency: true,
-          hardwareAcceleration: "prefer-hardware",
-        });
-        videoDecoderRef.current = decoder;
-        return decoder;
-      } catch {
-        reportDecoderFailure();
-        clearVideoDecoder();
-        return null;
-      }
-    };
-
-    const detach = onRdpVideoChunk((chunk) => {
-      if (chunk.blockId !== block.id) {
+    const detachVideo = onRdpVideoRects(({ blockId, packet }) => {
+      if (blockId !== block.id) {
         return;
       }
 
-      const decoder = ensureDecoder();
-      if (!decoder || decoder.state === "closed") {
+      const surface = ensureSurface(packet.width, packet.height);
+      if (!surface) {
+        return;
+      }
+      const context = surface.getContext("2d");
+      if (!context) {
         return;
       }
 
-      if (!decoderStartedRef.current) {
-        if (!chunk.keyframe) {
-          return;
+      for (const rect of packet.rects) {
+        const expectedSize = rect.width * rect.height * 4;
+        if (rect.pixels.byteLength < expectedSize) {
+          continue;
         }
-        decoderStartedRef.current = true;
+        const rgbaPixels = new Uint8ClampedArray(rect.pixels);
+        for (let index = 0; index + 3 < rgbaPixels.length; index += 4) {
+          const blue = rgbaPixels[index];
+          rgbaPixels[index] = rgbaPixels[index + 2];
+          rgbaPixels[index + 2] = blue;
+        }
+        context.putImageData(new ImageData(rgbaPixels, rect.width, rect.height), rect.x, rect.y);
       }
 
-      try {
-        decoder.decode(
-          new encodedVideoChunkCtor({
-            type: chunk.keyframe ? "key" : "delta",
-            timestamp: Math.max(0, Math.floor(chunk.ptsUs)),
-            data: chunk.payload,
-          }),
-        );
-      } catch {
-        reportDecoderFailure();
-        clearVideoDecoder();
+      if (packet.frameEnd) {
+        drawFrame();
       }
     });
 
+    const detachCursor = onRdpCursor(({ blockId, packet }) => {
+      if (blockId !== block.id) {
+        return;
+      }
+
+      if (packet.kind === "default" || packet.kind === "hidden") {
+        cursorRef.current = {
+          ...EMPTY_CURSOR,
+          kind: packet.kind,
+        };
+      } else if (packet.kind === "position") {
+        cursorRef.current = {
+          ...cursorRef.current,
+          kind: "position",
+          x: packet.x,
+          y: packet.y,
+        };
+      } else {
+        const previous = cursorRef.current;
+        const fallbackToPrevious =
+          packet.x === 0 &&
+          packet.y === 0 &&
+          (previous.x !== 0 || previous.y !== 0);
+        cursorRef.current = {
+          kind: "bitmap",
+          // Some servers emit bitmap with stale/zero position; fallback keeps continuity.
+          x: fallbackToPrevious ? previous.x : packet.x,
+          y: fallbackToPrevious ? previous.y : packet.y,
+          hotspotX: packet.hotspotX,
+          hotspotY: packet.hotspotY,
+          width: packet.width,
+          height: packet.height,
+          bitmap: packet.bitmap ? new Uint8ClampedArray(packet.bitmap) : null,
+        };
+      }
+      drawFrame();
+    });
+
     return () => {
-      detach();
-      clearVideoDecoder();
+      detachVideo();
+      detachCursor();
     };
-  }, [block.id, clearVideoDecoder, reportDecoderFailure]);
+  }, [block.id, drawFrame, ensureSurface]);
 
   useEffect(() => {
     drawFrame();
-  }, [drawFrame, localPointer]);
+  }, [drawFrame]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -304,11 +278,20 @@ export function RdpBlockView({
     }
     const observer = new ResizeObserver(() => {
       drawFrame();
-      emitControlWithViewport({});
+      onFocusChange({
+        focused: active,
+        viewport_rect: {
+          x: 0,
+          y: 0,
+          width: Math.max(1, Math.floor(canvas.clientWidth)),
+          height: Math.max(1, Math.floor(canvas.clientHeight)),
+        },
+        dpi_scale: window.devicePixelRatio || 1,
+      });
     });
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [drawFrame, emitControlWithViewport]);
+  }, [active, drawFrame, onFocusChange]);
 
   const mapClientToRemote = useCallback(
     (clientX: number, clientY: number) => {
@@ -340,39 +323,162 @@ export function RdpBlockView({
     [block.imageHeight, block.imageWidth],
   );
 
+  const emitFocusedState = useCallback((focused: boolean) => {
+    const canvas = canvasRef.current;
+    onFocusChange({
+      focused,
+      viewport_rect: canvas
+        ? {
+            x: 0,
+            y: 0,
+            width: Math.max(1, Math.floor(canvas.clientWidth)),
+            height: Math.max(1, Math.floor(canvas.clientHeight)),
+          }
+        : null,
+      dpi_scale: window.devicePixelRatio || 1,
+    });
+  }, [onFocusChange]);
+
+  const rememberInputCursorPosition = useCallback((x: number, y: number) => {
+    cursorRef.current = {
+      ...cursorRef.current,
+      x,
+      y,
+    };
+  }, []);
+
+  const resolveCurrentPointerPosition = useCallback((): { x: number; y: number } | null => {
+    if (lastInputPointerRef.current) {
+      return lastInputPointerRef.current;
+    }
+    if (block.imageWidth <= 0 || block.imageHeight <= 0) {
+      return null;
+    }
+    const cursor = cursorRef.current;
+    return {
+      x: Math.max(0, Math.min(block.imageWidth - 1, cursor.x)),
+      y: Math.max(0, Math.min(block.imageHeight - 1, cursor.y)),
+    };
+  }, [block.imageHeight, block.imageWidth]);
+
+  const releaseAllPressedButtons = useCallback(() => {
+    if (!isConnected) {
+      pressedButtonsRef.current.left = false;
+      pressedButtonsRef.current.right = false;
+      pressedButtonsRef.current.middle = false;
+      return;
+    }
+
+    const point = resolveCurrentPointerPosition();
+    if (!point) {
+      pressedButtonsRef.current.left = false;
+      pressedButtonsRef.current.right = false;
+      pressedButtonsRef.current.middle = false;
+      return;
+    }
+
+    const events: RdpInputEvent[] = [];
+    if (pressedButtonsRef.current.left) {
+      events.push({ kind: "mouse_button_up", x: point.x, y: point.y, button: "left" });
+      pressedButtonsRef.current.left = false;
+    }
+    if (pressedButtonsRef.current.middle) {
+      events.push({ kind: "mouse_button_up", x: point.x, y: point.y, button: "middle" });
+      pressedButtonsRef.current.middle = false;
+    }
+    if (pressedButtonsRef.current.right) {
+      events.push({ kind: "mouse_button_up", x: point.x, y: point.y, button: "right" });
+      pressedButtonsRef.current.right = false;
+    }
+
+    if (events.length > 0) {
+      onInteract(events);
+    }
+  }, [isConnected, onInteract, resolveCurrentPointerPosition]);
+
+  const hasPressedButtons = useCallback(() => {
+    const pressed = pressedButtonsRef.current;
+    return pressed.left || pressed.middle || pressed.right;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      releaseAllPressedButtons();
+    };
+  }, [releaseAllPressedButtons]);
+
   const handleCanvasPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
       onFocus();
       event.preventDefault();
       event.stopPropagation();
       event.currentTarget.focus();
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore capture failures.
+      }
 
       const remotePoint = mapClientToRemote(event.clientX, event.clientY);
       if (!remotePoint) {
         return;
       }
-      setLocalPointer(remotePoint);
-      emitControlWithViewport({
-        active: true,
-        pointer_inside: true,
-      });
+      lastInputPointerRef.current = remotePoint;
+      rememberInputCursorPosition(remotePoint.x, remotePoint.y);
+      emitFocusedState(true);
 
       if (!isConnected) {
         return;
       }
 
-      const button = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
-      onInteract([
-        {
-          kind: "mouse_click",
-          x: remotePoint.x,
-          y: remotePoint.y,
-          button,
-          double_click: event.detail >= 2,
-        },
-      ]);
+      const button = pointerButtonToMouseButton(event.button);
+      if (!button) {
+        return;
+      }
+      pressedButtonsRef.current[button] = true;
+      onInteract([{ kind: "mouse_button_down", x: remotePoint.x, y: remotePoint.y, button }]);
     },
-    [emitControlWithViewport, isConnected, mapClientToRemote, onFocus, onInteract],
+    [
+      emitFocusedState,
+      isConnected,
+      mapClientToRemote,
+      onFocus,
+      onInteract,
+      pointerButtonToMouseButton,
+      rememberInputCursorPosition,
+    ],
+  );
+
+  const handleCanvasPointerUp = useCallback(
+    (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      const remotePoint = mapClientToRemote(event.clientX, event.clientY);
+      if (remotePoint) {
+        lastInputPointerRef.current = remotePoint;
+        rememberInputCursorPosition(remotePoint.x, remotePoint.y);
+      }
+
+      if (!isConnected || !remotePoint) {
+        const button = pointerButtonToMouseButton(event.button);
+        if (button) {
+          pressedButtonsRef.current[button] = false;
+        }
+        return;
+      }
+
+      const button = pointerButtonToMouseButton(event.button);
+      if (!button) {
+        return;
+      }
+
+      pressedButtonsRef.current[button] = false;
+      onInteract([{ kind: "mouse_button_up", x: remotePoint.x, y: remotePoint.y, button }]);
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Ignore release failures.
+      }
+    },
+    [isConnected, mapClientToRemote, onInteract, pointerButtonToMouseButton, rememberInputCursorPosition],
   );
 
   const handleCanvasPointerMove = useCallback(
@@ -381,14 +487,15 @@ export function RdpBlockView({
       if (!remotePoint) {
         return;
       }
-      setLocalPointer(remotePoint);
+      lastInputPointerRef.current = remotePoint;
+      rememberInputCursorPosition(remotePoint.x, remotePoint.y);
 
-      if (!isConnected || event.buttons === 0) {
+      if (!isConnected) {
         return;
       }
 
       const now = Date.now();
-      if (now - lastMoveSentAtRef.current < 180) {
+      if (now - lastMoveSentAtRef.current < 16) {
         return;
       }
       lastMoveSentAtRef.current = now;
@@ -397,10 +504,36 @@ export function RdpBlockView({
           kind: "mouse_move",
           x: remotePoint.x,
           y: remotePoint.y,
+          t_ms: now,
         },
       ]);
     },
-    [isConnected, mapClientToRemote, onInteract],
+    [isConnected, mapClientToRemote, onInteract, rememberInputCursorPosition],
+  );
+
+  const handleCanvasWheel = useCallback(
+    (event: ReactWheelEvent<HTMLCanvasElement>) => {
+      if (!isConnected) {
+        return;
+      }
+      const remotePoint = mapClientToRemote(event.clientX, event.clientY);
+      if (!remotePoint) {
+        return;
+      }
+      event.preventDefault();
+      lastInputPointerRef.current = remotePoint;
+      rememberInputCursorPosition(remotePoint.x, remotePoint.y);
+      onInteract([
+        {
+          kind: "mouse_scroll",
+          x: remotePoint.x,
+          y: remotePoint.y,
+          delta_x: Math.round(event.deltaX),
+          delta_y: Math.round(event.deltaY),
+        },
+      ]);
+    },
+    [isConnected, mapClientToRemote, onInteract, rememberInputCursorPosition],
   );
 
   const handleCanvasKeyDown = useCallback(
@@ -432,10 +565,7 @@ export function RdpBlockView({
 
       event.preventDefault();
       event.stopPropagation();
-      emitControlWithViewport({
-        active: true,
-        pointer_inside: true,
-      });
+      emitFocusedState(true);
       onInteract([
         {
           kind: "key_press",
@@ -448,40 +578,14 @@ export function RdpBlockView({
         },
       ]);
     },
-    [emitControlWithViewport, isConnected, onInteract],
+    [emitFocusedState, isConnected, onInteract],
   );
 
-  const handleCanvasPointerEnter = useCallback(() => {
-    emitControlWithViewport({
-      pointer_inside: true,
-      active: true,
-    });
-  }, [emitControlWithViewport]);
-
-  const handleCanvasPointerLeave = useCallback(() => {
-    setLocalPointer(null);
-    emitControlWithViewport({
-      pointer_inside: false,
-      active: false,
-    });
-  }, [emitControlWithViewport]);
-
-  const handleCanvasFocus = useCallback(() => {
-    emitControlWithViewport({
-      active: true,
-      pointer_inside: true,
-    });
-  }, [emitControlWithViewport]);
-
-  const handleCanvasBlur = useCallback(() => {
-    emitControlWithViewport({
-      active: false,
-    });
-  }, [emitControlWithViewport]);
+  const statusMessage = block.connectMessage;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-zinc-950">
-      <div className="grid grid-cols-[minmax(140px,1fr)_auto_auto] items-center gap-2 border-b border-white/10 px-2 py-1.5">
+      <div className="border-b border-white/10 px-2 py-1.5">
         <select
           className="h-8 rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
           value={block.profileId}
@@ -493,29 +597,6 @@ export function RdpBlockView({
             </option>
           ))}
         </select>
-
-        <button
-          type="button"
-          className={cn(
-            "rounded border px-2 py-1 text-xs transition",
-            block.autoRefresh
-              ? "border-cyan-400/70 bg-cyan-500/15 text-cyan-100 shadow-[0_0_12px_rgba(34,211,238,0.35)]"
-              : "border-white/15 text-zinc-300 hover:border-cyan-400/60",
-          )}
-          onClick={onToggleAutoRefresh}
-        >
-          {t.workspace.rdp.autoRefresh}
-        </button>
-
-        <button
-          type="button"
-          className="inline-flex h-8 items-center gap-1 rounded border border-cyan-400/50 bg-cyan-500/15 px-2 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20"
-          onClick={onRefresh}
-          disabled={block.connectStage === "connecting"}
-        >
-          {block.connectStage === "connecting" ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Monitor className="h-3.5 w-3.5" />}
-          {t.workspace.rdp.captureNow}
-        </button>
       </div>
 
       <div className="relative min-h-0 flex-1 overflow-hidden p-2">
@@ -532,14 +613,25 @@ export function RdpBlockView({
             tabIndex={isConnected ? 0 : -1}
             className={cn(
               "h-full w-full outline-none",
-              isConnected ? "cursor-crosshair" : "cursor-default",
+              "cursor-default",
             )}
             onPointerDown={handleCanvasPointerDown}
+            onPointerUp={handleCanvasPointerUp}
+            onPointerCancel={handleCanvasPointerUp}
             onPointerMove={handleCanvasPointerMove}
-            onPointerEnter={handleCanvasPointerEnter}
-            onPointerLeave={handleCanvasPointerLeave}
-            onFocus={handleCanvasFocus}
-            onBlur={handleCanvasBlur}
+            onPointerEnter={() => emitFocusedState(true)}
+            onPointerLeave={() => {
+              lastInputPointerRef.current = null;
+              if (!hasPressedButtons()) {
+                emitFocusedState(false);
+              }
+            }}
+            onFocus={() => emitFocusedState(true)}
+            onBlur={() => {
+              releaseAllPressedButtons();
+              emitFocusedState(false);
+            }}
+            onWheel={handleCanvasWheel}
             onKeyDown={handleCanvasKeyDown}
             onContextMenu={(event) => event.preventDefault()}
           />
@@ -553,7 +645,7 @@ export function RdpBlockView({
                   ) : (
                     <Monitor className="h-4 w-4 text-cyan-300" />
                   )}
-                  <span>{block.connectMessage}</span>
+                  <span>{statusMessage}</span>
                 </div>
                 <div className="mt-3 space-y-1 text-xs text-zinc-400">
                   <p className={cn(block.connectStage === "connecting" ? "text-cyan-300" : undefined)}>1. {t.workspace.rdp.connecting}</p>
@@ -631,9 +723,9 @@ export function RdpBlockView({
 
 const rdpWorkspaceModule: WorkspaceBlockModule<RdpBlockViewProps> = {
   name: "rdp",
-  description: "Bloco de transmissão RDP com interação de ponteiro e teclado.",
+  description: "Bloco de transmissao RDP por dirty rects e cursor dedicado.",
   render: (props) => <RdpBlockView {...props} />,
-  onNotFound: ({ blockId, action }) => `RDP não encontrado (${action}) [${blockId}]`,
+  onNotFound: ({ blockId, action }) => `RDP nao encontrado (${action}) [${blockId}]`,
   onFailureLoad: ({ blockId, action }) => `Falha no RDP (${action}) [${blockId}]`,
   onDropDownSelect: ({ blockId, action, value }) => `RDP dropdown (${action}) [${blockId}] => ${value}`,
   onStatusChange: ({ blockId, action, status }) =>
@@ -641,5 +733,3 @@ const rdpWorkspaceModule: WorkspaceBlockModule<RdpBlockViewProps> = {
 };
 
 export default rdpWorkspaceModule;
-
-

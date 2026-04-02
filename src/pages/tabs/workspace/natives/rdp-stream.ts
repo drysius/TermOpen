@@ -1,186 +1,310 @@
-import type { RdpFrameCodec } from "@/types/termopen";
+import lz4 from "lz4js";
 
-const STREAM_PACKET_MAGIC = [0x54, 0x52, 0x44, 0x50] as const; // TRDP
-const STREAM_PACKET_VERSION = 1;
-const STREAM_PACKET_HEADER_SIZE = 24;
-const H264_CODEC = "avc1.42E01F";
-const RDP_VIDEO_CHUNK_EVENT = "termopen:rdp-video-chunk";
-const RDP_VIDEO_DECODER_ERROR_EVENT = "termopen:rdp-video-decoder-error";
+const VIDEO_PACKET_MAGIC = [0x54, 0x52, 0x44, 0x56] as const; // TRDV
+const CURSOR_PACKET_MAGIC = [0x54, 0x52, 0x44, 0x43] as const; // TRDC
+const AUDIO_PACKET_MAGIC = [0x54, 0x52, 0x44, 0x41] as const; // TRDA
+const PACKET_VERSION = 1;
+const VIDEO_PACKET_HEADER_SIZE = 32;
+const VIDEO_RECT_HEADER_SIZE = 20;
+const CURSOR_PACKET_HEADER_SIZE = 28;
+const AUDIO_PACKET_HEADER_SIZE = 24;
+const COMPRESSION_NONE = 0;
+const COMPRESSION_LZ4 = 1;
+const RDP_VIDEO_RECTS_EVENT = "termopen:rdp-video-rects";
+const RDP_CURSOR_EVENT = "termopen:rdp-cursor";
+const RDP_AUDIO_EVENT = "termopen:rdp-audio";
 
-let preferredCodecPromise: Promise<RdpFrameCodec> | null = null;
-
-export interface ParsedRdpStreamFramePacket {
-  codec: RdpFrameCodec;
-  keyframe: boolean;
-  width: number;
-  height: number;
-  ptsUs: number;
-  payload: Uint8Array;
+function readU64(view: DataView, offset: number): number {
+  const low = view.getUint32(offset, true);
+  const high = view.getUint32(offset + 4, true);
+  return high * 2 ** 32 + low;
 }
 
-export interface RdpVideoChunkEventDetail {
-  blockId: string;
-  keyframe: boolean;
-  width: number;
-  height: number;
-  ptsUs: number;
-  payload: Uint8Array;
-}
-
-export interface RdpVideoDecoderErrorDetail {
-  blockId: string;
-}
-
-export function parseRdpStreamFramePacket(message: ArrayBuffer): ParsedRdpStreamFramePacket | null {
-  const bytes = new Uint8Array(message);
-
-  if (bytes.byteLength < STREAM_PACKET_HEADER_SIZE) {
-    return {
-      codec: "png",
-      keyframe: true,
-      width: 0,
-      height: 0,
-      ptsUs: 0,
-      payload: bytes.slice(),
-    };
+function hasMagic(bytes: Uint8Array, magic: readonly number[]): boolean {
+  if (bytes.byteLength < magic.length) {
+    return false;
   }
+  return magic.every((value, index) => bytes[index] === value);
+}
 
-  const hasHeader =
-    bytes[0] === STREAM_PACKET_MAGIC[0] &&
-    bytes[1] === STREAM_PACKET_MAGIC[1] &&
-    bytes[2] === STREAM_PACKET_MAGIC[2] &&
-    bytes[3] === STREAM_PACKET_MAGIC[3] &&
-    bytes[4] === STREAM_PACKET_VERSION;
+function ensureUint8Array(data: Uint8Array | number[]): Uint8Array {
+  return data instanceof Uint8Array ? data : new Uint8Array(data);
+}
 
-  if (!hasHeader) {
-    return {
-      codec: "png",
-      keyframe: true,
-      width: 0,
-      height: 0,
-      ptsUs: 0,
-      payload: bytes.slice(),
-    };
+function decompressPayload(compression: number, payload: Uint8Array, expectedSize: number): Uint8Array | null {
+  if (compression === COMPRESSION_NONE) {
+    return payload;
   }
-
-  const view = new DataView(message);
-  const codecId = view.getUint8(5);
-  const codec: RdpFrameCodec = codecId === 1 ? "h264" : "png";
-  const keyframe = (view.getUint8(6) & 0b1) === 1;
-  const width = view.getUint16(8, true);
-  const height = view.getUint16(10, true);
-  const ptsLow = view.getUint32(12, true);
-  const ptsHigh = view.getUint32(16, true);
-  const ptsUs = ptsHigh * 2 ** 32 + ptsLow;
-  const payloadSize = view.getUint32(20, true);
-  const payloadOffset = STREAM_PACKET_HEADER_SIZE;
-
-  if (payloadOffset + payloadSize > bytes.byteLength) {
+  if (compression !== COMPRESSION_LZ4) {
     return null;
   }
 
-  const payload = bytes.slice(payloadOffset, payloadOffset + payloadSize);
+  try {
+    const decoded = ensureUint8Array(lz4.decompress(payload));
+    if (expectedSize > 0 && decoded.byteLength !== expectedSize) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+export interface ParsedRdpVideoRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pixels: Uint8Array;
+}
+
+export interface ParsedRdpVideoRectsPacket {
+  frameId: number;
+  width: number;
+  height: number;
+  ptsUs: number;
+  frameBegin: boolean;
+  frameEnd: boolean;
+  rects: ParsedRdpVideoRect[];
+}
+
+export interface ParsedRdpCursorPacket {
+  kind: "default" | "hidden" | "position" | "bitmap";
+  x: number;
+  y: number;
+  hotspotX: number;
+  hotspotY: number;
+  width: number;
+  height: number;
+  bitmap?: Uint8Array;
+}
+
+export interface ParsedRdpAudioPacket {
+  channels: number;
+  bitsPerSample: number;
+  sampleRate: number;
+  ptsUs: number;
+  pcm: Uint8Array;
+}
+
+export interface RdpVideoRectsEventDetail {
+  blockId: string;
+  packet: ParsedRdpVideoRectsPacket;
+}
+
+export interface RdpCursorEventDetail {
+  blockId: string;
+  packet: ParsedRdpCursorPacket;
+}
+
+export interface RdpAudioEventDetail {
+  blockId: string;
+  packet: ParsedRdpAudioPacket;
+}
+
+export function parseRdpVideoRectsPacket(message: ArrayBuffer): ParsedRdpVideoRectsPacket | null {
+  const bytes = new Uint8Array(message);
+  if (bytes.byteLength < VIDEO_PACKET_HEADER_SIZE || !hasMagic(bytes, VIDEO_PACKET_MAGIC)) {
+    return null;
+  }
+
+  const view = new DataView(message);
+  const version = view.getUint8(4);
+  if (version !== PACKET_VERSION) {
+    return null;
+  }
+
+  const flags = view.getUint8(5);
+  const frameId = readU64(view, 8);
+  const width = view.getUint16(16, true);
+  const height = view.getUint16(18, true);
+  const rectCount = view.getUint16(20, true);
+  const ptsUs = readU64(view, 24);
+
+  let offset = VIDEO_PACKET_HEADER_SIZE;
+  const rects: ParsedRdpVideoRect[] = [];
+  for (let index = 0; index < rectCount; index += 1) {
+    if (offset + VIDEO_RECT_HEADER_SIZE > bytes.byteLength) {
+      return null;
+    }
+
+    const x = view.getUint16(offset, true);
+    const y = view.getUint16(offset + 2, true);
+    const rectWidth = view.getUint16(offset + 4, true);
+    const rectHeight = view.getUint16(offset + 6, true);
+    const compression = view.getUint8(offset + 8);
+    const rawSize = view.getUint32(offset + 12, true);
+    const payloadSize = view.getUint32(offset + 16, true);
+    offset += VIDEO_RECT_HEADER_SIZE;
+
+    if (offset + payloadSize > bytes.byteLength) {
+      return null;
+    }
+    const payload = bytes.slice(offset, offset + payloadSize);
+    offset += payloadSize;
+
+    const pixels = decompressPayload(compression, payload, rawSize);
+    if (!pixels) {
+      return null;
+    }
+
+    rects.push({
+      x,
+      y,
+      width: rectWidth,
+      height: rectHeight,
+      pixels,
+    });
+  }
+
   return {
-    codec,
-    keyframe,
+    frameId,
     width,
     height,
     ptsUs,
-    payload,
+    frameBegin: (flags & 0b1) === 0b1,
+    frameEnd: (flags & 0b10) === 0b10,
+    rects,
   };
 }
 
-async function probePreferredCodec(): Promise<RdpFrameCodec> {
-  if (typeof window === "undefined" || typeof navigator === "undefined") {
-    return "png";
+export function parseRdpCursorPacket(message: ArrayBuffer): ParsedRdpCursorPacket | null {
+  const bytes = new Uint8Array(message);
+  if (bytes.byteLength < CURSOR_PACKET_HEADER_SIZE || !hasMagic(bytes, CURSOR_PACKET_MAGIC)) {
+    return null;
   }
 
-  const userAgent = navigator.userAgent.toLowerCase();
-  if (!userAgent.includes("windows")) {
-    return "png";
+  const view = new DataView(message);
+  const version = view.getUint8(4);
+  if (version !== PACKET_VERSION) {
+    return null;
   }
 
-  const videoDecoderCtor = (globalThis as typeof globalThis & { VideoDecoder?: typeof VideoDecoder }).VideoDecoder;
-  const encodedVideoChunkCtor = (globalThis as typeof globalThis & { EncodedVideoChunk?: typeof EncodedVideoChunk })
-    .EncodedVideoChunk;
-  if (!videoDecoderCtor || !encodedVideoChunkCtor || typeof videoDecoderCtor.isConfigSupported !== "function") {
-    return "png";
+  const kindId = view.getUint8(5);
+  const x = view.getUint16(8, true);
+  const y = view.getUint16(10, true);
+  const hotspotX = view.getUint16(12, true);
+  const hotspotY = view.getUint16(14, true);
+  const width = view.getUint16(16, true);
+  const height = view.getUint16(18, true);
+  const payloadSize = view.getUint32(20, true);
+  const compression = view.getUint8(24);
+
+  if (CURSOR_PACKET_HEADER_SIZE + payloadSize > bytes.byteLength) {
+    return null;
+  }
+  const payload = bytes.slice(CURSOR_PACKET_HEADER_SIZE, CURSOR_PACKET_HEADER_SIZE + payloadSize);
+
+  const kind = kindId === 0 ? "default" : kindId === 1 ? "hidden" : kindId === 2 ? "position" : "bitmap";
+  if (kind !== "bitmap") {
+    return {
+      kind,
+      x,
+      y,
+      hotspotX,
+      hotspotY,
+      width,
+      height,
+    };
   }
 
-  try {
-    const support = await videoDecoderCtor.isConfigSupported({
-      codec: H264_CODEC,
-      optimizeForLatency: true,
-      hardwareAcceleration: "prefer-hardware",
-    });
-    if (!support.supported) {
-      return "png";
-    }
-  } catch {
-    return "png";
+  const expectedSize = width > 0 && height > 0 ? width * height * 4 : 0;
+  const bitmap = decompressPayload(compression, payload, expectedSize);
+  if (!bitmap) {
+    return null;
   }
 
-  try {
-    const mediaCapabilities = (navigator as Navigator & { mediaCapabilities?: MediaCapabilities }).mediaCapabilities;
-    if (mediaCapabilities?.decodingInfo) {
-      const info = await mediaCapabilities.decodingInfo({
-        type: "media-source",
-        video: {
-          contentType: `video/mp4; codecs="${H264_CODEC}"`,
-          width: 1280,
-          height: 720,
-          bitrate: 3_500_000,
-          framerate: 18,
-        },
-      } as MediaDecodingConfiguration);
-      if (!info.supported) {
-        return "png";
-      }
-    }
-  } catch {
-    // Ignore MediaCapabilities errors and keep the WebCodecs probe result.
-  }
-
-  return "h264";
+  return {
+    kind: "bitmap",
+    x,
+    y,
+    hotspotX,
+    hotspotY,
+    width,
+    height,
+    bitmap,
+  };
 }
 
-export function detectPreferredRdpCodec(): Promise<RdpFrameCodec> {
-  if (!preferredCodecPromise) {
-    preferredCodecPromise = probePreferredCodec();
+export function parseRdpAudioPacket(message: ArrayBuffer): ParsedRdpAudioPacket | null {
+  const bytes = new Uint8Array(message);
+  if (bytes.byteLength < AUDIO_PACKET_HEADER_SIZE || !hasMagic(bytes, AUDIO_PACKET_MAGIC)) {
+    return null;
   }
-  return preferredCodecPromise;
+
+  const view = new DataView(message);
+  const version = view.getUint8(4);
+  if (version !== PACKET_VERSION) {
+    return null;
+  }
+
+  const compression = view.getUint8(5);
+  const channels = view.getUint8(6);
+  const bitsPerSample = view.getUint8(7);
+  const sampleRate = view.getUint32(8, true);
+  const ptsUs = readU64(view, 12);
+  const payloadSize = view.getUint32(20, true);
+  if (AUDIO_PACKET_HEADER_SIZE + payloadSize > bytes.byteLength) {
+    return null;
+  }
+
+  const payload = bytes.slice(AUDIO_PACKET_HEADER_SIZE, AUDIO_PACKET_HEADER_SIZE + payloadSize);
+  const pcm = decompressPayload(compression, payload, payloadSize);
+  if (!pcm) {
+    return null;
+  }
+
+  return {
+    channels,
+    bitsPerSample,
+    sampleRate,
+    ptsUs,
+    pcm,
+  };
 }
 
-export function emitRdpVideoChunk(detail: RdpVideoChunkEventDetail): void {
-  window.dispatchEvent(new CustomEvent<RdpVideoChunkEventDetail>(RDP_VIDEO_CHUNK_EVENT, { detail }));
+export function emitRdpVideoRects(detail: RdpVideoRectsEventDetail): void {
+  window.dispatchEvent(new CustomEvent<RdpVideoRectsEventDetail>(RDP_VIDEO_RECTS_EVENT, { detail }));
 }
 
-export function onRdpVideoChunk(
-  listener: (detail: RdpVideoChunkEventDetail) => void,
-): () => void {
+export function onRdpVideoRects(listener: (detail: RdpVideoRectsEventDetail) => void): () => void {
   const handler = (event: Event) => {
-    const custom = event as CustomEvent<RdpVideoChunkEventDetail>;
+    const custom = event as CustomEvent<RdpVideoRectsEventDetail>;
     if (custom.detail) {
       listener(custom.detail);
     }
   };
-  window.addEventListener(RDP_VIDEO_CHUNK_EVENT, handler);
-  return () => window.removeEventListener(RDP_VIDEO_CHUNK_EVENT, handler);
+  window.addEventListener(RDP_VIDEO_RECTS_EVENT, handler);
+  return () => window.removeEventListener(RDP_VIDEO_RECTS_EVENT, handler);
 }
 
-export function emitRdpVideoDecoderError(detail: RdpVideoDecoderErrorDetail): void {
-  window.dispatchEvent(new CustomEvent<RdpVideoDecoderErrorDetail>(RDP_VIDEO_DECODER_ERROR_EVENT, { detail }));
+export function emitRdpCursor(detail: RdpCursorEventDetail): void {
+  window.dispatchEvent(new CustomEvent<RdpCursorEventDetail>(RDP_CURSOR_EVENT, { detail }));
 }
 
-export function onRdpVideoDecoderError(
-  listener: (detail: RdpVideoDecoderErrorDetail) => void,
-): () => void {
+export function onRdpCursor(listener: (detail: RdpCursorEventDetail) => void): () => void {
   const handler = (event: Event) => {
-    const custom = event as CustomEvent<RdpVideoDecoderErrorDetail>;
+    const custom = event as CustomEvent<RdpCursorEventDetail>;
     if (custom.detail) {
       listener(custom.detail);
     }
   };
-  window.addEventListener(RDP_VIDEO_DECODER_ERROR_EVENT, handler);
-  return () => window.removeEventListener(RDP_VIDEO_DECODER_ERROR_EVENT, handler);
+  window.addEventListener(RDP_CURSOR_EVENT, handler);
+  return () => window.removeEventListener(RDP_CURSOR_EVENT, handler);
 }
+
+export function emitRdpAudio(detail: RdpAudioEventDetail): void {
+  window.dispatchEvent(new CustomEvent<RdpAudioEventDetail>(RDP_AUDIO_EVENT, { detail }));
+}
+
+export function onRdpAudio(listener: (detail: RdpAudioEventDetail) => void): () => void {
+  const handler = (event: Event) => {
+    const custom = event as CustomEvent<RdpAudioEventDetail>;
+    if (custom.detail) {
+      listener(custom.detail);
+    }
+  };
+  window.addEventListener(RDP_AUDIO_EVENT, handler);
+  return () => window.removeEventListener(RDP_AUDIO_EVENT, handler);
+}
+

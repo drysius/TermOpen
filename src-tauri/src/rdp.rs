@@ -1,6 +1,7 @@
 use core::time::Duration;
+use std::cmp::{max, min};
 use std::collections::HashMap;
-use std::io::{Cursor, Write as _};
+use std::io::Write as _;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs as _};
 use std::sync::{mpsc, Arc, Once};
 use std::thread::JoinHandle;
@@ -15,6 +16,7 @@ use ironrdp::connector::ConnectionResult;
 use ironrdp::connector::Credentials;
 use ironrdp::core::WriteBuf;
 use ironrdp::pdu::gcc::KeyboardType;
+use ironrdp::pdu::geometry::{InclusiveRectangle, Rectangle};
 use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags as FastPathKeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
@@ -22,22 +24,19 @@ use ironrdp::session::fast_path;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use ironrdp_graphics::image_processing::PixelFormat;
+use ironrdp_graphics::pointer::DecodedPointer;
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use openh264::encoder::{
-    BitRate, Encoder as H264Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod,
-    RateControlMode, UsageType,
-};
-use openh264::formats::{RgbaSliceU8, YUVBuffer};
-use openh264::{OpenH264API, Timestamp};
+use lz4_flex::frame::FrameEncoder;
 use sspi::network_client::reqwest_network_client::ReqwestNetworkClient;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio_rustls::rustls;
 use uuid::Uuid;
 
-use crate::protocol_stream::{StreamControlInput, StreamControlState};
+use crate::keyboard::{pressed_modifier_scan_codes, web_code_to_scan_code};
+use crate::mouse::{interpolate_pointer_route, WheelAccumulator};
 
 #[derive(Debug, Clone)]
-pub struct RdpCaptureOptions {
+pub struct RdpSessionOptions {
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -46,20 +45,19 @@ pub struct RdpCaptureOptions {
     pub width: u16,
     pub height: u16,
     pub timeout_seconds: u64,
-    pub input_actions: Vec<RdpInputAction>,
-    pub stream_codec: RdpFrameCodec,
 }
 
-#[derive(Debug, Clone)]
-pub struct RdpCaptureImage {
-    pub png_bytes: Vec<u8>,
-    pub width: u16,
-    pub height: u16,
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RdpSessionStartResult {
+    Started { session_id: String },
+    AuthRequired { message: String },
+    Error { message: String },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
-pub enum RdpStreamEvent {
+pub enum RdpSessionControlEvent {
     Connecting {
         session_id: String,
         message: String,
@@ -68,7 +66,6 @@ pub enum RdpStreamEvent {
         session_id: String,
         width: u16,
         height: u16,
-        frame_codec: RdpFrameCodec,
     },
     AuthRequired {
         session_id: String,
@@ -81,21 +78,29 @@ pub enum RdpStreamEvent {
     Stopped {
         session_id: String,
     },
+    ReleasedCapture {
+        session_id: String,
+        message: String,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RdpFrameCodec {
-    Png,
-    H264,
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdpViewportRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u16,
+    pub height: u16,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum RdpStreamStartResult {
-    Started { session_id: String },
-    AuthRequired { message: String },
-    Error { message: String },
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdpSessionFocusInput {
+    pub focused: bool,
+    #[serde(default)]
+    pub viewport_rect: Option<RdpViewportRect>,
+    #[serde(default)]
+    pub dpi_scale: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -107,11 +112,34 @@ pub enum RdpMouseButton {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+pub struct RdpPathPoint {
+    pub x: u16,
+    pub y: u16,
+    #[serde(default, alias = "t")]
+    pub t_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RdpInputAction {
+pub enum RdpInputEvent {
     MouseMove {
         x: u16,
         y: u16,
+        #[serde(default)]
+        t_ms: Option<u64>,
+    },
+    MouseButtonDown {
+        x: u16,
+        y: u16,
+        button: RdpMouseButton,
+    },
+    MouseButtonUp {
+        x: u16,
+        y: u16,
+        button: RdpMouseButton,
+    },
+    MousePath {
+        points: Vec<RdpPathPoint>,
     },
     MouseClick {
         x: u16,
@@ -119,6 +147,14 @@ pub enum RdpInputAction {
         button: RdpMouseButton,
         #[serde(default)]
         double_click: bool,
+    },
+    MouseScroll {
+        x: u16,
+        y: u16,
+        #[serde(default)]
+        delta_x: i16,
+        #[serde(default)]
+        delta_y: i16,
     },
     KeyPress {
         code: String,
@@ -135,108 +171,134 @@ pub enum RdpInputAction {
     },
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RdpInputBatch {
+    #[serde(default)]
+    pub events: Vec<RdpInputEvent>,
+}
+
 #[derive(Debug)]
-enum RdpStreamWorkerMessage {
-    Input(Vec<RdpInputAction>),
-    Control(StreamControlInput),
+enum RdpSessionWorkerMessage {
+    InputBatch(RdpInputBatch),
+    Focus(RdpSessionFocusInput),
     Stop,
 }
 
-struct RdpStreamSession {
-    tx: mpsc::Sender<RdpStreamWorkerMessage>,
+struct RdpSessionWorker {
+    tx: mpsc::Sender<RdpSessionWorkerMessage>,
     _join: JoinHandle<()>,
 }
 
 #[derive(Default)]
-pub struct RdpStreamManager {
-    sessions: HashMap<String, RdpStreamSession>,
+pub struct RdpSessionManager {
+    sessions: HashMap<String, RdpSessionWorker>,
 }
 
-impl RdpStreamManager {
+impl RdpSessionManager {
     pub fn start(
         &mut self,
-        options: RdpCaptureOptions,
-        control_state: StreamControlState,
-        event_channel: Channel<RdpStreamEvent>,
-        frame_channel: Channel<InvokeResponseBody>,
-    ) -> RdpStreamStartResult {
+        options: RdpSessionOptions,
+        control_channel: Channel<RdpSessionControlEvent>,
+        video_rects_channel: Channel<InvokeResponseBody>,
+        cursor_channel: Channel<InvokeResponseBody>,
+        audio_channel: Channel<InvokeResponseBody>,
+    ) -> RdpSessionStartResult {
         let session_id = Uuid::new_v4().to_string();
-        let (tx, rx) = mpsc::channel::<RdpStreamWorkerMessage>();
-        let event_channel = Arc::new(event_channel);
-        let frame_channel = Arc::new(frame_channel);
+        let (tx, rx) = mpsc::channel::<RdpSessionWorkerMessage>();
+        let control_channel = Arc::new(control_channel);
+        let video_rects_channel = Arc::new(video_rects_channel);
+        let cursor_channel = Arc::new(cursor_channel);
+        let audio_channel = Arc::new(audio_channel);
         let worker_session_id = session_id.clone();
-        let worker_event_channel = event_channel.clone();
-        let worker_frame_channel = frame_channel.clone();
+        let worker_control_channel = control_channel.clone();
+        let worker_video_rects_channel = video_rects_channel.clone();
+        let worker_cursor_channel = cursor_channel.clone();
+        let worker_audio_channel = audio_channel.clone();
+
         let join = std::thread::Builder::new()
-            .name(format!("rdp-stream-{}", &session_id[..8]))
+            .name(format!("rdp-session-{}", &session_id[..8]))
             .spawn(move || {
-                run_rdp_stream_worker(
-                    worker_session_id.clone(),
+                run_rdp_session_worker(
+                    worker_session_id,
                     options,
-                    control_state,
-                    worker_event_channel,
-                    worker_frame_channel,
+                    worker_control_channel,
+                    worker_video_rects_channel,
+                    worker_cursor_channel,
+                    worker_audio_channel,
                     rx,
                 );
             });
 
         let Ok(join) = join else {
-            return RdpStreamStartResult::Error {
+            return RdpSessionStartResult::Error {
                 message: "Nao foi possivel iniciar worker RDP.".to_string(),
             };
         };
 
         self.sessions
-            .insert(session_id.clone(), RdpStreamSession { tx, _join: join });
-        RdpStreamStartResult::Started { session_id }
+            .insert(session_id.clone(), RdpSessionWorker { tx, _join: join });
+
+        RdpSessionStartResult::Started { session_id }
     }
 
-    pub fn input(&mut self, session_id: &str, input_actions: Vec<RdpInputAction>) -> Result<()> {
+    pub fn focus(&mut self, session_id: &str, focus: RdpSessionFocusInput) -> Result<()> {
         let Some(session) = self.sessions.get(session_id) else {
-            anyhow::bail!("Sessao de stream RDP nao encontrada.");
+            anyhow::bail!("Sessao RDP nao encontrada.");
         };
 
-        if let Err(error) = session
-            .tx
-            .send(RdpStreamWorkerMessage::Input(input_actions))
-        {
+        if let Err(error) = session.tx.send(RdpSessionWorkerMessage::Focus(focus)) {
             self.sessions.remove(session_id);
-            return Err(anyhow::Error::new(error).context("stream input send"));
+            return Err(anyhow::Error::new(error).context("rdp focus send"));
         }
+
         Ok(())
     }
 
-    pub fn control(&mut self, session_id: &str, control: StreamControlInput) -> Result<()> {
+    pub fn input_batch(&mut self, session_id: &str, batch: RdpInputBatch) -> Result<()> {
         let Some(session) = self.sessions.get(session_id) else {
-            anyhow::bail!("Sessao de stream RDP nao encontrada.");
+            anyhow::bail!("Sessao RDP nao encontrada.");
         };
 
-        if let Err(error) = session.tx.send(RdpStreamWorkerMessage::Control(control)) {
+        if let Err(error) = session.tx.send(RdpSessionWorkerMessage::InputBatch(batch)) {
             self.sessions.remove(session_id);
-            return Err(anyhow::Error::new(error).context("stream control send"));
+            return Err(anyhow::Error::new(error).context("rdp input batch send"));
         }
+
         Ok(())
     }
 
     pub fn stop(&mut self, session_id: &str) -> Result<()> {
         let Some(session) = self.sessions.remove(session_id) else {
-            anyhow::bail!("Sessao de stream RDP nao encontrada.");
+            anyhow::bail!("Sessao RDP nao encontrada.");
         };
 
-        let _ = session.tx.send(RdpStreamWorkerMessage::Stop);
+        let _ = session.tx.send(RdpSessionWorkerMessage::Stop);
         Ok(())
     }
 }
 
 type UpgradedFramed =
     ironrdp_blocking::Framed<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
+
 static RUSTLS_PROVIDER_INIT: Once = Once::new();
-const STREAM_PACKET_MAGIC: [u8; 4] = *b"TRDP";
-const STREAM_PACKET_VERSION: u8 = 1;
-const STREAM_PACKET_HEADER_LEN: usize = 24;
-const H264_KEYFRAME_INTERVAL_FRAMES: u64 = 60;
-const H264_TARGET_BITRATE_BPS: u32 = 3_500_000;
-const H264_TARGET_FPS: f32 = 18.0;
+
+const VIDEO_PACKET_MAGIC: [u8; 4] = *b"TRDV";
+const CURSOR_PACKET_MAGIC: [u8; 4] = *b"TRDC";
+const AUDIO_PACKET_MAGIC: [u8; 4] = *b"TRDA";
+const PACKET_VERSION: u8 = 1;
+const VIDEO_PACKET_HEADER_LEN: usize = 32;
+const CURSOR_PACKET_HEADER_LEN: usize = 28;
+const AUDIO_PACKET_HEADER_LEN: usize = 24;
+const VIDEO_RECT_HEADER_LEN: usize = 20;
+const VIDEO_FRAME_BEGIN: u8 = 0b0000_0001;
+const VIDEO_FRAME_END: u8 = 0b0000_0010;
+const COMPRESSION_NONE: u8 = 0;
+const COMPRESSION_LZ4: u8 = 1;
+const CURSOR_KIND_DEFAULT: u8 = 0;
+const CURSOR_KIND_HIDDEN: u8 = 1;
+const CURSOR_KIND_POSITION: u8 = 2;
+const CURSOR_KIND_BITMAP: u8 = 3;
+const MAX_DIRTY_RECTS_PER_FRAME: usize = 48;
 
 fn ensure_rustls_crypto_provider() {
     RUSTLS_PROVIDER_INIT.call_once(|| {
@@ -244,207 +306,130 @@ fn ensure_rustls_crypto_provider() {
     });
 }
 
-fn emit_stream_event(channel: &Arc<Channel<RdpStreamEvent>>, event: RdpStreamEvent) -> bool {
+fn emit_control_event(
+    channel: &Arc<Channel<RdpSessionControlEvent>>,
+    event: RdpSessionControlEvent,
+) -> bool {
     channel.send(event).is_ok()
 }
 
-fn emit_stream_frame(channel: &Arc<Channel<InvokeResponseBody>>, frame_bytes: Vec<u8>) -> bool {
-    channel.send(InvokeResponseBody::Raw(frame_bytes)).is_ok()
+fn emit_binary_packet(channel: &Arc<Channel<InvokeResponseBody>>, packet: Vec<u8>) -> bool {
+    channel.send(InvokeResponseBody::Raw(packet)).is_ok()
 }
 
-impl RdpFrameCodec {
-    fn packet_codec_id(self) -> u8 {
-        match self {
-            Self::Png => 0,
-            Self::H264 => 1,
-        }
-    }
+#[derive(Debug, Default)]
+struct SessionFocusState {
+    focused: bool,
+    viewport_rect: Option<RdpViewportRect>,
+    dpi_scale: f64,
+    pending_resize: Option<(u16, u16)>,
 }
 
-struct RdpStreamFramePacket {
-    codec: RdpFrameCodec,
-    keyframe: bool,
-    width: u16,
-    height: u16,
-    pts_us: u64,
-    payload: Vec<u8>,
-}
-
-impl RdpStreamFramePacket {
-    fn new(
-        codec: RdpFrameCodec,
-        keyframe: bool,
-        width: u16,
-        height: u16,
-        pts_us: u64,
-        payload: Vec<u8>,
-    ) -> Self {
+impl SessionFocusState {
+    fn new(width: u16, height: u16) -> Self {
         Self {
-            codec,
-            keyframe,
-            width,
-            height,
-            pts_us,
-            payload,
+            focused: true,
+            viewport_rect: Some(RdpViewportRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            }),
+            dpi_scale: 1.0,
+            pending_resize: None,
         }
     }
 
-    fn into_bytes(self) -> Result<Vec<u8>> {
-        let payload_len = u32::try_from(self.payload.len()).context("frame payload too large")?;
-        let mut packet = Vec::with_capacity(STREAM_PACKET_HEADER_LEN + self.payload.len());
-        packet.extend_from_slice(&STREAM_PACKET_MAGIC);
-        packet.push(STREAM_PACKET_VERSION);
-        packet.push(self.codec.packet_codec_id());
-        packet.push(if self.keyframe { 1 } else { 0 });
-        packet.push(0);
-        packet.extend_from_slice(&self.width.to_le_bytes());
-        packet.extend_from_slice(&self.height.to_le_bytes());
-        packet.extend_from_slice(&self.pts_us.to_le_bytes());
-        packet.extend_from_slice(&payload_len.to_le_bytes());
-        packet.extend_from_slice(&self.payload);
-        Ok(packet)
+    fn apply(&mut self, update: RdpSessionFocusInput) {
+        self.focused = update.focused;
+
+        if let Some(scale) = update.dpi_scale.filter(|value| *value > 0.0) {
+            self.dpi_scale = scale;
+        }
+
+        if let Some(viewport) = update.viewport_rect {
+            let next_width = viewport.width.max(200);
+            let next_height = viewport.height.max(200);
+            let changed = self
+                .viewport_rect
+                .map(|current| current.width != next_width || current.height != next_height)
+                .unwrap_or(true);
+
+            self.viewport_rect = Some(RdpViewportRect {
+                x: viewport.x,
+                y: viewport.y,
+                width: next_width,
+                height: next_height,
+            });
+            if changed {
+                self.pending_resize = Some((next_width, next_height));
+            }
+        }
+    }
+
+    fn take_pending_resize(&mut self) -> Option<(u16, u16)> {
+        self.pending_resize.take()
     }
 }
 
-struct H264StreamEncoder {
-    encoder: H264Encoder,
-    yuv_buffer: Option<YUVBuffer>,
-    width: usize,
-    height: usize,
-    frame_index: u64,
+#[derive(Debug, Default)]
+struct SessionDrain {
+    terminated: bool,
+    dirty_rects: Vec<InclusiveRectangle>,
+    cursor_events: Vec<SessionCursorEvent>,
 }
 
-impl H264StreamEncoder {
-    fn new() -> Result<Self> {
-        let config = EncoderConfig::new()
-            .usage_type(UsageType::ScreenContentRealTime)
-            .rate_control_mode(RateControlMode::Bitrate)
-            .bitrate(BitRate::from_bps(H264_TARGET_BITRATE_BPS))
-            .max_frame_rate(FrameRate::from_hz(H264_TARGET_FPS))
-            .intra_frame_period(IntraFramePeriod::from_num_frames(
-                H264_KEYFRAME_INTERVAL_FRAMES as u32,
-            ));
-        let encoder = H264Encoder::with_api_config(OpenH264API::from_source(), config)
-            .context("initialize H.264 encoder")?;
-        Ok(Self {
-            encoder,
-            yuv_buffer: None,
-            width: 0,
-            height: 0,
-            frame_index: 0,
-        })
-    }
-
-    fn encode(
-        &mut self,
-        image: &DecodedImage,
-        pts_us: u64,
-    ) -> Result<Option<RdpStreamFramePacket>> {
-        let width = usize::from(image.width());
-        let height = usize::from(image.height());
-        if width % 2 != 0 || height % 2 != 0 {
-            anyhow::bail!("H.264 requires even width/height.");
-        }
-
-        if self.width != width || self.height != height || self.yuv_buffer.is_none() {
-            self.width = width;
-            self.height = height;
-            self.yuv_buffer = Some(YUVBuffer::new(width, height));
-            self.frame_index = 0;
-        }
-
-        let Some(yuv_buffer) = self.yuv_buffer.as_mut() else {
-            anyhow::bail!("H.264 YUV buffer is not initialized.");
-        };
-
-        let rgba_source = RgbaSliceU8::new(image.data(), (width, height));
-        yuv_buffer.read_rgb(rgba_source);
-
-        if self.frame_index == 0 || self.frame_index % H264_KEYFRAME_INTERVAL_FRAMES == 0 {
-            self.encoder.force_intra_frame();
-        }
-
-        let timestamp_ms = pts_us / 1_000;
-        let stream = self
-            .encoder
-            .encode_at(yuv_buffer, Timestamp::from_millis(timestamp_ms))
-            .context("encode H.264 stream frame")?;
-        self.frame_index = self.frame_index.saturating_add(1);
-
-        let frame_type = stream.frame_type();
-        if frame_type == FrameType::Skip {
-            return Ok(None);
-        }
-
-        let payload = stream.to_vec();
-        if payload.is_empty() {
-            return Ok(None);
-        }
-
-        let keyframe = matches!(frame_type, FrameType::IDR | FrameType::I);
-        Ok(Some(RdpStreamFramePacket::new(
-            RdpFrameCodec::H264,
-            keyframe,
-            image.width(),
-            image.height(),
-            pts_us,
-            payload,
-        )))
-    }
+#[derive(Debug)]
+enum SessionCursorEvent {
+    Default,
+    Hidden,
+    Position { x: u16, y: u16 },
+    Bitmap(Arc<DecodedPointer>),
 }
 
-fn looks_like_auth_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("logon")
-        || lower.contains("logon failure")
-        || lower.contains("authentication")
-        || lower.contains("credssp")
-        || lower.contains("sec_e_logon_denied")
-        || lower.contains("status_logon_failure")
-        || lower.contains("nla")
-        || lower.contains("access denied")
-        || lower.contains("password")
-        || lower.contains("account restriction")
-}
-
-fn run_rdp_stream_worker(
+fn run_rdp_session_worker(
     session_id: String,
-    options: RdpCaptureOptions,
-    mut control_state: StreamControlState,
-    event_channel: Arc<Channel<RdpStreamEvent>>,
-    frame_channel: Arc<Channel<InvokeResponseBody>>,
-    rx: mpsc::Receiver<RdpStreamWorkerMessage>,
+    options: RdpSessionOptions,
+    control_channel: Arc<Channel<RdpSessionControlEvent>>,
+    video_rects_channel: Arc<Channel<InvokeResponseBody>>,
+    cursor_channel: Arc<Channel<InvokeResponseBody>>,
+    audio_channel: Arc<Channel<InvokeResponseBody>>,
+    rx: mpsc::Receiver<RdpSessionWorkerMessage>,
 ) {
-    let _ = emit_stream_event(
-        &event_channel,
-        RdpStreamEvent::Connecting {
+    if !emit_control_event(
+        &control_channel,
+        RdpSessionControlEvent::Connecting {
             session_id: session_id.clone(),
-            message: "Conectando via RDP...".to_string(),
+            message: "Conectando ao host RDP...".to_string(),
         },
-    );
+    ) {
+        return;
+    }
 
-    let worker_result = run_rdp_stream_worker_inner(
+    let worker_result = run_rdp_session_worker_inner(
         &session_id,
         options,
-        &mut control_state,
-        &event_channel,
-        &frame_channel,
+        &control_channel,
+        &video_rects_channel,
+        &cursor_channel,
+        &audio_channel,
         rx,
     );
+
     if let Err(error) = worker_result {
         let message = format!("{error:#}");
         let _ = if looks_like_auth_error(&message) {
-            emit_stream_event(
-                &event_channel,
-                RdpStreamEvent::AuthRequired {
+            emit_control_event(
+                &control_channel,
+                RdpSessionControlEvent::AuthRequired {
                     session_id: session_id.clone(),
                     message,
                 },
             )
         } else {
-            emit_stream_event(
-                &event_channel,
-                RdpStreamEvent::Error {
+            emit_control_event(
+                &control_channel,
+                RdpSessionControlEvent::Error {
                     session_id: session_id.clone(),
                     message,
                 },
@@ -452,21 +437,22 @@ fn run_rdp_stream_worker(
         };
     }
 
-    let _ = emit_stream_event(
-        &event_channel,
-        RdpStreamEvent::Stopped {
+    let _ = emit_control_event(
+        &control_channel,
+        RdpSessionControlEvent::Stopped {
             session_id: session_id.clone(),
         },
     );
 }
 
-fn run_rdp_stream_worker_inner(
+fn run_rdp_session_worker_inner(
     session_id: &str,
-    options: RdpCaptureOptions,
-    control_state: &mut StreamControlState,
-    event_channel: &Arc<Channel<RdpStreamEvent>>,
-    frame_channel: &Arc<Channel<InvokeResponseBody>>,
-    rx: mpsc::Receiver<RdpStreamWorkerMessage>,
+    options: RdpSessionOptions,
+    control_channel: &Arc<Channel<RdpSessionControlEvent>>,
+    video_rects_channel: &Arc<Channel<InvokeResponseBody>>,
+    cursor_channel: &Arc<Channel<InvokeResponseBody>>,
+    _audio_channel: &Arc<Channel<InvokeResponseBody>>,
+    rx: mpsc::Receiver<RdpSessionWorkerMessage>,
 ) -> Result<()> {
     ensure_rustls_crypto_provider();
 
@@ -479,7 +465,7 @@ fn run_rdp_stream_worker_inner(
     )?;
 
     let connect_timeout = Duration::from_secs(options.timeout_seconds.clamp(3, 30));
-    let read_timeout = Duration::from_millis(130);
+    let read_timeout = Duration::from_millis(80);
     let (connection_result, mut framed) = connect(
         config,
         options.host,
@@ -495,105 +481,160 @@ fn run_rdp_stream_worker_inner(
         connection_result.desktop_size.height,
     );
     let mut active_stage = ActiveStage::new(connection_result);
-    let mut pending_inputs = options.input_actions;
-    let mut force_emit = true;
-    let mut last_emit = Instant::now();
+    let mut focus_state = SessionFocusState::new(image.width(), image.height());
+    let mut frame_id: u64 = 0;
     let stream_started = Instant::now();
-    let mut frame_codec = options.stream_codec;
-    let mut h264_encoder = if frame_codec == RdpFrameCodec::H264 {
-        match H264StreamEncoder::new() {
-            Ok(encoder) => Some(encoder),
-            Err(_) => {
-                frame_codec = RdpFrameCodec::Png;
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let mut last_emit = Instant::now();
+    let mut pending_dirty_rects = Vec::<InclusiveRectangle>::new();
+    let mut pending_input = Vec::<RdpInputEvent>::new();
+    let mut last_pointer_position: Option<(u16, u16)> = None;
+    let mut last_cursor_position = (0u16, 0u16);
+    let mut wheel_accumulator = WheelAccumulator::default();
 
-    if !emit_stream_event(
-        event_channel,
-        RdpStreamEvent::Ready {
+    if !emit_control_event(
+        control_channel,
+        RdpSessionControlEvent::Ready {
             session_id: session_id.to_string(),
             width: image.width(),
             height: image.height(),
-            frame_codec,
         },
     ) {
         return Ok(());
     }
 
+    if let Some(initial_rect) = full_image_rect(&image) {
+        pending_dirty_rects.push(initial_rect);
+    }
+
     'worker: loop {
         while let Ok(message) = rx.try_recv() {
             match message {
-                RdpStreamWorkerMessage::Input(actions) => {
-                    if !actions.is_empty() {
-                        pending_inputs.extend(actions.into_iter().take(48));
-                        if pending_inputs.len() > 96 {
-                            let keep_from = pending_inputs.len() - 96;
-                            pending_inputs = pending_inputs.split_off(keep_from);
+                RdpSessionWorkerMessage::InputBatch(batch) => {
+                    if !batch.events.is_empty() {
+                        pending_input.extend(batch.events.into_iter().take(192));
+                        if pending_input.len() > 512 {
+                            let keep_from = pending_input.len().saturating_sub(512);
+                            pending_input = pending_input.split_off(keep_from);
                         }
                     }
                 }
-                RdpStreamWorkerMessage::Control(update) => {
-                    control_state.apply(update);
+                RdpSessionWorkerMessage::Focus(focus) => {
+                    let was_focused = focus_state.focused;
+                    focus_state.apply(focus);
+                    if was_focused && !focus_state.focused {
+                        let _ = emit_control_event(
+                            control_channel,
+                            RdpSessionControlEvent::ReleasedCapture {
+                                session_id: session_id.to_string(),
+                                message: "Captura raw indisponivel; fallback por lote ativo."
+                                    .to_string(),
+                            },
+                        );
+                    }
                 }
-                RdpStreamWorkerMessage::Stop => break 'worker,
+                RdpSessionWorkerMessage::Stop => break 'worker,
             }
         }
 
-        if !pending_inputs.is_empty() {
-            process_input_actions(&mut framed, &mut active_stage, &mut image, &pending_inputs)
-                .context("process stream inputs")?;
-            pending_inputs.clear();
-            force_emit = true;
+        if let Some((new_width, new_height)) = focus_state.take_pending_resize() {
+            if let Some(resize) =
+                active_stage.encode_resize(u32::from(new_width), u32::from(new_height), None, None)
+            {
+                let payload = resize.context("encode resize")?;
+                framed
+                    .write_all(payload.as_slice())
+                    .context("write resize")?;
+            }
+        }
+
+        if !pending_input.is_empty() {
+            let batch = RdpInputBatch {
+                events: std::mem::take(&mut pending_input),
+            };
+            let drain = process_input_batch(
+                &mut framed,
+                &mut active_stage,
+                &mut image,
+                &batch,
+                &mut last_pointer_position,
+                &mut last_cursor_position,
+                &mut wheel_accumulator,
+            )
+            .context("process input batch")?;
+
+            for cursor_event in drain.cursor_events {
+                if !emit_cursor_event(cursor_channel, cursor_event, &mut last_cursor_position) {
+                    break 'worker;
+                }
+            }
+            for rect in drain.dirty_rects {
+                queue_dirty_rect(&mut pending_dirty_rects, rect);
+            }
+            if drain.terminated {
+                break 'worker;
+            }
         }
 
         match active_stage_tick(&mut framed, &mut active_stage, &mut image)? {
             TickOutcome::Idle => {}
-            TickOutcome::Updated => {
-                force_emit = true;
+            TickOutcome::Updated(drain) => {
+                for cursor_event in drain.cursor_events {
+                    if !emit_cursor_event(cursor_channel, cursor_event, &mut last_cursor_position) {
+                        break 'worker;
+                    }
+                }
+                for rect in drain.dirty_rects {
+                    queue_dirty_rect(&mut pending_dirty_rects, rect);
+                }
+                if drain.terminated {
+                    break 'worker;
+                }
             }
-            TickOutcome::Terminated => break 'worker,
         }
 
-        let emit_every = if control_state.active {
-            Duration::from_millis(120)
+        let emit_interval = if focus_state.focused {
+            Duration::from_millis(16)
         } else {
-            Duration::from_millis(420)
+            Duration::from_millis(110)
         };
-        if force_emit || last_emit.elapsed() >= emit_every {
-            let pts_us = stream_started
-                .elapsed()
-                .as_micros()
-                .min(u128::from(u64::MAX)) as u64;
-            let frame_packet = if frame_codec == RdpFrameCodec::H264 {
-                match h264_encoder.as_mut() {
-                    Some(encoder) => match encoder.encode(&image, pts_us) {
-                        Ok(Some(packet)) => packet,
-                        Ok(None) => {
-                            force_emit = false;
-                            last_emit = Instant::now();
-                            continue;
-                        }
-                        Err(_) => {
-                            frame_codec = RdpFrameCodec::Png;
-                            h264_encoder = None;
-                            build_png_stream_packet(&image, pts_us)?
-                        }
-                    },
-                    None => build_png_stream_packet(&image, pts_us)?,
-                }
-            } else {
-                build_png_stream_packet(&image, pts_us)?
-            };
-            if !emit_stream_frame(frame_channel, frame_packet.into_bytes()?) {
-                break 'worker;
-            }
-            force_emit = false;
-            last_emit = Instant::now();
+
+        if pending_dirty_rects.is_empty() || last_emit.elapsed() < emit_interval {
+            continue;
         }
+
+        let rects = coalesce_rects(
+            std::mem::take(&mut pending_dirty_rects),
+            &image,
+            MAX_DIRTY_RECTS_PER_FRAME,
+        );
+        if rects.is_empty() {
+            continue;
+        }
+
+        let pts_us = stream_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        let chunks = rects
+            .iter()
+            .map(|rect| build_video_rect_chunk(&image, rect))
+            .collect::<Result<Vec<_>>>()?;
+
+        let packet = build_video_rects_packet(
+            frame_id,
+            image.width(),
+            image.height(),
+            pts_us,
+            &chunks,
+            true,
+            true,
+        )?;
+        if !emit_binary_packet(video_rects_channel, packet) {
+            break 'worker;
+        }
+
+        frame_id = frame_id.wrapping_add(1);
+        last_emit = Instant::now();
     }
 
     Ok(())
@@ -601,8 +642,7 @@ fn run_rdp_stream_worker_inner(
 
 enum TickOutcome {
     Idle,
-    Updated,
-    Terminated,
+    Updated(SessionDrain),
 }
 
 fn active_stage_tick(
@@ -626,94 +666,718 @@ fn active_stage_tick(
     let outputs = active_stage
         .process(image, action, &payload)
         .context("active stage process")?;
-    if process_active_stage_outputs(framed, active_stage, image, outputs)? {
-        return Ok(TickOutcome::Terminated);
+    let drain = process_active_stage_outputs(framed, active_stage, image, outputs)?;
+    Ok(TickOutcome::Updated(drain))
+}
+
+fn process_input_batch(
+    framed: &mut UpgradedFramed,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    batch: &RdpInputBatch,
+    last_pointer_position: &mut Option<(u16, u16)>,
+    last_cursor_position: &mut (u16, u16),
+    wheel_accumulator: &mut WheelAccumulator,
+) -> Result<SessionDrain> {
+    let mut aggregate = SessionDrain::default();
+
+    for action in &batch.events {
+        track_input_cursor_position(action, last_cursor_position);
+        let events = expand_input_event(action, last_pointer_position, wheel_accumulator);
+        if events.is_empty() {
+            continue;
+        }
+
+        let outputs = active_stage
+            .process_fastpath_input(image, &events)
+            .context("process fast-path input")?;
+        let drain = process_active_stage_outputs(framed, active_stage, image, outputs)?;
+        aggregate.dirty_rects.extend(drain.dirty_rects);
+        aggregate.cursor_events.extend(drain.cursor_events);
+        if drain.terminated {
+            aggregate.terminated = true;
+            break;
+        }
     }
 
-    Ok(TickOutcome::Updated)
+    Ok(aggregate)
 }
 
-fn encode_image_to_png_bytes(image: &DecodedImage) -> Result<Vec<u8>> {
-    let image_data = image.data().to_vec();
-    let img: image::ImageBuffer<image::Rgba<u8>, _> = image::ImageBuffer::from_raw(
-        u32::from(image.width()),
-        u32::from(image.height()),
-        image_data,
-    )
-    .context("invalid image")?;
+fn process_active_stage_outputs(
+    framed: &mut UpgradedFramed,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    outputs: Vec<ActiveStageOutput>,
+) -> Result<SessionDrain> {
+    let mut drain = SessionDrain::default();
 
-    let mut png_bytes = Vec::new();
-    image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-        .context("encode PNG frame")?;
+    for output in outputs {
+        match output {
+            ActiveStageOutput::ResponseFrame(frame) => {
+                framed.write_all(&frame).context("write response")?;
+            }
+            ActiveStageOutput::GraphicsUpdate(rect) => {
+                drain.dirty_rects.push(rect);
+            }
+            ActiveStageOutput::PointerDefault => {
+                drain.cursor_events.push(SessionCursorEvent::Default);
+            }
+            ActiveStageOutput::PointerHidden => {
+                drain.cursor_events.push(SessionCursorEvent::Hidden);
+            }
+            ActiveStageOutput::PointerPosition { x, y } => {
+                drain
+                    .cursor_events
+                    .push(SessionCursorEvent::Position { x, y });
+            }
+            ActiveStageOutput::PointerBitmap(pointer) => {
+                drain
+                    .cursor_events
+                    .push(SessionCursorEvent::Bitmap(pointer));
+            }
+            ActiveStageOutput::Terminate(_) => {
+                drain.terminated = true;
+            }
+            ActiveStageOutput::DeactivateAll(connection_activation) => {
+                run_deactivation_reactivation(framed, active_stage, image, connection_activation)
+                    .context("deactivation-reactivation")?;
+                if let Some(full) = full_image_rect(image) {
+                    drain.dirty_rects.push(full);
+                }
+            }
+        }
+    }
 
-    Ok(png_bytes)
+    Ok(drain)
 }
 
-fn build_png_stream_packet(image: &DecodedImage, pts_us: u64) -> Result<RdpStreamFramePacket> {
-    let png_bytes = encode_image_to_png_bytes(image).context("encode PNG stream frame")?;
-    Ok(RdpStreamFramePacket::new(
-        RdpFrameCodec::Png,
-        true,
-        image.width(),
-        image.height(),
-        pts_us,
-        png_bytes,
-    ))
+fn emit_cursor_event(
+    cursor_channel: &Arc<Channel<InvokeResponseBody>>,
+    event: SessionCursorEvent,
+    last_position: &mut (u16, u16),
+) -> bool {
+    let packet = match event {
+        SessionCursorEvent::Default => {
+            build_cursor_packet(CURSOR_KIND_DEFAULT, 0, 0, 0, 0, 0, 0, None)
+        }
+        SessionCursorEvent::Hidden => {
+            build_cursor_packet(CURSOR_KIND_HIDDEN, 0, 0, 0, 0, 0, 0, None)
+        }
+        SessionCursorEvent::Position { x, y } => {
+            *last_position = (x, y);
+            build_cursor_packet(CURSOR_KIND_POSITION, x, y, 0, 0, 0, 0, None)
+        }
+        SessionCursorEvent::Bitmap(pointer) => build_cursor_packet(
+            CURSOR_KIND_BITMAP,
+            last_position.0,
+            last_position.1,
+            pointer.hotspot_x,
+            pointer.hotspot_y,
+            pointer.width,
+            pointer.height,
+            Some(pointer.bitmap_data.as_slice()),
+        ),
+    };
+
+    match packet {
+        Ok(bytes) => emit_binary_packet(cursor_channel, bytes),
+        Err(_) => true,
+    }
 }
 
-pub fn capture_png_once(options: RdpCaptureOptions) -> Result<RdpCaptureImage> {
-    ensure_rustls_crypto_provider();
+fn queue_dirty_rect(target: &mut Vec<InclusiveRectangle>, rect: InclusiveRectangle) {
+    if rect.width() == 0 || rect.height() == 0 {
+        return;
+    }
+    target.push(rect);
+}
 
-    let config = build_config(
-        options.username.clone(),
-        options.password.clone(),
-        options.domain.clone(),
-        options.width,
-        options.height,
-    )?;
+struct VideoRectChunk {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    raw_size: u32,
+    compression: u8,
+    payload: Vec<u8>,
+}
 
-    let (connection_result, framed) = connect(
-        config,
-        options.host.clone(),
-        options.port,
-        Duration::from_secs(options.timeout_seconds.clamp(3, 30)),
-        Duration::from_secs(options.timeout_seconds.clamp(3, 8)),
-    )
-    .context("connect")?;
+fn build_video_rect_chunk(
+    image: &DecodedImage,
+    rect: &InclusiveRectangle,
+) -> Result<VideoRectChunk> {
+    let raw = copy_rect_bgra(image, rect)?;
+    let raw_size = u32::try_from(raw.len()).context("raw rect payload overflow")?;
+    let (compression, payload) = compress_payload(&raw)?;
 
-    let mut image = DecodedImage::new(
-        PixelFormat::RgbA32,
-        connection_result.desktop_size.width,
-        connection_result.desktop_size.height,
-    );
-
-    active_stage(
-        connection_result,
-        framed,
-        &mut image,
-        &options.input_actions,
-    )
-    .context("active stage")?;
-
-    let image_data = image.data().to_vec();
-    let img: image::ImageBuffer<image::Rgba<u8>, _> = image::ImageBuffer::from_raw(
-        u32::from(image.width()),
-        u32::from(image.height()),
-        image_data,
-    )
-    .context("invalid image")?;
-
-    let mut png_bytes = Vec::new();
-    image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-        .context("encode PNG frame")?;
-
-    Ok(RdpCaptureImage {
-        png_bytes,
-        width: image.width(),
-        height: image.height(),
+    Ok(VideoRectChunk {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width(),
+        height: rect.height(),
+        raw_size,
+        compression,
+        payload,
     })
+}
+
+fn compress_payload(raw: &[u8]) -> Result<(u8, Vec<u8>)> {
+    let mut compressed = Vec::new();
+    {
+        let mut encoder = FrameEncoder::new(&mut compressed);
+        encoder.write_all(raw).context("lz4 write")?;
+        let _ = encoder.finish().context("lz4 finish")?;
+    }
+
+    if compressed.len() + 16 < raw.len() {
+        Ok((COMPRESSION_LZ4, compressed))
+    } else {
+        Ok((COMPRESSION_NONE, raw.to_vec()))
+    }
+}
+
+fn build_video_rects_packet(
+    frame_id: u64,
+    width: u16,
+    height: u16,
+    pts_us: u64,
+    rects: &[VideoRectChunk],
+    frame_begin: bool,
+    frame_end: bool,
+) -> Result<Vec<u8>> {
+    let mut flags = 0u8;
+    if frame_begin {
+        flags |= VIDEO_FRAME_BEGIN;
+    }
+    if frame_end {
+        flags |= VIDEO_FRAME_END;
+    }
+
+    let rect_count = u16::try_from(rects.len()).context("too many dirty rects")?;
+    let total_payload_len = rects
+        .iter()
+        .map(|rect| VIDEO_RECT_HEADER_LEN + rect.payload.len())
+        .sum::<usize>();
+
+    let mut packet = Vec::with_capacity(VIDEO_PACKET_HEADER_LEN + total_payload_len);
+    packet.extend_from_slice(&VIDEO_PACKET_MAGIC);
+    packet.push(PACKET_VERSION);
+    packet.push(flags);
+    packet.extend_from_slice(&0u16.to_le_bytes());
+    packet.extend_from_slice(&frame_id.to_le_bytes());
+    packet.extend_from_slice(&width.to_le_bytes());
+    packet.extend_from_slice(&height.to_le_bytes());
+    packet.extend_from_slice(&rect_count.to_le_bytes());
+    packet.extend_from_slice(&0u16.to_le_bytes());
+    packet.extend_from_slice(&pts_us.to_le_bytes());
+
+    for rect in rects {
+        let payload_len = u32::try_from(rect.payload.len()).context("rect payload overflow")?;
+        packet.extend_from_slice(&rect.x.to_le_bytes());
+        packet.extend_from_slice(&rect.y.to_le_bytes());
+        packet.extend_from_slice(&rect.width.to_le_bytes());
+        packet.extend_from_slice(&rect.height.to_le_bytes());
+        packet.push(rect.compression);
+        packet.extend_from_slice(&[0u8; 3]);
+        packet.extend_from_slice(&rect.raw_size.to_le_bytes());
+        packet.extend_from_slice(&payload_len.to_le_bytes());
+        packet.extend_from_slice(rect.payload.as_slice());
+    }
+
+    Ok(packet)
+}
+
+fn build_cursor_packet(
+    kind: u8,
+    x: u16,
+    y: u16,
+    hotspot_x: u16,
+    hotspot_y: u16,
+    width: u16,
+    height: u16,
+    payload: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let (compression, bytes) = if let Some(data) = payload {
+        compress_payload(data)?
+    } else {
+        (COMPRESSION_NONE, Vec::new())
+    };
+
+    let payload_len = u32::try_from(bytes.len()).context("cursor payload overflow")?;
+
+    let mut packet = Vec::with_capacity(CURSOR_PACKET_HEADER_LEN + bytes.len());
+    packet.extend_from_slice(&CURSOR_PACKET_MAGIC);
+    packet.push(PACKET_VERSION);
+    packet.push(kind);
+    packet.extend_from_slice(&0u16.to_le_bytes());
+    packet.extend_from_slice(&x.to_le_bytes());
+    packet.extend_from_slice(&y.to_le_bytes());
+    packet.extend_from_slice(&hotspot_x.to_le_bytes());
+    packet.extend_from_slice(&hotspot_y.to_le_bytes());
+    packet.extend_from_slice(&width.to_le_bytes());
+    packet.extend_from_slice(&height.to_le_bytes());
+    packet.extend_from_slice(&payload_len.to_le_bytes());
+    packet.push(compression);
+    packet.extend_from_slice(&[0u8; 3]);
+    packet.extend_from_slice(bytes.as_slice());
+
+    Ok(packet)
+}
+
+#[allow(dead_code)]
+fn build_audio_pcm_packet(
+    pts_us: u64,
+    sample_rate: u32,
+    channels: u8,
+    bits_per_sample: u8,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    let payload_len = u32::try_from(payload.len()).context("audio payload overflow")?;
+
+    let mut packet = Vec::with_capacity(AUDIO_PACKET_HEADER_LEN + payload.len());
+    packet.extend_from_slice(&AUDIO_PACKET_MAGIC);
+    packet.push(PACKET_VERSION);
+    packet.push(COMPRESSION_NONE);
+    packet.push(channels);
+    packet.push(bits_per_sample);
+    packet.extend_from_slice(&sample_rate.to_le_bytes());
+    packet.extend_from_slice(&pts_us.to_le_bytes());
+    packet.extend_from_slice(&payload_len.to_le_bytes());
+    packet.extend_from_slice(payload);
+
+    Ok(packet)
+}
+
+fn copy_rect_bgra(image: &DecodedImage, rect: &InclusiveRectangle) -> Result<Vec<u8>> {
+    let rect = normalize_rect(rect, image).context("dirty rect out of bounds")?;
+    let bytes_per_pixel = 4usize;
+    let stride = image.stride();
+    let width = usize::from(rect.width());
+    let height = usize::from(rect.height());
+    let left = usize::from(rect.left);
+    let top = usize::from(rect.top);
+    let row_bytes = width * bytes_per_pixel;
+    let mut output = vec![0u8; row_bytes * height];
+    let data = image.data();
+
+    for row in 0..height {
+        let src_start = (top + row) * stride + left * bytes_per_pixel;
+        let src_end = src_start + row_bytes;
+        let dst_start = row * row_bytes;
+        let dst_end = dst_start + row_bytes;
+        output[dst_start..dst_end].copy_from_slice(&data[src_start..src_end]);
+    }
+
+    // ironrdp image is RGBA32 here; compositor contract uses BGRA8.
+    for pixel in output.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    Ok(output)
+}
+
+fn normalize_rect(rect: &InclusiveRectangle, image: &DecodedImage) -> Option<InclusiveRectangle> {
+    if image.width() == 0 || image.height() == 0 {
+        return None;
+    }
+
+    let max_x = image.width() - 1;
+    let max_y = image.height() - 1;
+    let left = min(rect.left, max_x);
+    let top = min(rect.top, max_y);
+    let right = min(rect.right, max_x);
+    let bottom = min(rect.bottom, max_y);
+
+    if right < left || bottom < top {
+        return None;
+    }
+
+    Some(InclusiveRectangle {
+        left,
+        top,
+        right,
+        bottom,
+    })
+}
+
+fn full_image_rect(image: &DecodedImage) -> Option<InclusiveRectangle> {
+    if image.width() == 0 || image.height() == 0 {
+        return None;
+    }
+
+    Some(InclusiveRectangle {
+        left: 0,
+        top: 0,
+        right: image.width() - 1,
+        bottom: image.height() - 1,
+    })
+}
+
+fn coalesce_rects(
+    rects: Vec<InclusiveRectangle>,
+    image: &DecodedImage,
+    max_rects: usize,
+) -> Vec<InclusiveRectangle> {
+    let mut normalized = rects
+        .into_iter()
+        .filter_map(|rect| normalize_rect(&rect, image))
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut merged: Vec<InclusiveRectangle> = Vec::new();
+    for rect in normalized.drain(..) {
+        let mut current = rect;
+        let mut idx = 0usize;
+        while idx < merged.len() {
+            if rects_touch_or_overlap(&current, &merged[idx]) {
+                current = merge_rects(&current, &merged[idx]);
+                merged.swap_remove(idx);
+                idx = 0;
+                continue;
+            }
+            idx += 1;
+        }
+        merged.push(current);
+    }
+
+    if merged.len() <= max_rects {
+        return merged;
+    }
+
+    let mut bounds = merged[0].clone();
+    for rect in merged.iter().skip(1) {
+        bounds = merge_rects(&bounds, rect);
+    }
+    vec![bounds]
+}
+
+fn rects_touch_or_overlap(a: &InclusiveRectangle, b: &InclusiveRectangle) -> bool {
+    let a_left = i32::from(a.left);
+    let a_top = i32::from(a.top);
+    let a_right = i32::from(a.right);
+    let a_bottom = i32::from(a.bottom);
+    let b_left = i32::from(b.left);
+    let b_top = i32::from(b.top);
+    let b_right = i32::from(b.right);
+    let b_bottom = i32::from(b.bottom);
+
+    !(a_right + 1 < b_left || b_right + 1 < a_left || a_bottom + 1 < b_top || b_bottom + 1 < a_top)
+}
+
+fn merge_rects(a: &InclusiveRectangle, b: &InclusiveRectangle) -> InclusiveRectangle {
+    InclusiveRectangle {
+        left: min(a.left, b.left),
+        top: min(a.top, b.top),
+        right: max(a.right, b.right),
+        bottom: max(a.bottom, b.bottom),
+    }
+}
+
+fn track_input_cursor_position(action: &RdpInputEvent, last_cursor_position: &mut (u16, u16)) {
+    match action {
+        RdpInputEvent::MouseMove { x, y, .. }
+        | RdpInputEvent::MouseButtonDown { x, y, .. }
+        | RdpInputEvent::MouseButtonUp { x, y, .. }
+        | RdpInputEvent::MouseClick { x, y, .. }
+        | RdpInputEvent::MouseScroll { x, y, .. } => {
+            *last_cursor_position = (*x, *y);
+        }
+        RdpInputEvent::MousePath { points } => {
+            if let Some(last) = points.last() {
+                *last_cursor_position = (last.x, last.y);
+            }
+        }
+        RdpInputEvent::KeyPress { .. } => {}
+    }
+}
+
+fn expand_input_event(
+    action: &RdpInputEvent,
+    last_pointer_position: &mut Option<(u16, u16)>,
+    wheel_accumulator: &mut WheelAccumulator,
+) -> Vec<FastPathInputEvent> {
+    match action {
+        RdpInputEvent::MouseMove { x, y, t_ms } => {
+            let _ = t_ms;
+            let mut events = Vec::new();
+            if let Some((from_x, from_y)) = *last_pointer_position {
+                for (next_x, next_y) in interpolate_pointer_route(from_x, from_y, *x, *y) {
+                    events.extend(action_to_fastpath_events(&RdpInputEvent::MouseMove {
+                        x: next_x,
+                        y: next_y,
+                        t_ms: None,
+                    }));
+                }
+            } else {
+                events.extend(action_to_fastpath_events(action));
+            }
+            *last_pointer_position = Some((*x, *y));
+            events
+        }
+        RdpInputEvent::MousePath { points } => {
+            if points.is_empty() {
+                return Vec::new();
+            }
+
+            let mut events = Vec::new();
+            let mut from = *last_pointer_position;
+            for point in points {
+                let (to_x, to_y) = (point.x, point.y);
+                if let Some((from_x, from_y)) = from {
+                    for (next_x, next_y) in interpolate_pointer_route(from_x, from_y, to_x, to_y) {
+                        events.extend(action_to_fastpath_events(&RdpInputEvent::MouseMove {
+                            x: next_x,
+                            y: next_y,
+                            t_ms: point.t_ms,
+                        }));
+                    }
+                } else {
+                    events.extend(action_to_fastpath_events(&RdpInputEvent::MouseMove {
+                        x: to_x,
+                        y: to_y,
+                        t_ms: point.t_ms,
+                    }));
+                }
+                from = Some((to_x, to_y));
+            }
+            *last_pointer_position = from;
+            events
+        }
+        RdpInputEvent::MouseButtonDown { x, y, .. }
+        | RdpInputEvent::MouseButtonUp { x, y, .. }
+        | RdpInputEvent::MouseClick { x, y, .. } => {
+            *last_pointer_position = Some((*x, *y));
+            action_to_fastpath_events(action)
+        }
+        RdpInputEvent::MouseScroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => {
+            *last_pointer_position = Some((*x, *y));
+            let (horizontal_steps, vertical_steps) = wheel_accumulator.push(*delta_x, *delta_y);
+            build_wheel_fastpath_events(*x, *y, &horizontal_steps, &vertical_steps)
+        }
+        RdpInputEvent::KeyPress { .. } => action_to_fastpath_events(action),
+    }
+}
+
+fn action_to_fastpath_events(action: &RdpInputEvent) -> Vec<FastPathInputEvent> {
+    match action {
+        RdpInputEvent::MouseMove { x, y, .. } => vec![FastPathInputEvent::MouseEvent(MousePdu {
+            flags: PointerFlags::MOVE,
+            number_of_wheel_rotation_units: 0,
+            x_position: *x,
+            y_position: *y,
+        })],
+        RdpInputEvent::MouseButtonDown { x, y, button } => {
+            let button_flag = button_to_pointer_flag(button);
+            vec![
+                FastPathInputEvent::MouseEvent(MousePdu {
+                    flags: PointerFlags::MOVE,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: *x,
+                    y_position: *y,
+                }),
+                FastPathInputEvent::MouseEvent(MousePdu {
+                    flags: button_flag | PointerFlags::DOWN,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: *x,
+                    y_position: *y,
+                }),
+            ]
+        }
+        RdpInputEvent::MouseButtonUp { x, y, button } => {
+            let button_flag = button_to_pointer_flag(button);
+            vec![
+                FastPathInputEvent::MouseEvent(MousePdu {
+                    flags: PointerFlags::MOVE,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: *x,
+                    y_position: *y,
+                }),
+                FastPathInputEvent::MouseEvent(MousePdu {
+                    flags: button_flag,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: *x,
+                    y_position: *y,
+                }),
+            ]
+        }
+        RdpInputEvent::MouseClick {
+            x,
+            y,
+            button,
+            double_click,
+        } => {
+            let button_flag = button_to_pointer_flag(button);
+
+            let mut events = vec![
+                FastPathInputEvent::MouseEvent(MousePdu {
+                    flags: PointerFlags::MOVE,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: *x,
+                    y_position: *y,
+                }),
+                FastPathInputEvent::MouseEvent(MousePdu {
+                    flags: button_flag | PointerFlags::DOWN,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: *x,
+                    y_position: *y,
+                }),
+                FastPathInputEvent::MouseEvent(MousePdu {
+                    flags: button_flag,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: *x,
+                    y_position: *y,
+                }),
+            ];
+
+            if *double_click {
+                events.extend([
+                    FastPathInputEvent::MouseEvent(MousePdu {
+                        flags: button_flag | PointerFlags::DOWN,
+                        number_of_wheel_rotation_units: 0,
+                        x_position: *x,
+                        y_position: *y,
+                    }),
+                    FastPathInputEvent::MouseEvent(MousePdu {
+                        flags: button_flag,
+                        number_of_wheel_rotation_units: 0,
+                        x_position: *x,
+                        y_position: *y,
+                    }),
+                ]);
+            }
+
+            events
+        }
+        RdpInputEvent::MouseScroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => build_wheel_fastpath_events(*x, *y, &[*delta_x], &[*delta_y]),
+        RdpInputEvent::MousePath { .. } => Vec::new(),
+        RdpInputEvent::KeyPress {
+            code,
+            text,
+            ctrl,
+            alt,
+            shift,
+            meta,
+        } => build_key_press_events(code, text.as_deref(), *ctrl, *alt, *shift, *meta),
+    }
+}
+
+fn build_wheel_fastpath_events(
+    x: u16,
+    y: u16,
+    horizontal_steps: &[i16],
+    vertical_steps: &[i16],
+) -> Vec<FastPathInputEvent> {
+    if horizontal_steps.is_empty() && vertical_steps.is_empty() {
+        return Vec::new();
+    }
+
+    let mut events = vec![FastPathInputEvent::MouseEvent(MousePdu {
+        flags: PointerFlags::MOVE,
+        number_of_wheel_rotation_units: 0,
+        x_position: x,
+        y_position: y,
+    })];
+
+    for delta in vertical_steps {
+        events.push(FastPathInputEvent::MouseEvent(MousePdu {
+            flags: PointerFlags::MIDDLE_BUTTON_OR_WHEEL | PointerFlags::VERTICAL_WHEEL,
+            number_of_wheel_rotation_units: (*delta).clamp(-255, 255),
+            x_position: x,
+            y_position: y,
+        }));
+    }
+
+    for delta in horizontal_steps {
+        events.push(FastPathInputEvent::MouseEvent(MousePdu {
+            flags: PointerFlags::MIDDLE_BUTTON_OR_WHEEL | PointerFlags::HORIZONTAL_WHEEL,
+            number_of_wheel_rotation_units: (*delta).clamp(-255, 255),
+            x_position: x,
+            y_position: y,
+        }));
+    }
+
+    events
+}
+
+fn button_to_pointer_flag(button: &RdpMouseButton) -> PointerFlags {
+    match button {
+        RdpMouseButton::Left => PointerFlags::LEFT_BUTTON,
+        RdpMouseButton::Right => PointerFlags::RIGHT_BUTTON,
+        RdpMouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+    }
+}
+
+fn build_key_press_events(
+    code: &str,
+    text: Option<&str>,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    meta: bool,
+) -> Vec<FastPathInputEvent> {
+    let mut events = Vec::new();
+    let modifiers = pressed_modifier_scan_codes(ctrl, alt, shift, meta);
+
+    for modifier in &modifiers {
+        events.push(key_event(modifier.code, modifier.extended, false));
+    }
+
+    if let Some(scan_code) = web_code_to_scan_code(code) {
+        events.push(key_event(scan_code.code, scan_code.extended, false));
+        events.push(key_event(scan_code.code, scan_code.extended, true));
+    } else if let Some(value) = text.filter(|value| !value.is_empty()) {
+        for code_unit in value.encode_utf16() {
+            events.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                FastPathKeyboardFlags::empty(),
+                code_unit,
+            ));
+            events.push(FastPathInputEvent::UnicodeKeyboardEvent(
+                FastPathKeyboardFlags::RELEASE,
+                code_unit,
+            ));
+        }
+    }
+
+    for modifier in modifiers.iter().rev() {
+        events.push(key_event(modifier.code, modifier.extended, true));
+    }
+
+    events
+}
+
+fn key_event(scan_code: u8, extended: bool, release: bool) -> FastPathInputEvent {
+    let mut flags = FastPathKeyboardFlags::empty();
+    if extended {
+        flags |= FastPathKeyboardFlags::EXTENDED;
+    }
+    if release {
+        flags |= FastPathKeyboardFlags::RELEASE;
+    }
+    FastPathInputEvent::KeyboardEvent(flags, scan_code)
+}
+
+fn looks_like_auth_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("logon")
+        || lower.contains("authentication")
+        || lower.contains("credssp")
+        || lower.contains("sec_e_logon_denied")
+        || lower.contains("status_logon_failure")
+        || lower.contains("nla")
+        || lower.contains("access denied")
+        || lower.contains("password")
 }
 
 fn build_config(
@@ -757,11 +1421,11 @@ fn build_config(
         platform: MajorPlatformType::UNIX,
         #[cfg(target_os = "netbsd")]
         platform: MajorPlatformType::UNIX,
-        enable_server_pointer: false,
+        enable_server_pointer: true,
         request_data: None,
         autologon: false,
-        enable_audio_playback: false,
-        pointer_software_rendering: true,
+        enable_audio_playback: true,
+        pointer_software_rendering: false,
         performance_flags: PerformanceFlags::default(),
         desktop_scale_factor: 0,
         hardware_id: None,
@@ -814,294 +1478,6 @@ fn connect(
     .context("finalize connection")?;
 
     Ok((connection_result, upgraded_framed))
-}
-
-fn active_stage(
-    connection_result: ConnectionResult,
-    mut framed: UpgradedFramed,
-    image: &mut DecodedImage,
-    input_actions: &[RdpInputAction],
-) -> Result<()> {
-    let mut active_stage = ActiveStage::new(connection_result);
-    if !input_actions.is_empty() {
-        process_input_actions(&mut framed, &mut active_stage, image, input_actions)
-            .context("process input actions")?;
-    }
-
-    'outer: loop {
-        let (action, payload) = match framed.read_pdu() {
-            Ok((action, payload)) => (action, payload),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                break 'outer;
-            }
-            Err(error) => return Err(anyhow::Error::new(error).context("read frame")),
-        };
-
-        let outputs = active_stage
-            .process(image, action, &payload)
-            .context("active stage process")?;
-        if process_active_stage_outputs(&mut framed, &mut active_stage, image, outputs)? {
-            break 'outer;
-        }
-    }
-
-    Ok(())
-}
-
-fn process_input_actions(
-    framed: &mut UpgradedFramed,
-    active_stage: &mut ActiveStage,
-    image: &mut DecodedImage,
-    input_actions: &[RdpInputAction],
-) -> Result<()> {
-    for action in input_actions {
-        let events = action_to_fastpath_events(action);
-        if events.is_empty() {
-            continue;
-        }
-        let outputs = active_stage
-            .process_fastpath_input(image, &events)
-            .context("process fast-path input")?;
-        if process_active_stage_outputs(framed, active_stage, image, outputs)? {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(12));
-    }
-    Ok(())
-}
-
-fn process_active_stage_outputs(
-    framed: &mut UpgradedFramed,
-    active_stage: &mut ActiveStage,
-    image: &mut DecodedImage,
-    outputs: Vec<ActiveStageOutput>,
-) -> Result<bool> {
-    for output in outputs {
-        match output {
-            ActiveStageOutput::ResponseFrame(frame) => {
-                framed.write_all(&frame).context("write response")?;
-            }
-            ActiveStageOutput::Terminate(_) => return Ok(true),
-            ActiveStageOutput::DeactivateAll(connection_activation) => {
-                run_deactivation_reactivation(framed, active_stage, image, connection_activation)
-                    .context("deactivation-reactivation")?;
-            }
-            _ => {}
-        }
-    }
-    Ok(false)
-}
-
-fn action_to_fastpath_events(action: &RdpInputAction) -> Vec<FastPathInputEvent> {
-    match action {
-        RdpInputAction::MouseMove { x, y } => vec![FastPathInputEvent::MouseEvent(MousePdu {
-            flags: PointerFlags::MOVE,
-            number_of_wheel_rotation_units: 0,
-            x_position: *x,
-            y_position: *y,
-        })],
-        RdpInputAction::MouseClick {
-            x,
-            y,
-            button,
-            double_click,
-        } => {
-            let button_flag = match button {
-                RdpMouseButton::Left => PointerFlags::LEFT_BUTTON,
-                RdpMouseButton::Right => PointerFlags::RIGHT_BUTTON,
-                RdpMouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-            };
-
-            let mut events = vec![
-                FastPathInputEvent::MouseEvent(MousePdu {
-                    flags: PointerFlags::MOVE,
-                    number_of_wheel_rotation_units: 0,
-                    x_position: *x,
-                    y_position: *y,
-                }),
-                FastPathInputEvent::MouseEvent(MousePdu {
-                    flags: button_flag | PointerFlags::DOWN,
-                    number_of_wheel_rotation_units: 0,
-                    x_position: *x,
-                    y_position: *y,
-                }),
-                FastPathInputEvent::MouseEvent(MousePdu {
-                    flags: button_flag,
-                    number_of_wheel_rotation_units: 0,
-                    x_position: *x,
-                    y_position: *y,
-                }),
-            ];
-
-            if *double_click {
-                events.extend([
-                    FastPathInputEvent::MouseEvent(MousePdu {
-                        flags: button_flag | PointerFlags::DOWN,
-                        number_of_wheel_rotation_units: 0,
-                        x_position: *x,
-                        y_position: *y,
-                    }),
-                    FastPathInputEvent::MouseEvent(MousePdu {
-                        flags: button_flag,
-                        number_of_wheel_rotation_units: 0,
-                        x_position: *x,
-                        y_position: *y,
-                    }),
-                ]);
-            }
-
-            events
-        }
-        RdpInputAction::KeyPress {
-            code,
-            text,
-            ctrl,
-            alt,
-            shift,
-            meta,
-        } => build_key_press_events(code, text.as_deref(), *ctrl, *alt, *shift, *meta),
-    }
-}
-
-fn build_key_press_events(
-    code: &str,
-    text: Option<&str>,
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-    meta: bool,
-) -> Vec<FastPathInputEvent> {
-    let mut events = Vec::new();
-    let mut modifiers: Vec<(u8, bool)> = Vec::new();
-
-    if ctrl {
-        modifiers.push((0x1D, false));
-    }
-    if alt {
-        modifiers.push((0x38, false));
-    }
-    if shift {
-        modifiers.push((0x2A, false));
-    }
-    if meta {
-        modifiers.push((0x5B, true));
-    }
-
-    for (scan_code, extended) in &modifiers {
-        events.push(key_event(*scan_code, *extended, false));
-    }
-
-    if let Some((scan_code, extended)) = key_code_to_scan_code(code) {
-        events.push(key_event(scan_code, extended, false));
-        events.push(key_event(scan_code, extended, true));
-    } else if let Some(value) = text.filter(|value| !value.is_empty()) {
-        for code_unit in value.encode_utf16() {
-            events.push(FastPathInputEvent::UnicodeKeyboardEvent(
-                FastPathKeyboardFlags::empty(),
-                code_unit,
-            ));
-            events.push(FastPathInputEvent::UnicodeKeyboardEvent(
-                FastPathKeyboardFlags::RELEASE,
-                code_unit,
-            ));
-        }
-    }
-
-    for (scan_code, extended) in modifiers.iter().rev() {
-        events.push(key_event(*scan_code, *extended, true));
-    }
-
-    events
-}
-
-fn key_event(scan_code: u8, extended: bool, release: bool) -> FastPathInputEvent {
-    let mut flags = FastPathKeyboardFlags::empty();
-    if extended {
-        flags |= FastPathKeyboardFlags::EXTENDED;
-    }
-    if release {
-        flags |= FastPathKeyboardFlags::RELEASE;
-    }
-    FastPathInputEvent::KeyboardEvent(flags, scan_code)
-}
-
-fn key_code_to_scan_code(code: &str) -> Option<(u8, bool)> {
-    match code {
-        "KeyA" => Some((0x1E, false)),
-        "KeyB" => Some((0x30, false)),
-        "KeyC" => Some((0x2E, false)),
-        "KeyD" => Some((0x20, false)),
-        "KeyE" => Some((0x12, false)),
-        "KeyF" => Some((0x21, false)),
-        "KeyG" => Some((0x22, false)),
-        "KeyH" => Some((0x23, false)),
-        "KeyI" => Some((0x17, false)),
-        "KeyJ" => Some((0x24, false)),
-        "KeyK" => Some((0x25, false)),
-        "KeyL" => Some((0x26, false)),
-        "KeyM" => Some((0x32, false)),
-        "KeyN" => Some((0x31, false)),
-        "KeyO" => Some((0x18, false)),
-        "KeyP" => Some((0x19, false)),
-        "KeyQ" => Some((0x10, false)),
-        "KeyR" => Some((0x13, false)),
-        "KeyS" => Some((0x1F, false)),
-        "KeyT" => Some((0x14, false)),
-        "KeyU" => Some((0x16, false)),
-        "KeyV" => Some((0x2F, false)),
-        "KeyW" => Some((0x11, false)),
-        "KeyX" => Some((0x2D, false)),
-        "KeyY" => Some((0x15, false)),
-        "KeyZ" => Some((0x2C, false)),
-        "Digit0" => Some((0x0B, false)),
-        "Digit1" => Some((0x02, false)),
-        "Digit2" => Some((0x03, false)),
-        "Digit3" => Some((0x04, false)),
-        "Digit4" => Some((0x05, false)),
-        "Digit5" => Some((0x06, false)),
-        "Digit6" => Some((0x07, false)),
-        "Digit7" => Some((0x08, false)),
-        "Digit8" => Some((0x09, false)),
-        "Digit9" => Some((0x0A, false)),
-        "Minus" => Some((0x0C, false)),
-        "Equal" => Some((0x0D, false)),
-        "Backspace" => Some((0x0E, false)),
-        "Tab" => Some((0x0F, false)),
-        "BracketLeft" => Some((0x1A, false)),
-        "BracketRight" => Some((0x1B, false)),
-        "Enter" => Some((0x1C, false)),
-        "ControlLeft" => Some((0x1D, false)),
-        "ControlRight" => Some((0x1D, true)),
-        "Semicolon" => Some((0x27, false)),
-        "Quote" => Some((0x28, false)),
-        "Backquote" => Some((0x29, false)),
-        "ShiftLeft" => Some((0x2A, false)),
-        "Backslash" => Some((0x2B, false)),
-        "ShiftRight" => Some((0x36, false)),
-        "AltLeft" => Some((0x38, false)),
-        "AltRight" => Some((0x38, true)),
-        "Space" => Some((0x39, false)),
-        "CapsLock" => Some((0x3A, false)),
-        "Escape" => Some((0x01, false)),
-        "ArrowUp" => Some((0x48, true)),
-        "ArrowDown" => Some((0x50, true)),
-        "ArrowLeft" => Some((0x4B, true)),
-        "ArrowRight" => Some((0x4D, true)),
-        "Insert" => Some((0x52, true)),
-        "Delete" => Some((0x53, true)),
-        "Home" => Some((0x47, true)),
-        "End" => Some((0x4F, true)),
-        "PageUp" => Some((0x49, true)),
-        "PageDown" => Some((0x51, true)),
-        "MetaLeft" => Some((0x5B, true)),
-        "MetaRight" => Some((0x5C, true)),
-        _ => None,
-    }
 }
 
 fn run_deactivation_reactivation(
@@ -1284,5 +1660,107 @@ mod danger {
                 SignatureScheme::ED448,
             ]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+
+    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ])
+    }
+
+    #[test]
+    fn should_encode_video_packet_with_frame_commit() {
+        let rect = VideoRectChunk {
+            x: 4,
+            y: 6,
+            width: 12,
+            height: 10,
+            raw_size: 480,
+            compression: COMPRESSION_NONE,
+            payload: vec![7u8; 480],
+        };
+
+        let packet = build_video_rects_packet(42, 1280, 720, 90_000, &[rect], true, true)
+            .expect("video packet should encode");
+
+        assert_eq!(&packet[0..4], VIDEO_PACKET_MAGIC);
+        assert_eq!(packet[4], PACKET_VERSION);
+        assert_eq!(packet[5] & VIDEO_FRAME_BEGIN, VIDEO_FRAME_BEGIN);
+        assert_eq!(packet[5] & VIDEO_FRAME_END, VIDEO_FRAME_END);
+        assert_eq!(read_u64(&packet, 8), 42);
+        assert_eq!(read_u16(&packet, 16), 1280);
+        assert_eq!(read_u16(&packet, 18), 720);
+        assert_eq!(read_u16(&packet, 20), 1);
+        assert_eq!(read_u64(&packet, 24), 90_000);
+
+        let rect_offset = VIDEO_PACKET_HEADER_LEN;
+        assert_eq!(read_u16(&packet, rect_offset), 4);
+        assert_eq!(read_u16(&packet, rect_offset + 2), 6);
+        assert_eq!(read_u16(&packet, rect_offset + 4), 12);
+        assert_eq!(read_u16(&packet, rect_offset + 6), 10);
+        assert_eq!(packet[rect_offset + 8], COMPRESSION_NONE);
+        assert_eq!(read_u32(&packet, rect_offset + 12), 480);
+        assert_eq!(read_u32(&packet, rect_offset + 16), 480);
+    }
+
+    #[test]
+    fn should_encode_cursor_bitmap_payload() {
+        let bitmap = vec![0xAAu8; 4 * 8 * 8];
+        let packet = build_cursor_packet(
+            CURSOR_KIND_BITMAP,
+            0,
+            0,
+            2,
+            3,
+            8,
+            8,
+            Some(bitmap.as_slice()),
+        )
+        .expect("cursor packet should encode");
+
+        assert_eq!(&packet[0..4], CURSOR_PACKET_MAGIC);
+        assert_eq!(packet[4], PACKET_VERSION);
+        assert_eq!(packet[5], CURSOR_KIND_BITMAP);
+        assert_eq!(read_u16(&packet, 12), 2);
+        assert_eq!(read_u16(&packet, 14), 3);
+        assert_eq!(read_u16(&packet, 16), 8);
+        assert_eq!(read_u16(&packet, 18), 8);
+
+        let payload_len = read_u32(&packet, 20) as usize;
+        assert_eq!(packet.len(), CURSOR_PACKET_HEADER_LEN + payload_len);
+        assert!(payload_len > 0);
+    }
+
+    #[test]
+    fn should_keep_interpolated_route_continuous() {
+        let points = interpolate_pointer_route(0, 0, 400, 0);
+        assert!(points.len() > 2);
+        assert_eq!(points.last().copied(), Some((400, 0)));
+        assert!(points.windows(2).all(|pair| pair[1].0 >= pair[0].0));
     }
 }
