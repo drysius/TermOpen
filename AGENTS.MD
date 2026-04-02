@@ -8,6 +8,12 @@ TermOpen is a desktop SSH/SFTP workspace (Tauri + React) with:
 - profile sync with Google Drive,
 - custom desktop shell (header/sidebar/tabs/workspaces).
 
+## Platform Support
+- Official targets: Windows, Linux, macOS.
+- Native global input capture (`key_actions`) is supported on Windows and macOS.
+- On Linux, native global input capture is supported on X11 in this phase.
+- Wayland capture is explicitly out of scope for now and should surface as unavailable status in block UI.
+
 ## Core Runtime Map
 Frontend (React/TS):
 - `src/App.tsx`: shell, routing, tabs/workspaces mount, startup/lifecycle dialogs.

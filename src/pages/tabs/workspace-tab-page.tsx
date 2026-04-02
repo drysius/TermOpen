@@ -33,10 +33,11 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
 import type {
   ClipboardLocalItem,
+  KeyActionsActiveTargetInput,
+  KeyActionsStatusPayload,
   RemoteTransferEndpoint,
-  RdpInputBatch,
-  RdpInputEvent,
   RdpSessionControlEvent,
+  SurfaceRect,
   SftpEntry,
 } from "@/types/termopen";
 import editorWorkspace from "@/pages/tabs/workspace/editor";
@@ -86,6 +87,64 @@ const workspaceModules = {
   editor: editorWorkspace,
 } as const;
 
+type TerminalCaptureContext = {
+  surface_rect: SurfaceRect;
+  dpi_scale: number;
+  cols: number;
+  rows: number;
+};
+
+function areSurfaceRectsEqual(left: SurfaceRect | null | undefined, right: SurfaceRect | null | undefined): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  );
+}
+
+function areTerminalCaptureContextsEqual(
+  left: TerminalCaptureContext | null | undefined,
+  right: TerminalCaptureContext | null | undefined,
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    areSurfaceRectsEqual(left.surface_rect, right.surface_rect) &&
+    left.dpi_scale === right.dpi_scale &&
+    left.cols === right.cols &&
+    left.rows === right.rows
+  );
+}
+
+function areKeyActionStatusesEqual(
+  left: KeyActionsStatusPayload | null,
+  right: KeyActionsStatusPayload | null,
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.status === right.status &&
+    left.reason === right.reason &&
+    left.platform === right.platform &&
+    left.details === right.details
+  );
+}
+
 function profileProtocols(profile: { protocols?: string[]; kind?: string | null }): string[] {
   if (Array.isArray(profile.protocols) && profile.protocols.length > 0) {
     return profile.protocols;
@@ -114,6 +173,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const sessions = useAppStore((state) => state.sessions);
   const connections = useAppStore((state) => state.connections);
   const settings = useAppStore((state) => state.settings);
+  const activeTabId = useAppStore((state) => state.activeTabId);
   const sshWrite = useAppStore((state) => state.sshWrite);
   const ensureSessionListeners = useAppStore((state) => state.ensureSessionListeners);
   const disconnectSession = useAppStore((state) => state.disconnectSession);
@@ -146,12 +206,15 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const [focusedBlockId, setFocusedBlockId] = useState<string | null>(initialBlocks[0]?.id ?? null);
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [snapPreview, setSnapPreview] = useState<WorkspaceBlockLayout | null>(null);
+  const [keyActionsStatus, setKeyActionsStatus] = useState<KeyActionsStatusPayload | null>(null);
+  const [captureContextVersion, setCaptureContextVersion] = useState(0);
   const connectRetryTimersRef = useRef<Record<string, { retryTimer: number; countdownTimer: number }>>({});
   const rdpStreamSessionByBlockRef = useRef<Map<string, string>>(new Map());
   const rdpStreamTokenByBlockRef = useRef<Map<string, string>>(new Map());
-  const rdpInputQueueByBlockRef = useRef<Map<string, RdpInputEvent[]>>(new Map());
-  const rdpInputFlushTimerByBlockRef = useRef<Map<string, number>>(new Map());
   const rdpLastFrameAtByBlockRef = useRef<Map<string, number>>(new Map());
+  const rdpSurfaceRectByBlockRef = useRef<Map<string, SurfaceRect>>(new Map());
+  const terminalCaptureByBlockRef = useRef<Map<string, TerminalCaptureContext>>(new Map());
+  const lastPublishedKeyActionsTargetRef = useRef<string | null>(null);
 
   const clearBlockRetryTimers = useCallback((blockId: string) => {
     const active = connectRetryTimersRef.current[blockId];
@@ -305,6 +368,118 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    void listen<KeyActionsStatusPayload>("key_actions:status", (event) => {
+      if (!disposed) {
+        const next = event.payload ?? null;
+        setKeyActionsStatus((current) => (areKeyActionStatusesEqual(current, next) ? current : next));
+      }
+    })
+      .then((off) => {
+        if (disposed) {
+          off();
+          return;
+        }
+        unlisten = off;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  const captureUnavailableMessage = useMemo(() => {
+    if (!keyActionsStatus || keyActionsStatus.status !== "disabled") {
+      return null;
+    }
+    if (keyActionsStatus.reason === "wayland_not_supported") {
+      return t.workspace.captureDisabledWayland;
+    }
+    if (keyActionsStatus.reason === "macos_accessibility_required") {
+      return t.workspace.captureDisabledPermission;
+    }
+    return t.workspace.captureDisabledGeneric;
+  }, [
+    keyActionsStatus,
+    t.workspace.captureDisabledGeneric,
+    t.workspace.captureDisabledPermission,
+    t.workspace.captureDisabledWayland,
+  ]);
+
+  const publishKeyActionsTarget = useCallback(() => {
+    const isTabActive = activeTabId === tabId;
+    if (!isTabActive) {
+      if (activeTabId === null) {
+        const serialized = "null";
+        if (lastPublishedKeyActionsTargetRef.current !== serialized) {
+          lastPublishedKeyActionsTargetRef.current = serialized;
+          void api.keyActionsSetActiveWorkspace(null).catch(() => undefined);
+        }
+      }
+      return;
+    }
+
+    let target: KeyActionsActiveTargetInput | null = null;
+    const focused = focusedBlockId
+      ? blocksRef.current.find((block) => block.id === focusedBlockId) ?? null
+      : null;
+
+    if (focused?.kind === "rdp" && focused.sessionId && focused.connectStage === "ready") {
+      const surface = rdpSurfaceRectByBlockRef.current.get(focused.id);
+      if (surface && focused.imageWidth > 0 && focused.imageHeight > 0) {
+        const sessionId = rdpStreamSessionByBlockRef.current.get(focused.id) ?? focused.sessionId;
+        if (sessionId) {
+          target = {
+            kind: "rdp",
+            session_id: sessionId,
+            tab_id: tabId,
+            block_id: focused.id,
+            surface_rect: surface,
+            dpi_scale: window.devicePixelRatio || 1,
+            remote_width: focused.imageWidth,
+            remote_height: focused.imageHeight,
+          };
+        }
+      }
+    } else if (
+      focused?.kind === "terminal" &&
+      focused.sessionId &&
+      focused.connectStage === "ready"
+    ) {
+      const hasLiveSession = sessions.some((item) => item.session_id === focused.sessionId);
+      const capture = terminalCaptureByBlockRef.current.get(focused.id);
+      if (hasLiveSession && capture && capture.cols > 0 && capture.rows > 0) {
+        target = {
+          kind: "ssh",
+          session_id: focused.sessionId,
+          tab_id: tabId,
+          block_id: focused.id,
+          surface_rect: capture.surface_rect,
+          dpi_scale: capture.dpi_scale,
+          cols: capture.cols,
+          rows: capture.rows,
+        };
+      }
+    }
+
+    const serialized = JSON.stringify(target);
+    if (lastPublishedKeyActionsTargetRef.current === serialized) {
+      return;
+    }
+    lastPublishedKeyActionsTargetRef.current = serialized;
+    void api.keyActionsSetActiveWorkspace(target).catch(() => undefined);
+  }, [activeTabId, focusedBlockId, sessions, tabId]);
+
+  useEffect(() => {
+    publishKeyActionsTarget();
+  }, [blocks, captureContextVersion, focusedBlockId, publishKeyActionsTarget]);
 
   const sessionLabelById = useMemo(() => {
     const map = new Map<string, string>();
@@ -527,6 +702,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       clearBlockRetryTimers(id);
       rdpStreamTokenByBlockRef.current.delete(id);
       rdpLastFrameAtByBlockRef.current.delete(id);
+      rdpSurfaceRectByBlockRef.current.delete(id);
+      terminalCaptureByBlockRef.current.delete(id);
+      setCaptureContextVersion((value) => value + 1);
 
       if (targetBlock?.kind === "rdp") {
         const sessionId = rdpStreamSessionByBlockRef.current.get(id) ?? targetBlock.sessionId;
@@ -535,12 +713,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         }
       }
 
-      const flushTimer = rdpInputFlushTimerByBlockRef.current.get(id);
-      if (flushTimer) {
-        window.clearTimeout(flushTimer);
-      }
-      rdpInputFlushTimerByBlockRef.current.delete(id);
-      rdpInputQueueByBlockRef.current.delete(id);
       rdpStreamSessionByBlockRef.current.delete(id);
 
       const resolveSessionInUse = (sessionId: string) =>
@@ -1451,44 +1623,10 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         passwordOverride?: string | null;
         saveAuthChoice?: boolean;
         retryAttempt?: number;
-        inputEvents?: RdpInputEvent[];
       },
     ) => {
       const target = blocksRef.current.find((item): item is RdpBlock => item.id === blockId && item.kind === "rdp");
       if (!target) {
-        return;
-      }
-
-      const inputEvents = options?.inputEvents ?? [];
-      if (inputEvents.length > 0) {
-        const sessionId = rdpStreamSessionByBlockRef.current.get(blockId);
-        if (!sessionId) {
-          return;
-        }
-
-        const queue = rdpInputQueueByBlockRef.current.get(blockId) ?? [];
-        queue.push(...inputEvents.slice(0, 32));
-        if (queue.length > 96) {
-          queue.splice(0, queue.length - 96);
-        }
-        rdpInputQueueByBlockRef.current.set(blockId, queue);
-
-        if (!rdpInputFlushTimerByBlockRef.current.has(blockId)) {
-          const timer = window.setTimeout(() => {
-            rdpInputFlushTimerByBlockRef.current.delete(blockId);
-            const pending = rdpInputQueueByBlockRef.current.get(blockId) ?? [];
-            rdpInputQueueByBlockRef.current.set(blockId, []);
-            const currentSessionId = rdpStreamSessionByBlockRef.current.get(blockId);
-            if (!currentSessionId || pending.length === 0) {
-              return;
-            }
-            const batch: RdpInputBatch = { events: pending };
-            void api.rdpInputBatch(currentSessionId, batch).catch((error) => {
-              appendWorkspaceLog("warn", "Falha ao enviar input RDP", getError(error));
-            });
-          }, 14);
-          rdpInputFlushTimerByBlockRef.current.set(blockId, timer);
-        }
         return;
       }
 
@@ -1521,13 +1659,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         rdpStreamSessionByBlockRef.current.delete(blockId);
         void api.rdpSessionStop(previousSessionId).catch(() => undefined);
       }
-      const pendingFlush = rdpInputFlushTimerByBlockRef.current.get(blockId);
-      if (pendingFlush) {
-        window.clearTimeout(pendingFlush);
-        rdpInputFlushTimerByBlockRef.current.delete(blockId);
-      }
       rdpLastFrameAtByBlockRef.current.delete(blockId);
-      rdpInputQueueByBlockRef.current.set(blockId, []);
       clearBlockRetryTimers(blockId);
 
       setBlocks((current) =>
@@ -1860,17 +1992,16 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
   useEffect(() => {
     return () => {
-      rdpInputFlushTimerByBlockRef.current.forEach((timer) => {
-        window.clearTimeout(timer);
-      });
-      rdpInputFlushTimerByBlockRef.current.clear();
-      rdpInputQueueByBlockRef.current.clear();
       rdpStreamTokenByBlockRef.current.clear();
       rdpLastFrameAtByBlockRef.current.clear();
+      rdpSurfaceRectByBlockRef.current.clear();
+      terminalCaptureByBlockRef.current.clear();
+      lastPublishedKeyActionsTargetRef.current = null;
       rdpStreamSessionByBlockRef.current.forEach((sessionId) => {
         void api.rdpSessionStop(sessionId).catch(() => undefined);
       });
       rdpStreamSessionByBlockRef.current.clear();
+      void api.keyActionsSetActiveWorkspace(null).catch(() => undefined);
     };
   }, []);
 
@@ -3179,6 +3310,25 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
               ? terminalWorkspace.render({
                   block,
                   sessionOptions: terminalOptions,
+                  useBackendCaptureInput:
+                    activeTabId === tabId &&
+                    focusedBlockId === block.id &&
+                    keyActionsStatus?.status === "ready",
+                  captureUnavailableMessage:
+                    focusedBlockId === block.id ? captureUnavailableMessage : null,
+                  onCaptureContextChange: (context) => {
+                    const current = terminalCaptureByBlockRef.current.get(block.id) ?? null;
+                    const next = context ?? null;
+                    if (areTerminalCaptureContextsEqual(current, next)) {
+                      return;
+                    }
+                    if (next) {
+                      terminalCaptureByBlockRef.current.set(block.id, next);
+                    } else {
+                      terminalCaptureByBlockRef.current.delete(block.id);
+                    }
+                    setCaptureContextVersion((value) => value + 1);
+                  },
                   onSessionChange: (nextSessionId) => {
                     notifyModuleDropdownSelect("terminal", block.id, "session_select", nextSessionId);
                     const nextHost = sessionHostById.get(nextSessionId) ?? nextSessionId.slice(0, 8);
@@ -3404,6 +3554,8 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                   block,
                   active: focusedBlockId === block.id,
                   profiles: rdpProfiles,
+                  captureUnavailableMessage:
+                    focusedBlockId === block.id ? captureUnavailableMessage : null,
                   onFocus: () => focusBlock(block.id),
                   onProfileChange: (profileId) => {
                     notifyModuleDropdownSelect("rdp", block.id, "profile_select", profileId);
@@ -3429,16 +3581,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                     );
                     void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
                   },
-                  onInteract: (inputEvents) => {
-                    if (inputEvents.length === 0) {
-                      return;
-                    }
-                    clearBlockRetryTimers(block.id);
-                    void resolvePendingRdpConnection(block.id, {
-                      retryAttempt: 0,
-                      inputEvents,
-                    });
-                  },
                   onRetry: () => {
                     clearBlockRetryTimers(block.id);
                     setBlocks((current) =>
@@ -3451,6 +3593,16 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
                     void resolvePendingRdpConnection(block.id, { retryAttempt: 0 });
                   },
                   onFocusChange: (focus) => {
+                    const currentRect = rdpSurfaceRectByBlockRef.current.get(block.id) ?? null;
+                    const nextRect = focus.surface_rect ?? null;
+                    if (!areSurfaceRectsEqual(currentRect, nextRect)) {
+                      if (nextRect) {
+                        rdpSurfaceRectByBlockRef.current.set(block.id, nextRect);
+                      } else {
+                        rdpSurfaceRectByBlockRef.current.delete(block.id);
+                      }
+                      setCaptureContextVersion((value) => value + 1);
+                    }
                     const sessionId = rdpStreamSessionByBlockRef.current.get(block.id) ?? block.sessionId;
                     if (!sessionId) {
                       return;

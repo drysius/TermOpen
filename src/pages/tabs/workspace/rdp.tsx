@@ -3,7 +3,6 @@ import {
   useCallback,
   useEffect,
   useRef,
-  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
@@ -12,7 +11,6 @@ import { useT } from "@/langs";
 import { cn } from "@/lib/utils";
 import type {
   ConnectionProfile,
-  RdpInputEvent,
   RdpSessionFocusInput,
 } from "@/types/termopen";
 import {
@@ -27,9 +25,9 @@ export interface RdpBlockViewProps {
   block: RdpBlock;
   active: boolean;
   profiles: ConnectionProfile[];
+  captureUnavailableMessage?: string | null;
   onFocus: () => void;
   onProfileChange: (profileId: string) => void;
-  onInteract: (inputEvents: RdpInputEvent[]) => void;
   onFocusChange: (focus: RdpSessionFocusInput) => void;
   onRetry: () => void;
   onPasswordDraftChange: (value: string) => void;
@@ -70,9 +68,9 @@ export function RdpBlockView({
   block,
   active,
   profiles,
+  captureUnavailableMessage,
   onFocus,
   onProfileChange,
-  onInteract,
   onFocusChange,
   onRetry,
   onPasswordDraftChange,
@@ -91,27 +89,7 @@ export function RdpBlockView({
     canvasWidth: 0,
     canvasHeight: 0,
   });
-  const lastMoveSentAtRef = useRef(0);
-  const pressedButtonsRef = useRef<Record<"left" | "right" | "middle", boolean>>({
-    left: false,
-    right: false,
-    middle: false,
-  });
-  const lastInputPointerRef = useRef<{ x: number; y: number } | null>(null);
   const isConnected = block.connectStage === "ready" && block.imageWidth > 0 && block.imageHeight > 0;
-
-  const pointerButtonToMouseButton = useCallback((button: number): "left" | "right" | "middle" | null => {
-    if (button === 0) {
-      return "left";
-    }
-    if (button === 1) {
-      return "middle";
-    }
-    if (button === 2) {
-      return "right";
-    }
-    return null;
-  }, []);
 
   const ensureSurface = useCallback((width: number, height: number): HTMLCanvasElement | null => {
     if (width <= 0 || height <= 0) {
@@ -278,6 +256,7 @@ export function RdpBlockView({
     }
     const observer = new ResizeObserver(() => {
       drawFrame();
+      const bounds = canvas.getBoundingClientRect();
       onFocusChange({
         focused: active,
         viewport_rect: {
@@ -286,6 +265,12 @@ export function RdpBlockView({
           width: Math.max(1, Math.floor(canvas.clientWidth)),
           height: Math.max(1, Math.floor(canvas.clientHeight)),
         },
+        surface_rect: {
+          x: bounds.left,
+          y: bounds.top,
+          width: Math.max(1, bounds.width),
+          height: Math.max(1, bounds.height),
+        },
         dpi_scale: window.devicePixelRatio || 1,
       });
     });
@@ -293,38 +278,9 @@ export function RdpBlockView({
     return () => observer.disconnect();
   }, [active, drawFrame, onFocusChange]);
 
-  const mapClientToRemote = useCallback(
-    (clientX: number, clientY: number) => {
-      const canvas = canvasRef.current;
-      if (!canvas || block.imageWidth <= 0 || block.imageHeight <= 0) {
-        return null;
-      }
-
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {
-        return null;
-      }
-
-      const canvasX = ((clientX - rect.left) / rect.width) * canvas.width;
-      const canvasY = ((clientY - rect.top) / rect.height) * canvas.height;
-      const drawRect = drawRectRef.current;
-      const drawWidth = Math.max(1, drawRect.width);
-      const drawHeight = Math.max(1, drawRect.height);
-
-      const normalizedX = (canvasX - drawRect.x) / drawWidth;
-      const normalizedY = (canvasY - drawRect.y) / drawHeight;
-      const clampedX = Math.max(0, Math.min(1, normalizedX));
-      const clampedY = Math.max(0, Math.min(1, normalizedY));
-
-      const x = Math.round(clampedX * Math.max(0, block.imageWidth - 1));
-      const y = Math.round(clampedY * Math.max(0, block.imageHeight - 1));
-      return { x, y };
-    },
-    [block.imageHeight, block.imageWidth],
-  );
-
   const emitFocusedState = useCallback((focused: boolean) => {
     const canvas = canvasRef.current;
+    const bounds = canvas?.getBoundingClientRect();
     onFocusChange({
       focused,
       viewport_rect: canvas
@@ -335,77 +291,17 @@ export function RdpBlockView({
             height: Math.max(1, Math.floor(canvas.clientHeight)),
           }
         : null,
+      surface_rect: bounds
+        ? {
+            x: bounds.left,
+            y: bounds.top,
+            width: Math.max(1, bounds.width),
+            height: Math.max(1, bounds.height),
+          }
+        : null,
       dpi_scale: window.devicePixelRatio || 1,
     });
   }, [onFocusChange]);
-
-  const rememberInputCursorPosition = useCallback((x: number, y: number) => {
-    cursorRef.current = {
-      ...cursorRef.current,
-      x,
-      y,
-    };
-  }, []);
-
-  const resolveCurrentPointerPosition = useCallback((): { x: number; y: number } | null => {
-    if (lastInputPointerRef.current) {
-      return lastInputPointerRef.current;
-    }
-    if (block.imageWidth <= 0 || block.imageHeight <= 0) {
-      return null;
-    }
-    const cursor = cursorRef.current;
-    return {
-      x: Math.max(0, Math.min(block.imageWidth - 1, cursor.x)),
-      y: Math.max(0, Math.min(block.imageHeight - 1, cursor.y)),
-    };
-  }, [block.imageHeight, block.imageWidth]);
-
-  const releaseAllPressedButtons = useCallback(() => {
-    if (!isConnected) {
-      pressedButtonsRef.current.left = false;
-      pressedButtonsRef.current.right = false;
-      pressedButtonsRef.current.middle = false;
-      return;
-    }
-
-    const point = resolveCurrentPointerPosition();
-    if (!point) {
-      pressedButtonsRef.current.left = false;
-      pressedButtonsRef.current.right = false;
-      pressedButtonsRef.current.middle = false;
-      return;
-    }
-
-    const events: RdpInputEvent[] = [];
-    if (pressedButtonsRef.current.left) {
-      events.push({ kind: "mouse_button_up", x: point.x, y: point.y, button: "left" });
-      pressedButtonsRef.current.left = false;
-    }
-    if (pressedButtonsRef.current.middle) {
-      events.push({ kind: "mouse_button_up", x: point.x, y: point.y, button: "middle" });
-      pressedButtonsRef.current.middle = false;
-    }
-    if (pressedButtonsRef.current.right) {
-      events.push({ kind: "mouse_button_up", x: point.x, y: point.y, button: "right" });
-      pressedButtonsRef.current.right = false;
-    }
-
-    if (events.length > 0) {
-      onInteract(events);
-    }
-  }, [isConnected, onInteract, resolveCurrentPointerPosition]);
-
-  const hasPressedButtons = useCallback(() => {
-    const pressed = pressedButtonsRef.current;
-    return pressed.left || pressed.middle || pressed.right;
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      releaseAllPressedButtons();
-    };
-  }, [releaseAllPressedButtons]);
 
   const handleCanvasPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -413,172 +309,18 @@ export function RdpBlockView({
       event.preventDefault();
       event.stopPropagation();
       event.currentTarget.focus();
-      try {
-        event.currentTarget.setPointerCapture(event.pointerId);
-      } catch {
-        // Ignore capture failures.
-      }
-
-      const remotePoint = mapClientToRemote(event.clientX, event.clientY);
-      if (!remotePoint) {
-        return;
-      }
-      lastInputPointerRef.current = remotePoint;
-      rememberInputCursorPosition(remotePoint.x, remotePoint.y);
       emitFocusedState(true);
-
-      if (!isConnected) {
-        return;
-      }
-
-      const button = pointerButtonToMouseButton(event.button);
-      if (!button) {
-        return;
-      }
-      pressedButtonsRef.current[button] = true;
-      onInteract([{ kind: "mouse_button_down", x: remotePoint.x, y: remotePoint.y, button }]);
     },
-    [
-      emitFocusedState,
-      isConnected,
-      mapClientToRemote,
-      onFocus,
-      onInteract,
-      pointerButtonToMouseButton,
-      rememberInputCursorPosition,
-    ],
-  );
-
-  const handleCanvasPointerUp = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      const remotePoint = mapClientToRemote(event.clientX, event.clientY);
-      if (remotePoint) {
-        lastInputPointerRef.current = remotePoint;
-        rememberInputCursorPosition(remotePoint.x, remotePoint.y);
-      }
-
-      if (!isConnected || !remotePoint) {
-        const button = pointerButtonToMouseButton(event.button);
-        if (button) {
-          pressedButtonsRef.current[button] = false;
-        }
-        return;
-      }
-
-      const button = pointerButtonToMouseButton(event.button);
-      if (!button) {
-        return;
-      }
-
-      pressedButtonsRef.current[button] = false;
-      onInteract([{ kind: "mouse_button_up", x: remotePoint.x, y: remotePoint.y, button }]);
-      try {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      } catch {
-        // Ignore release failures.
-      }
-    },
-    [isConnected, mapClientToRemote, onInteract, pointerButtonToMouseButton, rememberInputCursorPosition],
-  );
-
-  const handleCanvasPointerMove = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      const remotePoint = mapClientToRemote(event.clientX, event.clientY);
-      if (!remotePoint) {
-        return;
-      }
-      lastInputPointerRef.current = remotePoint;
-      rememberInputCursorPosition(remotePoint.x, remotePoint.y);
-
-      if (!isConnected) {
-        return;
-      }
-
-      const now = Date.now();
-      if (now - lastMoveSentAtRef.current < 16) {
-        return;
-      }
-      lastMoveSentAtRef.current = now;
-      onInteract([
-        {
-          kind: "mouse_move",
-          x: remotePoint.x,
-          y: remotePoint.y,
-          t_ms: now,
-        },
-      ]);
-    },
-    [isConnected, mapClientToRemote, onInteract, rememberInputCursorPosition],
+    [emitFocusedState, onFocus],
   );
 
   const handleCanvasWheel = useCallback(
     (event: ReactWheelEvent<HTMLCanvasElement>) => {
-      if (!isConnected) {
-        return;
+      if (isConnected) {
+        event.preventDefault();
       }
-      const remotePoint = mapClientToRemote(event.clientX, event.clientY);
-      if (!remotePoint) {
-        return;
-      }
-      event.preventDefault();
-      lastInputPointerRef.current = remotePoint;
-      rememberInputCursorPosition(remotePoint.x, remotePoint.y);
-      onInteract([
-        {
-          kind: "mouse_scroll",
-          x: remotePoint.x,
-          y: remotePoint.y,
-          delta_x: Math.round(event.deltaX),
-          delta_y: Math.round(event.deltaY),
-        },
-      ]);
     },
-    [isConnected, mapClientToRemote, onInteract, rememberInputCursorPosition],
-  );
-
-  const handleCanvasKeyDown = useCallback(
-    (event: ReactKeyboardEvent<HTMLCanvasElement>) => {
-      if (!isConnected) {
-        return;
-      }
-
-      const actionKey =
-        event.key.length === 1 ||
-        event.ctrlKey ||
-        event.altKey ||
-        event.metaKey ||
-        event.code.startsWith("F") ||
-        event.key === "Enter" ||
-        event.key === "Backspace" ||
-        event.key === "Tab" ||
-        event.key === "Escape" ||
-        event.key.startsWith("Arrow") ||
-        event.key === "Delete" ||
-        event.key === "Home" ||
-        event.key === "End" ||
-        event.key === "PageUp" ||
-        event.key === "PageDown";
-
-      if (!actionKey) {
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      emitFocusedState(true);
-      onInteract([
-        {
-          kind: "key_press",
-          code: event.code,
-          text: event.key.length === 1 ? event.key : null,
-          ctrl: event.ctrlKey,
-          alt: event.altKey,
-          shift: event.shiftKey,
-          meta: event.metaKey,
-        },
-      ]);
-    },
-    [emitFocusedState, isConnected, onInteract],
+    [isConnected],
   );
 
   const statusMessage = block.connectMessage;
@@ -616,25 +358,19 @@ export function RdpBlockView({
               "cursor-default",
             )}
             onPointerDown={handleCanvasPointerDown}
-            onPointerUp={handleCanvasPointerUp}
-            onPointerCancel={handleCanvasPointerUp}
-            onPointerMove={handleCanvasPointerMove}
             onPointerEnter={() => emitFocusedState(true)}
-            onPointerLeave={() => {
-              lastInputPointerRef.current = null;
-              if (!hasPressedButtons()) {
-                emitFocusedState(false);
-              }
-            }}
+            onPointerLeave={() => emitFocusedState(false)}
             onFocus={() => emitFocusedState(true)}
-            onBlur={() => {
-              releaseAllPressedButtons();
-              emitFocusedState(false);
-            }}
+            onBlur={() => emitFocusedState(false)}
             onWheel={handleCanvasWheel}
-            onKeyDown={handleCanvasKeyDown}
             onContextMenu={(event) => event.preventDefault()}
           />
+
+          {isConnected && captureUnavailableMessage ? (
+            <div className="absolute left-3 right-3 top-3 z-20 rounded border border-amber-300/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              {captureUnavailableMessage}
+            </div>
+          ) : null}
 
           {!isConnected ? (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-zinc-950/80 p-3">

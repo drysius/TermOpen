@@ -93,6 +93,15 @@ pub struct RdpViewportRect {
     pub height: u16,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdpSurfaceRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdpSessionFocusInput {
@@ -101,6 +110,8 @@ pub struct RdpSessionFocusInput {
     pub viewport_rect: Option<RdpViewportRect>,
     #[serde(default)]
     pub dpi_scale: Option<f64>,
+    #[serde(default)]
+    pub surface_rect: Option<RdpSurfaceRect>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -321,6 +332,7 @@ fn emit_binary_packet(channel: &Arc<Channel<InvokeResponseBody>>, packet: Vec<u8
 struct SessionFocusState {
     focused: bool,
     viewport_rect: Option<RdpViewportRect>,
+    surface_rect: Option<RdpSurfaceRect>,
     dpi_scale: f64,
     pending_resize: Option<(u16, u16)>,
 }
@@ -335,6 +347,7 @@ impl SessionFocusState {
                 width,
                 height,
             }),
+            surface_rect: None,
             dpi_scale: 1.0,
             pending_resize: None,
         }
@@ -364,6 +377,10 @@ impl SessionFocusState {
             if changed {
                 self.pending_resize = Some((next_width, next_height));
             }
+        }
+
+        if let Some(surface) = update.surface_rect {
+            self.surface_rect = Some(surface);
         }
     }
 

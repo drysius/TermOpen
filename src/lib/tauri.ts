@@ -4,6 +4,7 @@ import type {
   AppSettings,
   AuthServer,
   BinaryPreviewResult,
+  KeyActionsActiveTargetInput,
   ClipboardLocalItem,
   ConnectionProfile,
   DebugLogEntry,
@@ -118,6 +119,8 @@ export const api = {
   rdpInputBatch: (sessionId: string, batch: RdpInputBatch) =>
     invoke<void>("rdp_input_batch", { sessionId, batch }),
   rdpSessionStop: (sessionId: string) => invoke<void>("rdp_session_stop", { sessionId }),
+  keyActionsSetActiveWorkspace: (target?: KeyActionsActiveTargetInput | null) =>
+    invoke<void>("key_actions_set_active_workspace", { target }),
   sshWrite: (sessionId: string, data: string) => invoke<string>("ssh_write", { sessionId, data }),
   sshResize: (sessionId: string, cols: number, rows: number) => invoke<void>("ssh_resize", { sessionId, cols, rows }),
   sshDisconnect: (sessionId: string) => invoke<void>("ssh_disconnect", { sessionId }),

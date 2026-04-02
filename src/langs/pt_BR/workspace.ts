@@ -15,6 +15,9 @@ export const workspace: AppDictionary["workspace"] = {
   closeMessage: 'Deseja realmente fechar "{title}"? Isso encerrara as sessoes associadas.',
   closing: "Fechando...",
   closeConfirm: "Fechar Workspace",
+  captureDisabledGeneric: "Captura nativa de teclado/mouse indisponível no momento.",
+  captureDisabledWayland: "Captura global no Linux ainda não suporta Wayland nesta fase (use X11).",
+  captureDisabledPermission: "Permissão de acessibilidade ausente. Autorize o app para captura global.",
   rdp: {
     title: "Desktop Remoto",
     description: "Conecte um perfil RDP e visualize o frame remoto com atualizacao rapida.",

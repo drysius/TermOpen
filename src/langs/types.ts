@@ -413,6 +413,9 @@ export interface AppDictionary {
     closeMessage: string;
     closing: string;
     closeConfirm: string;
+    captureDisabledGeneric: string;
+    captureDisabledWayland: string;
+    captureDisabledPermission: string;
     rdp: {
       title: string;
       description: string;

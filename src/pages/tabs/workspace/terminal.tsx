@@ -10,6 +10,7 @@ import { useAppStore } from "@/store/app-store";
 
 import type { TerminalBlock } from "./types";
 import type { WorkspaceBlockModule } from "./block-module";
+import type { SurfaceRect } from "@/types/termopen";
 
 function terminalDisconnectedLabel(sessionId: string | null): string {
   if (!sessionId) {
@@ -20,6 +21,14 @@ function terminalDisconnectedLabel(sessionId: string | null): string {
 export interface TerminalBlockViewProps {
   block: TerminalBlock;
   sessionOptions: Array<{ id: string; label: string }>;
+  useBackendCaptureInput?: boolean;
+  captureUnavailableMessage?: string | null;
+  onCaptureContextChange?: (context: {
+    surface_rect: SurfaceRect;
+    dpi_scale: number;
+    cols: number;
+    rows: number;
+  } | null) => void;
   onSessionChange: (sessionId: string) => void;
   ensureSessionListeners: (sessionId: string) => Promise<void>;
   sshWrite: (sessionId: string, data: string) => Promise<void>;
@@ -30,9 +39,46 @@ export interface TerminalBlockViewProps {
   onSubmitPassword: () => void;
 }
 
+type TerminalCaptureContext = {
+  surface_rect: SurfaceRect;
+  dpi_scale: number;
+  cols: number;
+  rows: number;
+};
+
+function areSurfaceRectsEqual(left: SurfaceRect, right: SurfaceRect): boolean {
+  return (
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  );
+}
+
+function areCaptureContextsEqual(
+  left: TerminalCaptureContext | null,
+  right: TerminalCaptureContext | null,
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    areSurfaceRectsEqual(left.surface_rect, right.surface_rect) &&
+    left.dpi_scale === right.dpi_scale &&
+    left.cols === right.cols &&
+    left.rows === right.rows
+  );
+}
+
 export function TerminalBlockView({
   block,
   sessionOptions,
+  useBackendCaptureInput,
+  captureUnavailableMessage,
+  onCaptureContextChange,
   onSessionChange,
   ensureSessionListeners,
   sshWrite,
@@ -43,7 +89,6 @@ export function TerminalBlockView({
   onSubmitPassword,
 }: TerminalBlockViewProps) {
   const { sessionId } = block;
-  const settings = useAppStore((state) => state.settings);
   const selectableSessions = useMemo(() => {
     if (!sessionId) {
       return [{ id: "", label: terminalDisconnectedLabel(null) }, ...sessionOptions];
@@ -58,7 +103,53 @@ export function TerminalBlockView({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const writtenRef = useRef(0);
-  const isConnected = block.connectStage === "ready" && !!sessionId;
+  const captureContextRef = useRef<TerminalCaptureContext | null>(null);
+  const onCaptureContextChangeRef = useRef(onCaptureContextChange);
+  const inputDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const hasLiveSession = !!sessionId && sessionOptions.some((option) => option.id === sessionId);
+  const isConnected = block.connectStage === "ready" && hasLiveSession;
+
+  useEffect(() => {
+    onCaptureContextChangeRef.current = onCaptureContextChange;
+  }, [onCaptureContextChange]);
+
+  const publishCaptureContext = useCallback((context: TerminalCaptureContext | null) => {
+    const callback = onCaptureContextChangeRef.current;
+    if (!callback) {
+      captureContextRef.current = context;
+      return;
+    }
+    if (areCaptureContextsEqual(captureContextRef.current, context)) {
+      return;
+    }
+    captureContextRef.current = context;
+    callback(context);
+  }, []);
+
+  const emitCaptureContext = useCallback(() => {
+    if (!isConnected || !sessionId) {
+      publishCaptureContext(null);
+      return;
+    }
+    const host = hostRef.current;
+    const term = termRef.current;
+    if (!host || !term) {
+      publishCaptureContext(null);
+      return;
+    }
+    const bounds = host.getBoundingClientRect();
+    publishCaptureContext({
+      surface_rect: {
+        x: bounds.left,
+        y: bounds.top,
+        width: Math.max(1, bounds.width),
+        height: Math.max(1, bounds.height),
+      },
+      dpi_scale: window.devicePixelRatio || 1,
+      cols: Math.max(1, term.cols),
+      rows: Math.max(1, term.rows),
+    });
+  }, [isConnected, publishCaptureContext, sessionId]);
 
   const safeResize = useCallback(() => {
     if (!sessionId) {
@@ -71,7 +162,12 @@ export function TerminalBlockView({
     }
     fit.fit();
     void api.sshResize(sessionId, term.cols, term.rows).catch(() => undefined);
-  }, [sessionId]);
+    emitCaptureContext();
+  }, [emitCaptureContext, sessionId]);
+
+  useEffect(() => {
+    emitCaptureContext();
+  }, [emitCaptureContext]);
 
   useEffect(() => {
     if (!sessionId || !isConnected) {
@@ -120,68 +216,23 @@ export function TerminalBlockView({
     terminal.open(host);
     fitAddon.fit();
 
-    const selectionDisposable = settings.terminal_copy_on_select
-      ? terminal.onSelectionChange(() => {
-          const selection = terminal.getSelection();
-          if (selection) {
-            void navigator.clipboard.writeText(selection).catch(() => undefined);
-          }
-        })
-      : null;
-
     const onContextMenu = (event: globalThis.MouseEvent) => {
-      if (!settings.terminal_right_click_paste) {
-        return;
-      }
       event.preventDefault();
-      void navigator.clipboard.readText().then((value) => {
-        if (value) {
-          void sshWrite(sessionId, value);
-        }
-      });
     };
     host.addEventListener("contextmenu", onContextMenu);
-
-    terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type !== "keydown") {
-        return true;
-      }
-      if (!settings.terminal_ctrl_shift_shortcuts) {
-        return true;
-      }
-      const key = event.key.toLowerCase();
-      if (event.ctrlKey && event.shiftKey && key === "c") {
-        const selection = terminal.getSelection();
-        if (selection) {
-          void navigator.clipboard.writeText(selection);
-        }
-        return false;
-      }
-      if (event.ctrlKey && event.shiftKey && key === "v") {
-        void navigator.clipboard.readText().then((value) => {
-          if (value) {
-            void sshWrite(sessionId, value);
-          }
-        });
-        return false;
-      }
-      return true;
-    });
-
-    const disposable = terminal.onData((data) => {
-      void sshWrite(sessionId, data);
-    });
 
     termRef.current = terminal;
     fitRef.current = fitAddon;
     writtenRef.current = 0;
 
     void api.sshResize(sessionId, terminal.cols, terminal.rows).catch(() => undefined);
+    emitCaptureContext();
     void sshWrite(sessionId, "");
 
     return () => {
-      disposable.dispose();
-      selectionDisposable?.dispose();
+      inputDisposableRef.current?.dispose();
+      inputDisposableRef.current = null;
+      publishCaptureContext(null);
       host.removeEventListener("contextmenu", onContextMenu);
       terminal.dispose();
       termRef.current = null;
@@ -189,13 +240,34 @@ export function TerminalBlockView({
       writtenRef.current = 0;
     };
   }, [
+    emitCaptureContext,
     isConnected,
     sessionId,
-    settings.terminal_copy_on_select,
-    settings.terminal_ctrl_shift_shortcuts,
-    settings.terminal_right_click_paste,
+    publishCaptureContext,
     sshWrite,
   ]);
+
+  useEffect(() => {
+    inputDisposableRef.current?.dispose();
+    inputDisposableRef.current = null;
+    if (!sessionId || !isConnected) {
+      return;
+    }
+    const terminal = termRef.current;
+    if (!terminal) {
+      return;
+    }
+    if (useBackendCaptureInput) {
+      return;
+    }
+    inputDisposableRef.current = terminal.onData((value) => {
+      void sshWrite(sessionId, value);
+    });
+    return () => {
+      inputDisposableRef.current?.dispose();
+      inputDisposableRef.current = null;
+    };
+  }, [isConnected, sessionId, sshWrite, useBackendCaptureInput]);
 
   useEffect(() => {
     if (!isConnected) {
@@ -261,6 +333,11 @@ export function TerminalBlockView({
         </div>
         <div className="relative min-h-0 flex-1 overflow-hidden px-1 py-1">
           <div ref={hostRef} className={cn("h-full w-full overflow-hidden", !isConnected ? "opacity-40" : "")} />
+          {isConnected && captureUnavailableMessage ? (
+            <div className="absolute left-3 right-3 top-3 z-20 rounded border border-amber-300/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              {captureUnavailableMessage}
+            </div>
+          ) : null}
           {!isConnected ? (
             <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80 p-3">
               <div className="w-full max-w-md rounded-lg border border-white/15 bg-zinc-950/95 p-4 shadow-2xl shadow-black/50">

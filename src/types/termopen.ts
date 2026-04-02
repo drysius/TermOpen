@@ -90,10 +90,18 @@ export interface RdpViewportRect {
   height: number;
 }
 
+export interface SurfaceRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface RdpSessionFocusInput {
   focused: boolean;
   viewport_rect?: RdpViewportRect | null;
   dpi_scale?: number | null;
+  surface_rect?: SurfaceRect | null;
 }
 
 export interface RdpPathPoint {
@@ -151,6 +159,35 @@ export type RdpInputEvent =
 
 export interface RdpInputBatch {
   events: RdpInputEvent[];
+}
+
+export type KeyActionsActiveTargetInput =
+  | {
+      kind: "rdp";
+      session_id: string;
+      tab_id: string;
+      block_id: string;
+      surface_rect: SurfaceRect;
+      dpi_scale?: number | null;
+      remote_width: number;
+      remote_height: number;
+    }
+  | {
+      kind: "ssh";
+      session_id: string;
+      tab_id: string;
+      block_id: string;
+      surface_rect: SurfaceRect;
+      dpi_scale?: number | null;
+      cols: number;
+      rows: number;
+    };
+
+export interface KeyActionsStatusPayload {
+  status: "ready" | "disabled";
+  reason?: string | null;
+  platform: string;
+  details?: string | null;
 }
 
 export type RdpSessionStartResult =

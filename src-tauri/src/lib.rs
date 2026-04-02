@@ -11,6 +11,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use key_actions::{KeyActionsActiveTargetInput, KeyActionsService};
 use models::{
     AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol,
     KeychainEntry, KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry,
@@ -30,6 +31,7 @@ use tokio::sync::Mutex;
 use vault::VaultManager;
 
 mod keyboard;
+mod key_actions;
 mod models;
 mod mouse;
 mod rdp;
@@ -44,6 +46,7 @@ struct AppState {
     vault: Mutex<VaultManager>,
     ssh: Mutex<SshManager>,
     rdp_sessions: Mutex<RdpSessionManager>,
+    key_actions: KeyActionsService,
     sync: Mutex<SyncManager>,
     deeplink_queue: StdMutex<Vec<String>>,
 }
@@ -963,6 +966,15 @@ async fn rdp_input_batch(
 async fn rdp_session_stop(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     let mut manager = state.rdp_sessions.lock().await;
     manager.stop(session_id.as_str()).map_err(app_error)
+}
+
+#[tauri::command]
+fn key_actions_set_active_workspace(
+    state: State<'_, AppState>,
+    target: Option<KeyActionsActiveTargetInput>,
+) -> Result<(), String> {
+    state.key_actions.set_active_target(target).map_err(app_error)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2653,6 +2665,7 @@ pub fn run() {
         vault: Mutex::new(vault),
         ssh: Mutex::new(SshManager::new()),
         rdp_sessions: Mutex::new(RdpSessionManager::default()),
+        key_actions: KeyActionsService::new(),
         sync: Mutex::new(SyncManager::new()),
         deeplink_queue: StdMutex::new(Vec::new()),
     });
@@ -2672,6 +2685,42 @@ pub fn run() {
     builder
         .setup(|app| {
             let app_handle = app.handle().clone();
+            let state = app.state::<AppState>();
+            state.key_actions.start(app_handle.clone());
+
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(position) = window.inner_position().or_else(|_| window.outer_position()) {
+                    state
+                        .key_actions
+                        .set_window_origin(position.x as f64, position.y as f64);
+                }
+                if let Ok(focused) = window.is_focused() {
+                    state.key_actions.set_window_focused(focused);
+                }
+
+                let key_actions_app = app_handle.clone();
+                let key_actions_window = window.clone();
+                window.on_window_event(move |event| {
+                    let shared = key_actions_app.state::<AppState>();
+                    match event {
+                        tauri::WindowEvent::Focused(focused) => {
+                            shared.key_actions.set_window_focused(*focused);
+                        }
+                        tauri::WindowEvent::Moved(_) => {
+                            if let Ok(position) = key_actions_window
+                                .inner_position()
+                                .or_else(|_| key_actions_window.outer_position())
+                            {
+                                shared
+                                    .key_actions
+                                    .set_window_origin(position.x as f64, position.y as f64);
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
+
             if let Ok(Some(urls)) = app.deep_link().get_current() {
                 for url in urls {
                     handle_deep_link_url(&app_handle, url.as_str());
@@ -2716,6 +2765,7 @@ pub fn run() {
             rdp_session_focus,
             rdp_input_batch,
             rdp_session_stop,
+            key_actions_set_active_workspace,
             ssh_write,
             ssh_resize,
             ssh_disconnect,

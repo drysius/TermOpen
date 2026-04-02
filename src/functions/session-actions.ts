@@ -269,8 +269,35 @@ export function createSessionActions(
       try {
         await api.sshWrite(sessionId, data);
       } catch (error) {
+        const message = getError(error);
         if (data.length > 0) {
-          toast.error(getError(error));
+          toast.error(message);
+        }
+
+        const missingSession = /sess[aã]o .*nao encontrada|sess[aã]o .*não encontrada|session .* not found/i.test(
+          message,
+        );
+        if (missingSession) {
+          get().clearSessionListeners(sessionId);
+          set((state) => {
+            const nextBuffers = { ...state.sessionBuffers };
+            delete nextBuffers[sessionId];
+            return {
+              sessions: state.sessions.filter((item) => item.session_id !== sessionId),
+              sessionBuffers: nextBuffers,
+              workspaceSessionsByTab: Object.fromEntries(
+                Object.entries(state.workspaceSessionsByTab).map(([tabId, sessionIds]) => [
+                  tabId,
+                  sessionIds.filter((id) => id !== sessionId),
+                ]),
+              ),
+            };
+          });
+          return;
+        }
+
+        if (data.length === 0) {
+          return;
         }
         scheduleReconnect(sessionId);
       }

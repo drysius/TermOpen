@@ -33,6 +33,7 @@ struct ManagedSession {
     info: SshSessionInfo,
     session: Session,
     shell: Channel,
+    mouse_sgr_enabled: bool,
 }
 
 struct LocalManagedSession {
@@ -141,6 +142,7 @@ impl SshManager {
                 info: info.clone(),
                 session,
                 shell,
+                mouse_sgr_enabled: false,
             },
         );
 
@@ -200,7 +202,9 @@ impl SshManager {
                     .context("Falha ao flush da shell SSH")?;
             }
 
-            return read_shell_output(managed, Duration::from_millis(140));
+            let output = read_shell_output(managed, Duration::from_millis(140))?;
+            update_mouse_sgr_mode(&output, &mut managed.mouse_sgr_enabled);
+            return Ok(output);
         }
 
         let local = self
@@ -222,6 +226,48 @@ impl SshManager {
 
         thread::sleep(Duration::from_millis(80));
         Ok(drain_local_output(&local.output))
+    }
+
+    pub fn write_raw_input(&mut self, session_id: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(managed) = self.sessions.get_mut(session_id) {
+            managed
+                .shell
+                .write_all(bytes)
+                .context("Falha ao enviar input bruto para shell SSH")?;
+            managed
+                .shell
+                .flush()
+                .context("Falha ao flush de input bruto SSH")?;
+            return Ok(());
+        }
+
+        if let Some(local) = self.local_sessions.get_mut(session_id) {
+            local
+                .stdin
+                .write_all(bytes)
+                .context("Falha ao enviar input bruto para terminal local")?;
+            local
+                .stdin
+                .flush()
+                .context("Falha ao flush de input bruto local")?;
+            return Ok(());
+        }
+
+        Err(anyhow!("Sessao {} nao encontrada", session_id))
+    }
+
+    pub fn is_mouse_sgr_enabled(&self, session_id: &str) -> Result<bool> {
+        if let Some(managed) = self.sessions.get(session_id) {
+            return Ok(managed.mouse_sgr_enabled);
+        }
+        if self.local_sessions.contains_key(session_id) {
+            return Ok(false);
+        }
+        Err(anyhow!("Sessao {} nao encontrada", session_id))
     }
 
     pub fn resize_pty(&mut self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
@@ -1020,6 +1066,47 @@ fn default_known_hosts_path() -> Result<PathBuf> {
     ))
 }
 
+fn update_mouse_sgr_mode(output: &str, enabled: &mut bool) {
+    let bytes = output.as_bytes();
+    let mut index = 0usize;
+
+    while index + 3 < bytes.len() {
+        if bytes[index] == 0x1b && bytes[index + 1] == b'[' && bytes[index + 2] == b'?' {
+            let mut cursor = index + 3;
+            let mut modes = Vec::<u16>::new();
+            loop {
+                let start = cursor;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
+                if start == cursor {
+                    break;
+                }
+                if let Ok(value) = std::str::from_utf8(&bytes[start..cursor]) {
+                    if let Ok(number) = value.parse::<u16>() {
+                        modes.push(number);
+                    }
+                }
+                if cursor >= bytes.len() || bytes[cursor] != b';' {
+                    break;
+                }
+                cursor += 1;
+            }
+
+            if cursor < bytes.len() {
+                let command = bytes[cursor];
+                if command == b'h' || command == b'l' {
+                    let next_value = command == b'h';
+                    if modes.into_iter().any(|mode| mode == 1006) {
+                        *enabled = next_value;
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+}
+
 fn read_shell_output(managed: &mut ManagedSession, timeout: Duration) -> Result<String> {
     managed.session.set_blocking(false);
 
@@ -1180,4 +1267,30 @@ fn normalize_remote_path(path: &str) -> PathBuf {
 
 fn normalize_chunk_size(chunk_size: usize) -> usize {
     chunk_size.max(64 * 1024).min(8 * 1024 * 1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_mouse_sgr_mode;
+
+    #[test]
+    fn should_toggle_sgr_mouse_mode_from_terminal_output() {
+        let mut enabled = false;
+        update_mouse_sgr_mode("\x1b[?1006h", &mut enabled);
+        assert!(enabled);
+
+        update_mouse_sgr_mode("\x1b[?1006l", &mut enabled);
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn should_ignore_non_sgr_mouse_sequences() {
+        let mut enabled = false;
+        update_mouse_sgr_mode("\x1b[?1000h", &mut enabled);
+        assert!(!enabled);
+
+        enabled = true;
+        update_mouse_sgr_mode("\x1b[?25l", &mut enabled);
+        assert!(enabled);
+    }
 }
