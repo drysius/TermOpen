@@ -3,7 +3,6 @@ use chrono::Utc;
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicBool, Ordering},
@@ -382,17 +381,12 @@ impl SyncManager {
         };
 
         let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
-        let (Some(remote_manifest_meta), Some(remote_profile_meta)) = (
-            remote_files.get(MANIFEST_FILE_NAME),
-            remote_files.get(PROFILE_FILE_NAME),
-        ) else {
+        let Some(remote_manifest_meta) = remote_files.get(MANIFEST_FILE_NAME) else {
             return Ok(SyncConflictPreview::default());
         };
 
         let remote_manifest_bytes =
             download_file_bytes(&client, &access_token, &remote_manifest_meta.id).await?;
-        let remote_profile_bytes =
-            download_file_bytes(&client, &access_token, &remote_profile_meta.id).await?;
 
         let remote_manifest = vault.decrypt_manifest_bytes(&remote_manifest_bytes)?;
         let local_manifest = vault.local_manifest_snapshot()?;
@@ -433,8 +427,8 @@ impl SyncManager {
             }
         }
 
-        let local_profile_hash = vault.local_profile_hash()?;
-        let remote_profile_hash = Some(hash_bytes_hex(&remote_profile_bytes));
+        let local_profile_hash = Some(local_manifest.profile.clone());
+        let remote_profile_hash = Some(remote_manifest.profile.clone());
         if local_profile_hash != remote_profile_hash {
             conflicts.push(SyncConflictItem {
                 kind: SyncConflictKind::Profile,
@@ -583,7 +577,8 @@ impl SyncManager {
         let term_open_meta = files
             .get(TERM_OPEN_FILE_NAME)
             .ok_or_else(|| anyhow!("term-open.bin nao encontrado na nuvem"))?;
-        let term_open_bytes = download_file_bytes(&client, &access_token, &term_open_meta.id).await?;
+        let term_open_bytes =
+            download_file_bytes(&client, &access_token, &term_open_meta.id).await?;
 
         if !vault.validate_password_for_term_open_bytes(&term_open_bytes, password.trim())? {
             return Err(anyhow!("Senha mestre invalida"));
@@ -628,17 +623,6 @@ fn conflict_file_name(decision: &SyncConflictDecision) -> Result<String> {
             Ok(format!("{}.bin", decision.id.trim()))
         }
     }
-}
-
-fn hash_bytes_hex(bytes: &[u8]) -> String {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push_str(&format!("{:02x}", byte));
-    }
-    out
 }
 
 fn finalize_auth_result(
@@ -1103,12 +1087,18 @@ async fn upload_file_bytes(
     file_id: &str,
     content: Vec<u8>,
 ) -> Result<DriveFileMetadata> {
-    let url = format!("https://www.googleapis.com/upload/drive/v3/files/{}", file_id);
+    let url = format!(
+        "https://www.googleapis.com/upload/drive/v3/files/{}",
+        file_id
+    );
 
     let response = client
         .patch(url)
         .bearer_auth(access_token)
-        .query(&[("uploadType", "media"), ("fields", "id,name,mimeType,modifiedTime")])
+        .query(&[
+            ("uploadType", "media"),
+            ("fields", "id,name,mimeType,modifiedTime"),
+        ])
         .header("Content-Type", "application/octet-stream")
         .body(content)
         .send()
@@ -1167,7 +1157,11 @@ async fn delete_drive_file(client: &Client, access_token: &str, file_id: &str) -
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!("Falha ao remover arquivo no Drive ({}): {}", status, body));
+        return Err(anyhow!(
+            "Falha ao remover arquivo no Drive ({}): {}",
+            status,
+            body
+        ));
     }
 
     Ok(())

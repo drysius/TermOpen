@@ -564,8 +564,8 @@ impl VaultManager {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = fs::read(&path)
-            .with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
+        let bytes =
+            fs::read(&path).with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
         Ok(Some(bytes))
     }
 
@@ -599,7 +599,10 @@ impl VaultManager {
             if !path.is_file() {
                 continue;
             }
-            let Some(name) = path.file_name().map(|value| value.to_string_lossy().to_string()) else {
+            let Some(name) = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+            else {
                 continue;
             };
             if !is_bin_file_name(&name) {
@@ -679,13 +682,6 @@ impl VaultManager {
         decrypt_bin_payload(&encrypted, &key, "manifest.bin")
     }
 
-    pub fn local_profile_hash(&self) -> Result<Option<String>> {
-        let Some(bytes) = self.read_local_bin_file(PROFILE_FILE_NAME)? else {
-            return Ok(None);
-        };
-        Ok(Some(hash_bytes_hex(&bytes)))
-    }
-
     pub fn reload_unlocked_from_disk_and_persist(&mut self) -> Result<()> {
         self.reload_unlocked_from_disk()?;
         self.persist()
@@ -712,9 +708,7 @@ impl VaultManager {
         let term_open = self.read_term_open_file()?;
 
         if compute_key_check(&key) != term_open.key_check {
-            return Err(anyhow!(
-                "term-open.bin local pertence a outra chave mestre"
-            ));
+            return Err(anyhow!("term-open.bin local pertence a outra chave mestre"));
         }
 
         let mut payload = self.read_payload_from_disk(&key)?;
@@ -797,6 +791,15 @@ impl VaultManager {
         payload.keychain.sort_by(|a, b| a.name.cmp(&b.name));
         ensure_default_server(&mut payload.auth_servers);
 
+        let profile_payload = ProfileBinPayload {
+            version: CURRENT_PAYLOAD_VERSION,
+            settings: payload.settings.clone(),
+            sync: payload.sync.clone(),
+            auth_servers: payload.auth_servers.clone(),
+            window_state: payload.window_state.clone(),
+        };
+        let profile_hash = profile_content_hash(&profile_payload, &key)?;
+
         let mut hosts = BTreeMap::new();
         let mut keychain = BTreeMap::new();
         let mut expected_files = HashSet::new();
@@ -808,7 +811,10 @@ impl VaultManager {
             let encoded = encode_bin(&encrypted)?;
             fs::write(&path, &encoded)
                 .with_context(|| format!("Falha ao escrever arquivo {}", path.display()))?;
-            hosts.insert(profile.id.clone(), hash_bytes_hex(&encoded));
+            hosts.insert(
+                profile.id.clone(),
+                content_hash_payload(profile, &key, &profile.id)?,
+            );
             expected_files.insert(file_name);
         }
 
@@ -819,12 +825,16 @@ impl VaultManager {
             let encoded = encode_bin(&encrypted)?;
             fs::write(&path, &encoded)
                 .with_context(|| format!("Falha ao escrever arquivo {}", path.display()))?;
-            keychain.insert(entry.id.clone(), hash_bytes_hex(&encoded));
+            keychain.insert(
+                entry.id.clone(),
+                content_hash_payload(entry, &key, &entry.id)?,
+            );
             expected_files.insert(file_name);
         }
 
         let manifest_payload = ManifestBinPayload {
             version: CURRENT_PAYLOAD_VERSION,
+            profile: profile_hash,
             hosts,
             keychain,
         };
@@ -832,14 +842,8 @@ impl VaultManager {
             encrypt_bin_payload(&manifest_payload, &key, MANIFEST_FILE_NAME, now)?;
         write_bin_file(&self.manifest_path, &manifest_encrypted)?;
 
-        let profile_payload = ProfileBinPayload {
-            version: CURRENT_PAYLOAD_VERSION,
-            settings: payload.settings.clone(),
-            sync: payload.sync.clone(),
-            auth_servers: payload.auth_servers.clone(),
-            window_state: payload.window_state.clone(),
-        };
-        let profile_encrypted = encrypt_bin_payload(&profile_payload, &key, PROFILE_FILE_NAME, now)?;
+        let profile_encrypted =
+            encrypt_bin_payload(&profile_payload, &key, PROFILE_FILE_NAME, now)?;
         write_bin_file(&self.profile_path, &profile_encrypted)?;
 
         let term_open = TermOpenBin {
@@ -866,14 +870,20 @@ impl VaultManager {
             if !path.is_file() {
                 continue;
             }
-            let Some(name) = path.file_name().map(|value| value.to_string_lossy().to_string()) else {
+            let Some(name) = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+            else {
                 continue;
             };
 
             if !is_bin_file_name(&name) {
                 continue;
             }
-            if name == TERM_OPEN_FILE_NAME || name == PROFILE_FILE_NAME || name == MANIFEST_FILE_NAME {
+            if name == TERM_OPEN_FILE_NAME
+                || name == PROFILE_FILE_NAME
+                || name == MANIFEST_FILE_NAME
+            {
                 continue;
             }
             if expected.contains(&name) {
@@ -916,6 +926,16 @@ impl VaultManager {
             ));
         }
 
+        let expected_profile_hash = manifest_payload.profile.clone();
+        let actual_profile_hash = profile_content_hash(&profile_payload, key)?;
+        if actual_profile_hash != expected_profile_hash {
+            return Err(anyhow!(
+                "Hash divergente para profile. Esperado {}, obtido {}",
+                expected_profile_hash,
+                actual_profile_hash
+            ));
+        }
+
         let mut connections = Vec::new();
         let mut keychain = Vec::new();
 
@@ -924,20 +944,20 @@ impl VaultManager {
             let path = self.storage_root.join(format!("{}.bin", uuid));
             let encoded = fs::read(&path)
                 .with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
-            let actual_hash = hash_bytes_hex(&encoded);
-            if actual_hash != expected_hash {
-                return Err(anyhow!(
-                    "Hash divergente para host {}. Esperado {}, obtido {}",
-                    uuid,
-                    expected_hash,
-                    actual_hash
-                ));
-            }
             let encrypted: EncryptedBin = decode_bin(&encoded, "Arquivo de host invalido")?;
             let mut profile: ConnectionProfile =
                 decrypt_bin_payload(&encrypted, key, "Arquivo de host")?;
             profile.id = uuid;
             profile.normalize_protocols();
+            let actual_content_hash = content_hash_payload(&profile, key, profile.id.as_str())?;
+            if actual_content_hash != expected_hash {
+                return Err(anyhow!(
+                    "Hash de conteudo divergente para host {}. Esperado {}, obtido {}",
+                    profile.id,
+                    expected_hash,
+                    actual_content_hash
+                ));
+            }
             connections.push(profile);
         }
 
@@ -946,19 +966,19 @@ impl VaultManager {
             let path = self.storage_root.join(format!("{}.bin", uuid));
             let encoded = fs::read(&path)
                 .with_context(|| format!("Falha ao ler arquivo {}", path.display()))?;
-            let actual_hash = hash_bytes_hex(&encoded);
-            if actual_hash != expected_hash {
-                return Err(anyhow!(
-                    "Hash divergente para keychain {}. Esperado {}, obtido {}",
-                    uuid,
-                    expected_hash,
-                    actual_hash
-                ));
-            }
             let encrypted: EncryptedBin = decode_bin(&encoded, "Arquivo de keychain invalido")?;
             let mut entry: KeychainEntry =
                 decrypt_bin_payload(&encrypted, key, "Arquivo de keychain")?;
             entry.id = uuid;
+            let actual_content_hash = content_hash_payload(&entry, key, entry.id.as_str())?;
+            if actual_content_hash != expected_hash {
+                return Err(anyhow!(
+                    "Hash de conteudo divergente para keychain {}. Esperado {}, obtido {}",
+                    entry.id,
+                    expected_hash,
+                    actual_content_hash
+                ));
+            }
             keychain.push(entry);
         }
 
@@ -1004,7 +1024,10 @@ fn cleanup_legacy_layout(data_dir: &Path, storage_root: &Path) -> Result<()> {
                 continue;
             }
 
-            let Some(name) = path.file_name().map(|value| value.to_string_lossy().to_string()) else {
+            let Some(name) = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+            else {
                 continue;
             };
             if is_bin_file_name(&name) {
@@ -1053,6 +1076,7 @@ fn compute_key_check(key: &[u8; 32]) -> [u8; 32] {
     out
 }
 
+#[cfg(test)]
 fn hash_bytes_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1066,6 +1090,41 @@ fn to_hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{:02x}", byte));
     }
     out
+}
+
+fn content_hash_bytes(key: &[u8; 32], file_tag: &str, plaintext: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"termopen-content-hash-v1");
+    hasher.update(key);
+    hasher.update(file_tag.as_bytes());
+    hasher.update(plaintext);
+    let digest = hasher.finalize();
+    to_hex(&digest)
+}
+
+fn content_hash_payload<T: Serialize>(
+    payload: &T,
+    key: &[u8; 32],
+    file_tag: &str,
+) -> Result<String> {
+    let plaintext = encode_bin(payload)?;
+    Ok(content_hash_bytes(key, file_tag, &plaintext))
+}
+
+fn profile_hash_payload_input(payload: &ProfileBinPayload) -> ProfileBinPayload {
+    let mut normalized = payload.clone();
+    // Ignore local sync bookkeeping fields so profile conflicts reflect real user-config changes.
+    normalized.sync = SyncMetadata {
+        last_sync_at: None,
+        last_remote_modified: None,
+        last_local_change: 0,
+    };
+    normalized
+}
+
+fn profile_content_hash(payload: &ProfileBinPayload, key: &[u8; 32]) -> Result<String> {
+    let normalized = profile_hash_payload_input(payload);
+    content_hash_payload(&normalized, key, PROFILE_FILE_NAME)
 }
 
 fn encode_bin<T: Serialize>(value: &T) -> Result<Vec<u8>> {
@@ -1145,7 +1204,10 @@ fn decrypt_bin_payload<T: DeserializeOwned>(
         .decrypt(XNonce::from_slice(&file.nonce), file.ciphertext.as_ref())
         .map_err(|_| anyhow!("Falha ao descriptografar {}", context_message))?;
 
-    decode_bin(&plaintext, &format!("Falha ao decodificar {}", context_message))
+    decode_bin(
+        &plaintext,
+        &format!("Falha ao decodificar {}", context_message),
+    )
 }
 
 fn normalize_bin_file_name(input: &str) -> Result<String> {
@@ -1226,8 +1288,8 @@ fn normalize_option(input: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::models::{ConnectionKind, ConnectionProtocol};
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn test_vault_manager(storage_root: &Path) -> VaultManager {
@@ -1278,17 +1340,19 @@ mod tests {
     fn should_fail_on_wrong_key() {
         let value = ManifestBinPayload {
             version: 1,
+            profile: "hash-profile".to_string(),
             hosts: BTreeMap::new(),
             keychain: BTreeMap::new(),
         };
 
         let salt = [1u8; 16];
         let key = derive_key("correct", &salt).expect("kdf should work");
-        let encrypted = encrypt_bin_payload(&value, &key, "manifest.bin", 1_700_000_000)
-            .expect("encrypt");
+        let encrypted =
+            encrypt_bin_payload(&value, &key, "manifest.bin", 1_700_000_000).expect("encrypt");
 
         let wrong_key = derive_key("wrong", &salt).expect("kdf should work");
-        let decrypted = decrypt_bin_payload::<ManifestBinPayload>(&encrypted, &wrong_key, "decrypt");
+        let decrypted =
+            decrypt_bin_payload::<ManifestBinPayload>(&encrypted, &wrong_key, "decrypt");
         assert!(decrypted.is_err());
     }
 

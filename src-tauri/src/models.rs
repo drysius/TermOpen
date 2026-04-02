@@ -77,7 +77,10 @@ impl ConnectionProfile {
                 ordered.push(protocol.clone());
             }
         }
-        if ordered.iter().any(|protocol| matches!(protocol, ConnectionProtocol::Rdp)) {
+        if ordered
+            .iter()
+            .any(|protocol| matches!(protocol, ConnectionProtocol::Rdp))
+        {
             ordered = vec![ConnectionProtocol::Rdp];
         }
         self.protocols = ordered;
@@ -550,6 +553,7 @@ pub struct ProfileBinPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ManifestBinPayload {
     pub version: u32,
+    pub profile: String,
     #[serde(default)]
     pub hosts: BTreeMap<String, String>,
     #[serde(default)]
