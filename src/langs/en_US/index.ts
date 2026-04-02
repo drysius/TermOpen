@@ -6,6 +6,7 @@ import { settings } from "./settings";
 import { keychain } from "./keychain";
 import { knownHosts } from "./known-hosts";
 import { about } from "./about";
+import { debugLogs } from "./debug-logs";
 import { hostDrawer } from "./host-drawer";
 import { workspace } from "./workspace";
 import { editor } from "./editor";
@@ -20,6 +21,7 @@ export const enUS: AppDictionary = {
     keychain: "Keychain",
     knownHosts: "Known Hosts",
     settings: "Settings",
+    debugLogs: "Logs",
     about: "About",
   },
   vault,
@@ -28,6 +30,7 @@ export const enUS: AppDictionary = {
   keychain,
   knownHosts,
   about,
+  debugLogs,
   hostDrawer,
   workspace,
   editor,

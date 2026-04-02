@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { CircleHelp, Globe, Home, KeyRound, NotebookTabs, Settings2 } from "lucide-react";
+import { Bug, CircleHelp, Globe, Home, KeyRound, NotebookTabs, Settings2 } from "lucide-react";
 
 import { IconTooltip } from "@/components/ui/tooltip";
 import { LOCALE_LABELS, useI18n, useT, type Locale } from "@/langs";
@@ -15,10 +15,11 @@ const icons: Record<SidebarSection, ReactNode> = {
   keychain: <KeyRound className="h-4 w-4" />,
   known_hosts: <NotebookTabs className="h-4 w-4" />,
   settings: <Settings2 className="h-4 w-4" />,
+  debug_logs: <Bug className="h-4 w-4" />,
   about: <CircleHelp className="h-4 w-4" />,
 };
 
-const sectionIds: SidebarSection[] = ["home", "keychain", "known_hosts", "settings", "about"];
+const sectionIds: SidebarSection[] = ["home", "keychain", "known_hosts", "settings", "debug_logs", "about"];
 
 export function AppSidebar({ current, onSelect }: AppSidebarProps) {
   const t = useT();
@@ -29,6 +30,7 @@ export function AppSidebar({ current, onSelect }: AppSidebarProps) {
     keychain: t.sidebar.keychain,
     known_hosts: t.sidebar.knownHosts,
     settings: t.sidebar.settings,
+    debug_logs: t.sidebar.debugLogs,
     about: t.sidebar.about,
   };
 

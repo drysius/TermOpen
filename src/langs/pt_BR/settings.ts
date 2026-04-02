@@ -78,6 +78,10 @@ export const settings: AppDictionary["settings"] = {
     title: "Atalhos Ctrl+Shift",
     description: "Ativa Ctrl+Shift+C/V para copiar e colar no terminal.",
   },
+  debugLogs: {
+    title: "Habilitar logs de depuração",
+    description: "Registra erros e problemas do frontend e backend em memória local.",
+  },
   knownHosts: {
     title: "Known Hosts",
     description: "Caminho do arquivo known_hosts usado pelo ambiente SSH.",

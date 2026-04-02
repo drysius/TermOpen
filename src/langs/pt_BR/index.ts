@@ -6,6 +6,7 @@ import { settings } from "./settings";
 import { keychain } from "./keychain";
 import { knownHosts } from "./known-hosts";
 import { about } from "./about";
+import { debugLogs } from "./debug-logs";
 import { hostDrawer } from "./host-drawer";
 import { workspace } from "./workspace";
 import { editor } from "./editor";
@@ -20,6 +21,7 @@ export const ptBR: AppDictionary = {
     keychain: "Keychain",
     knownHosts: "Known Hosts",
     settings: "Configuracoes",
+    debugLogs: "Logs",
     about: "Sobre",
   },
   vault,
@@ -28,6 +30,7 @@ export const ptBR: AppDictionary = {
   keychain,
   knownHosts,
   about,
+  debugLogs,
   hostDrawer,
   workspace,
   editor,

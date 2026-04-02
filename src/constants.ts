@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   terminal_copy_on_select: true,
   terminal_right_click_paste: true,
   terminal_ctrl_shift_shortcuts: true,
+  debug_logs_enabled: false,
   modified_files_upload_policy: "ask",
   known_hosts_path: "",
   selected_auth_server_id: null,

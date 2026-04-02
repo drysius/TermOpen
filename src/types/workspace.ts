@@ -1,4 +1,4 @@
-export type SidebarSection = "home" | "keychain" | "known_hosts" | "settings" | "about";
+export type SidebarSection = "home" | "keychain" | "known_hosts" | "settings" | "debug_logs" | "about";
 
 export type WorkTabType = "workspace" | "editor";
 

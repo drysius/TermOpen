@@ -12,8 +12,10 @@ import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
 import { getError } from "@/functions/common";
 import { useT } from "@/langs";
+import { logFrontendDebug, logFrontendError } from "@/lib/debug-logs";
 import { api } from "@/lib/tauri";
 import { AboutPage } from "@/pages/sections/about-page";
+import { DebugLogsPage } from "@/pages/sections/debug-logs-page";
 import { HomePage } from "@/pages/sections/home-page";
 import { KeychainPage } from "@/pages/sections/keychain-page";
 import { KnownHostsPage } from "@/pages/sections/known-hosts-page";
@@ -34,6 +36,9 @@ import type {
 import type { SidebarSection } from "@/types/workspace";
 
 function sectionFromPath(pathname: string): SidebarSection {
+  if (pathname.startsWith("/debug-logs")) {
+    return "debug_logs";
+  }
   if (pathname.startsWith("/about")) {
     return "about";
   }
@@ -50,6 +55,9 @@ function sectionFromPath(pathname: string): SidebarSection {
 }
 
 function pathFromSection(section: SidebarSection): string {
+  if (section === "debug_logs") {
+    return "/debug-logs";
+  }
   if (section === "about") {
     return "/about";
   }
@@ -643,6 +651,30 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const onUnhandledError = (event: ErrorEvent) => {
+      if (event.error) {
+        logFrontendError(event.error, "frontend.unhandled");
+        return;
+      }
+      logFrontendDebug("error", event.message || "Erro inesperado no frontend", {
+        source: "frontend.unhandled",
+        context: event.filename ? `${event.filename}:${event.lineno}:${event.colno}` : null,
+      });
+    };
+
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      logFrontendError(event.reason, "frontend.unhandled_rejection");
+    };
+
+    window.addEventListener("error", onUnhandledError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", onUnhandledError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    };
+  }, []);
+
+  useEffect(() => {
     let stopDeepLinkListener: (() => void) | null = null;
 
     void api
@@ -870,6 +902,7 @@ function App() {
               <Route path="/keychain" element={<KeychainPage />} />
               <Route path="/known-hosts" element={<KnownHostsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/debug-logs" element={<DebugLogsPage />} />
               <Route path="/about" element={<AboutPage />} />
               <Route path="*" element={<Navigate to="/home" replace />} />
             </Routes>

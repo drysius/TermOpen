@@ -1,6 +1,6 @@
 import type { WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
 
-type WorkspaceKind = "terminal" | "sftp" | "rdp" | "editor" | "logs";
+type WorkspaceKind = "terminal" | "sftp" | "rdp" | "editor";
 
 export function snapLayoutToWorkspace(
   layout: WorkspaceBlockLayout,

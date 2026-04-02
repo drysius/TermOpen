@@ -394,6 +394,17 @@ export function SettingsPage() {
             description={t.settings.inactivityLock.description}
             control={<Input type="number" min={1} {...settingsForm.register("inactivity_lock_minutes", { valueAsNumber: true })} />}
           />
+          <SettingsRow
+            title={t.settings.debugLogs.title}
+            description={t.settings.debugLogs.description}
+            control={
+              <Controller
+                control={settingsForm.control}
+                name="debug_logs_enabled"
+                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
+              />
+            }
+          />
         </section>
         ) : null}
 

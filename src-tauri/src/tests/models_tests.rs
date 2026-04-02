@@ -6,6 +6,7 @@ fn should_default_terminal_interaction_settings() {
     assert!(settings.terminal_copy_on_select);
     assert!(settings.terminal_right_click_paste);
     assert!(settings.terminal_ctrl_shift_shortcuts);
+    assert!(!settings.debug_logs_enabled);
     assert_eq!(settings.sftp_reconnect_delay_seconds, 5);
 }
 
