@@ -2081,7 +2081,7 @@ async fn auth_servers_list(state: State<'_, AppState>) -> Result<Vec<AuthServer>
 }
 
 const AUTH_SERVERS_RAW_URL: &str =
-    "https://raw.githubusercontent.com/drysius/TermOpen/main/auth-servers.json";
+    "https://raw.githubusercontent.com/urubucode/TermOpen/main/auth-servers.json";
 
 #[tauri::command]
 async fn auth_server_save(

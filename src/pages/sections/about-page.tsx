@@ -62,11 +62,11 @@ export function AboutPage() {
             {t.about.repoLabel}
             <a
               className="text-cyan-300 hover:text-cyan-200"
-              href="https://github.com/drysius/termopen"
+              href="https://github.com/UrubuCode/TermOpen"
               target="_blank"
               rel="noreferrer"
             >
-              github.com/drysius/termopen
+              github.com/UrubuCode/TermOpen
             </a>
           </p>
         </article>

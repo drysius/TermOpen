@@ -22,7 +22,7 @@ use crate::models::{
     ProfileBinPayload, SyncMetadata, VaultPayload, VaultStatus, WindowState,
 };
 
-const KEYRING_SERVICE: &str = "com.drysius.termopen";
+const KEYRING_SERVICE: &str = "com.urubucode.termopen";
 const KEYRING_VAULT_KEY: &str = "vault-key";
 const STORAGE_DIR_NAME: &str = "TermOpen";
 const TERM_OPEN_FILE_NAME: &str = "term-open.bin";
@@ -83,7 +83,7 @@ struct EncryptedBin {
 
 impl VaultManager {
     pub fn new() -> Result<Self> {
-        let dirs = ProjectDirs::from("com", "drysius", "termopen")
+        let dirs = ProjectDirs::from("com", "urubucode", "termopen")
             .ok_or_else(|| anyhow!("Nao foi possivel resolver diretorio de dados do aplicativo"))?;
         let data_dir = dirs.data_dir();
         fs::create_dir_all(data_dir).with_context(|| {

@@ -23,7 +23,7 @@ use crate::{
     vault::VaultManager,
 };
 
-const KEYRING_SERVICE: &str = "com.drysius.termopen";
+const KEYRING_SERVICE: &str = "com.urubucode.termopen";
 const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
 const KEYRING_USER_EMAIL: &str = "google-user-email";
 const KEYRING_USER_NAME: &str = "google-user-name";
