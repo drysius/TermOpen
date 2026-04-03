@@ -1019,7 +1019,13 @@ export function SettingsPage() {
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors"
-                                    onClick={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      if (server.author) {
+                                        void api.openExternalUrl(server.author).catch(() => undefined);
+                                      }
+                                    }}
                                   >
                                     <ExternalLink className="h-3 w-3" />
                                     {server.author}

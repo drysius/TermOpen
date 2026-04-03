@@ -31,7 +31,6 @@ import type {
   ConnectionProfile,
   SyncConflictDecision,
   SyncKeepSide,
-  SyncLoggedUser,
   SyncProgressState,
   SyncState,
 } from "@/types/termopen";
@@ -217,6 +216,23 @@ function App() {
   const startupConflicts = useAppStore((state) => state.startupConflicts);
   const startupSyncBusy = useAppStore((state) => state.startupSyncBusy);
   const settingsUnsavedDraft = useAppStore((state) => state.settingsUnsavedDraft);
+  const booting = useAppStore((state) => state.booting);
+  const bootMessage = useAppStore((state) => state.bootMessage);
+  const isWindowMaximized = useAppStore((state) => state.isWindowMaximized);
+  const loggedUser = useAppStore((state) => state.loggedUser);
+  const syncProgress = useAppStore((state) => state.syncProgress);
+  const headerSyncBusy = useAppStore((state) => state.headerSyncBusy);
+  const pendingCloseTabId = useAppStore((state) => state.pendingCloseTabId);
+  const closingWorkspace = useAppStore((state) => state.closingWorkspace);
+  const pendingSettingsNavigation = useAppStore((state) => state.pendingSettingsNavigation);
+  const leavingSettingsBusy = useAppStore((state) => state.leavingSettingsBusy);
+  const pendingDeepLinks = useAppStore((state) => state.pendingDeepLinks);
+  const loginServerModalOpen = useAppStore((state) => state.loginServerModalOpen);
+  const loginServerLoading = useAppStore((state) => state.loginServerLoading);
+  const loginServerBusy = useAppStore((state) => state.loginServerBusy);
+  const loginServers = useAppStore((state) => state.loginServers);
+  const loginServerPings = useAppStore((state) => state.loginServerPings);
+  const selectedLoginServerId = useAppStore((state) => state.selectedLoginServerId);
   const openSsh = useAppStore((state) => state.openSsh);
   const openSftpWorkspace = useAppStore((state) => state.openSftpWorkspace);
   const openRdp = useAppStore((state) => state.openRdp);
@@ -235,27 +251,27 @@ function App() {
   const runSync = useAppStore((state) => state.runSync);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const setSettingsUnsavedDraft = useAppStore((state) => state.setSettingsUnsavedDraft);
+  const setBooting = useAppStore((state) => state.setBooting);
+  const setBootMessage = useAppStore((state) => state.setBootMessage);
+  const setIsWindowMaximized = useAppStore((state) => state.setIsWindowMaximized);
+  const setLoggedUser = useAppStore((state) => state.setLoggedUser);
+  const setSyncProgress = useAppStore((state) => state.setSyncProgress);
+  const setHeaderSyncBusy = useAppStore((state) => state.setHeaderSyncBusy);
+  const setPendingCloseTabId = useAppStore((state) => state.setPendingCloseTabId);
+  const setClosingWorkspace = useAppStore((state) => state.setClosingWorkspace);
+  const setPendingSettingsNavigation = useAppStore((state) => state.setPendingSettingsNavigation);
+  const setLeavingSettingsBusy = useAppStore((state) => state.setLeavingSettingsBusy);
+  const setPendingDeepLinks = useAppStore((state) => state.setPendingDeepLinks);
+  const setLoginServerModalOpen = useAppStore((state) => state.setLoginServerModalOpen);
+  const setLoginServerLoading = useAppStore((state) => state.setLoginServerLoading);
+  const setLoginServerBusy = useAppStore((state) => state.setLoginServerBusy);
+  const setLoginServers = useAppStore((state) => state.setLoginServers);
+  const setLoginServerPings = useAppStore((state) => state.setLoginServerPings);
+  const setSelectedLoginServerId = useAppStore((state) => state.setSelectedLoginServerId);
 
   const lastActivityRef = useRef<number>(Date.now());
   const deepLinkProcessingRef = useRef(false);
-  const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
-  const [closingWorkspace, setClosingWorkspace] = useState(false);
-  const [booting, setBooting] = useState(true);
-  const [bootMessage, setBootMessage] = useState(t.app.boot.starting);
   const [syncChoices, setSyncChoices] = useState<Record<string, SyncKeepSide>>({});
-  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
-  const [loggedUser, setLoggedUser] = useState<SyncLoggedUser | null>(null);
-  const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
-  const [headerSyncBusy, setHeaderSyncBusy] = useState(false);
-  const [pendingSettingsNavigation, setPendingSettingsNavigation] = useState<SidebarSection | null>(null);
-  const [leavingSettingsBusy, setLeavingSettingsBusy] = useState(false);
-  const [pendingDeepLinks, setPendingDeepLinks] = useState<string[]>([]);
-  const [loginServerModalOpen, setLoginServerModalOpen] = useState(false);
-  const [loginServerLoading, setLoginServerLoading] = useState(false);
-  const [loginServerBusy, setLoginServerBusy] = useState(false);
-  const [loginServers, setLoginServers] = useState<AuthServer[]>([]);
-  const [loginServerPings, setLoginServerPings] = useState<PingMap>({});
-  const [selectedLoginServerId, setSelectedLoginServerId] = useState<string | null>(null);
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId]);
   const pendingCloseTab = useMemo(
     () => tabs.find((tab) => tab.id === pendingCloseTabId) ?? null,
@@ -296,13 +312,12 @@ function App() {
   );
   const currentSection = activeTabId ? "home" : sectionFromPath(location.pathname);
   const shellClass = isWindowMaximized
-    ? "flex h-full w-full flex-col overflow-hidden bg-background text-foreground"
-    : "flex w-full h-full flex-col overflow-hidden rounded-2xl border border-border/50 bg-background/95 text-foreground shadow-2xl";
-  const insetShellClass = isWindowMaximized
-    ? "flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground"
-    : "flex h-full min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/50 bg-background/95 text-foreground shadow-2xl";
+    ? "flex h-full w-full overflow-hidden bg-background text-foreground"
+    : "flex h-full w-full overflow-hidden rounded-2xl border border-border/50 bg-background/95 text-foreground";
+  const insetShellClass = "flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground";
   const bootSteps = [t.app.boot.starting, t.app.boot.checkingUpdates, t.app.boot.loadingData];
-  const bootStepIndex = Math.max(0, bootSteps.indexOf(bootMessage));
+  const displayedBootMessage = bootMessage || t.app.boot.starting;
+  const bootStepIndex = Math.max(0, bootSteps.indexOf(displayedBootMessage));
   const bootProgress = ((bootStepIndex + 1) / bootSteps.length) * 100;
 
   async function refreshMaximizeState() {
@@ -311,7 +326,7 @@ function App() {
   }
 
   async function handleToggleMaximize() {
-    const value = await api.windowToggleMaximize().catch(() => isWindowMaximized);
+    const value = await api.windowToggleMaximize().catch(() => useAppStore.getState().isWindowMaximized);
     setIsWindowMaximized(value);
   }
 
@@ -350,12 +365,12 @@ function App() {
         nextPings[id] = value;
       });
       setLoginServerPings(nextPings);
-      setSelectedLoginServerId((current) => {
-        if (current && servers.some((server) => server.id === current)) {
-          return current;
-        }
-        return pickRecommendedAuthServer(servers, nextPings);
-      });
+      const currentSelectedId = useAppStore.getState().selectedLoginServerId;
+      if (currentSelectedId && servers.some((server) => server.id === currentSelectedId)) {
+        setSelectedLoginServerId(currentSelectedId);
+      } else {
+        setSelectedLoginServerId(pickRecommendedAuthServer(servers, nextPings));
+      }
     } catch (error) {
       setLoginServers([]);
       setSelectedLoginServerId(null);
@@ -420,7 +435,8 @@ function App() {
     if (!normalized) {
       return;
     }
-    setPendingDeepLinks((current) => (current.includes(normalized) ? current : [...current, normalized]));
+    const current = useAppStore.getState().pendingDeepLinks;
+    setPendingDeepLinks(current.includes(normalized) ? current : [...current, normalized]);
   }
 
   async function openConnectionFromDeepLink(rawUrl: string): Promise<boolean> {
@@ -716,7 +732,8 @@ function App() {
     void openConnectionFromDeepLink(nextUrl)
       .catch(() => undefined)
       .finally(() => {
-        setPendingDeepLinks((current) => current.slice(1));
+        const current = useAppStore.getState().pendingDeepLinks;
+        setPendingDeepLinks(current.slice(1));
         deepLinkProcessingRef.current = false;
       });
   }, [openHostDrawer, openRdp, openSftpWorkspace, openSsh, pendingDeepLinks, vaultStatus]);
@@ -751,7 +768,7 @@ function App() {
   if (booting) {
     return (
       <SidebarProvider className={shellClass}>
-        <main className="h-full">
+        <main className="h-full w-full">
           <Toaster theme="dark" richColors position="bottom-right" />
           <AppHeader
             tabs={[]}
@@ -783,7 +800,7 @@ function App() {
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                   <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${bootProgress}%` }} />
                 </div>
-                <p className="text-center text-xs text-muted-foreground">{bootMessage}</p>
+                <p className="text-center text-xs text-muted-foreground">{displayedBootMessage}</p>
               </div>
 
               <div className="space-y-1.5 rounded-xl border border-border/40 bg-card/60 p-3">
@@ -813,7 +830,7 @@ function App() {
 
   if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
     return (
-      <SidebarProvider>
+      <SidebarProvider className={shellClass}>
         <main className="h-full w-full">
           <Toaster theme="dark" richColors position="bottom-right" />
           <AppHeader
@@ -847,7 +864,7 @@ function App() {
   }
 
   return (
-    <SidebarProvider>
+    <SidebarProvider className={shellClass}>
       <AppSidebar
         current={currentSection}
         onSelect={(next) => {

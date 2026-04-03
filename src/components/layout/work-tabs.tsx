@@ -16,7 +16,7 @@ function tabLabel(tab: WorkTab): string {
 
 export function WorkTabs({ tabs, activeId, onSelect, onClose, onCreateWorkspace }: WorkTabsProps) {
   return (
-    <div className="flex h-full items-center gap-1 pl-2 overflow-x-auto">
+    <div data-tauri-drag-region className="flex h-full items-center gap-1 pl-2 overflow-x-auto">
       {tabs.map((tab) => (
         <button
           key={tab.id}

@@ -6,11 +6,15 @@ import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions } from "@/store/app-store.types";
+import type { SidebarSection } from "@/types/workspace";
 import type {
+  AuthServer,
   AppSettings,
   ConnectionProfile,
   ConnectionProtocol,
   KeychainEntry,
+  SyncLoggedUser,
+  SyncProgressState,
 } from "@/types/termopen";
 
 function normalizeProtocols(protocols: ConnectionProtocol[]): ConnectionProtocol[] {
@@ -55,9 +59,43 @@ export function createConnectionActions(
   | "setActiveTab"
   | "setCommandInput"
   | "setBusy"
+  | "setBooting"
+  | "setBootMessage"
+  | "setIsWindowMaximized"
+  | "setLoggedUser"
+  | "setSyncProgress"
+  | "setHeaderSyncBusy"
+  | "setPendingCloseTabId"
+  | "setClosingWorkspace"
+  | "setPendingSettingsNavigation"
+  | "setLeavingSettingsBusy"
+  | "setPendingDeepLinks"
+  | "setLoginServerModalOpen"
+  | "setLoginServerLoading"
+  | "setLoginServerBusy"
+  | "setLoginServers"
+  | "setLoginServerPings"
+  | "setSelectedLoginServerId"
 > {
   return {
     setBusy: (busy) => set({ busy }),
+    setBooting: (booting) => set({ booting }),
+    setBootMessage: (message) => set({ bootMessage: message }),
+    setIsWindowMaximized: (value) => set({ isWindowMaximized: value }),
+    setLoggedUser: (user: SyncLoggedUser | null) => set({ loggedUser: user }),
+    setSyncProgress: (progress: SyncProgressState | null) => set({ syncProgress: progress }),
+    setHeaderSyncBusy: (busy) => set({ headerSyncBusy: busy }),
+    setPendingCloseTabId: (tabId) => set({ pendingCloseTabId: tabId }),
+    setClosingWorkspace: (closing) => set({ closingWorkspace: closing }),
+    setPendingSettingsNavigation: (section: SidebarSection | null) => set({ pendingSettingsNavigation: section }),
+    setLeavingSettingsBusy: (busy) => set({ leavingSettingsBusy: busy }),
+    setPendingDeepLinks: (items) => set({ pendingDeepLinks: items }),
+    setLoginServerModalOpen: (open) => set({ loginServerModalOpen: open }),
+    setLoginServerLoading: (loading) => set({ loginServerLoading: loading }),
+    setLoginServerBusy: (busy) => set({ loginServerBusy: busy }),
+    setLoginServers: (servers: AuthServer[]) => set({ loginServers: servers }),
+    setLoginServerPings: (pings) => set({ loginServerPings: pings }),
+    setSelectedLoginServerId: (id) => set({ selectedLoginServerId: id }),
 
     setActiveTab: (id) => set({ activeTabId: id }),
 

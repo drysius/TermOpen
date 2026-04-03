@@ -17,7 +17,7 @@ export function AppDialog({ open, title, description, onClose, children, footer 
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 p-4" onMouseDown={onClose}>
       <div
         className="w-full max-w-2xl rounded-xl border border-border/60 bg-card/95 shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}
@@ -84,4 +84,3 @@ export function AppConfirmDialog({
     </AppDialog>
   );
 }
-

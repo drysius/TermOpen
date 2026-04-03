@@ -11,6 +11,23 @@ import type { AppStore } from "@/store/app-store.types";
 const initialState: Omit<
   AppStore,
   | "setBusy"
+  | "setBooting"
+  | "setBootMessage"
+  | "setIsWindowMaximized"
+  | "setLoggedUser"
+  | "setSyncProgress"
+  | "setHeaderSyncBusy"
+  | "setPendingCloseTabId"
+  | "setClosingWorkspace"
+  | "setPendingSettingsNavigation"
+  | "setLeavingSettingsBusy"
+  | "setPendingDeepLinks"
+  | "setLoginServerModalOpen"
+  | "setLoginServerLoading"
+  | "setLoginServerBusy"
+  | "setLoginServers"
+  | "setLoginServerPings"
+  | "setSelectedLoginServerId"
   | "setActiveTab"
   | "setCommandInput"
   | "setPanePath"
@@ -85,6 +102,23 @@ const initialState: Omit<
   busy: false,
   startupConflicts: [],
   startupSyncBusy: false,
+  booting: true,
+  bootMessage: "",
+  isWindowMaximized: false,
+  loggedUser: null,
+  syncProgress: null,
+  headerSyncBusy: false,
+  pendingCloseTabId: null,
+  closingWorkspace: false,
+  pendingSettingsNavigation: null,
+  leavingSettingsBusy: false,
+  pendingDeepLinks: [],
+  loginServerModalOpen: false,
+  loginServerLoading: false,
+  loginServerBusy: false,
+  loginServers: [],
+  loginServerPings: {},
+  selectedLoginServerId: null,
 };
 
 export const useAppStore = create<AppStore>()(

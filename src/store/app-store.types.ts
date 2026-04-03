@@ -1,10 +1,13 @@
 import type { EditorBuffer, PaneState } from "@/types/app-state";
 import type {
+  AuthServer,
   AppSettings,
   ConnectionProtocol,
   ConnectionProfile,
   KnownHostEntry,
   KeychainEntry,
+  SyncLoggedUser,
+  SyncProgressState,
   SyncConflictDecision,
   SyncConflictItem,
   SftpEntry,
@@ -12,7 +15,7 @@ import type {
   SyncState,
   VaultStatus,
 } from "@/types/termopen";
-import type { WorkTab, WorkspaceSnapshot } from "@/types/workspace";
+import type { SidebarSection, WorkTab, WorkspaceSnapshot } from "@/types/workspace";
 
 export type PaneSide = "left" | "right";
 export type SyncAction = "login" | "push" | "pull";
@@ -44,10 +47,44 @@ export interface AppState {
   busy: boolean;
   startupConflicts: SyncConflictItem[];
   startupSyncBusy: boolean;
+  booting: boolean;
+  bootMessage: string;
+  isWindowMaximized: boolean;
+  loggedUser: SyncLoggedUser | null;
+  syncProgress: SyncProgressState | null;
+  headerSyncBusy: boolean;
+  pendingCloseTabId: string | null;
+  closingWorkspace: boolean;
+  pendingSettingsNavigation: SidebarSection | null;
+  leavingSettingsBusy: boolean;
+  pendingDeepLinks: string[];
+  loginServerModalOpen: boolean;
+  loginServerLoading: boolean;
+  loginServerBusy: boolean;
+  loginServers: AuthServer[];
+  loginServerPings: Record<string, number | null>;
+  selectedLoginServerId: string | null;
 }
 
 export interface AppActions {
   setBusy: (busy: boolean) => void;
+  setBooting: (booting: boolean) => void;
+  setBootMessage: (message: string) => void;
+  setIsWindowMaximized: (value: boolean) => void;
+  setLoggedUser: (user: SyncLoggedUser | null) => void;
+  setSyncProgress: (progress: SyncProgressState | null) => void;
+  setHeaderSyncBusy: (busy: boolean) => void;
+  setPendingCloseTabId: (tabId: string | null) => void;
+  setClosingWorkspace: (closing: boolean) => void;
+  setPendingSettingsNavigation: (section: SidebarSection | null) => void;
+  setLeavingSettingsBusy: (busy: boolean) => void;
+  setPendingDeepLinks: (items: string[]) => void;
+  setLoginServerModalOpen: (open: boolean) => void;
+  setLoginServerLoading: (loading: boolean) => void;
+  setLoginServerBusy: (busy: boolean) => void;
+  setLoginServers: (servers: AuthServer[]) => void;
+  setLoginServerPings: (pings: Record<string, number | null>) => void;
+  setSelectedLoginServerId: (id: string | null) => void;
   setActiveTab: (id: string | null) => void;
   setCommandInput: (value: string) => void;
   setPanePath: (side: PaneSide, path: string) => void;

@@ -484,6 +484,12 @@ export interface AppDictionary {
     licenseLabel: string;
     githubButton: string;
     docsButton: string;
+    dependenciesButton: string;
+    dependenciesTitle: string;
+    dependenciesDescription: string;
+    dependenciesIntro: string;
+    frontendPackagesTitle: string;
+    backendPackagesTitle: string;
     projectSection: string;
     projectVisionSection: string;
     projectVisionP1: string;

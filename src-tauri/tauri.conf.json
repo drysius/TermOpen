@@ -16,7 +16,7 @@
         "center": true,
         "width": 380,
         "height": 600,
-        "minWidth": 380,
+        "minWidth": 350,
         "minHeight": 600,
         "decorations": false,
         "transparent": true,

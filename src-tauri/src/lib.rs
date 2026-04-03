@@ -64,6 +64,8 @@ const RELEASES_LATEST_URL: &str =
     "https://api.github.com/repos/MarcosBrendonDePaula/TermOpen/releases/latest";
 const DEFAULT_WORKSPACE_WIDTH: f64 = 1440.0;
 const DEFAULT_WORKSPACE_HEIGHT: f64 = 900.0;
+const MIN_WORKSPACE_WIDTH: u32 = 350;
+const MIN_WORKSPACE_HEIGHT: u32 = 600;
 const LEGACY_COMPACT_WIDTH: u32 = 380;
 const LEGACY_COMPACT_HEIGHT: u32 = 600;
 const DEBUG_LOG_CAPACITY: usize = 2000;
@@ -384,6 +386,28 @@ async fn resolve_rdp_profile(
 
 fn is_legacy_compact_window_state(snapshot: &WindowState) -> bool {
     snapshot.width == LEGACY_COMPACT_WIDTH && snapshot.height == LEGACY_COMPACT_HEIGHT
+}
+
+fn is_window_below_minimum(width: u32, height: u32) -> bool {
+    width < MIN_WORKSPACE_WIDTH || height < MIN_WORKSPACE_HEIGHT
+}
+
+fn restore_window_to_default_size(window: &tauri::Window) {
+    let _ = window.unmaximize();
+    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+        DEFAULT_WORKSPACE_WIDTH,
+        DEFAULT_WORKSPACE_HEIGHT,
+    )));
+    let _ = window.center();
+}
+
+fn restore_webview_window_to_default_size(window: &tauri::WebviewWindow) {
+    let _ = window.unmaximize();
+    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+        DEFAULT_WORKSPACE_WIDTH,
+        DEFAULT_WORKSPACE_HEIGHT,
+    )));
+    let _ = window.center();
 }
 
 fn chunk_size_from_kb(kb: u32) -> usize {
@@ -2367,6 +2391,21 @@ async fn sync_recovery_restore(
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let target = url.trim();
+    if target.is_empty() {
+        return Err("URL externa vazia.".to_string());
+    }
+
+    let normalized = target.to_ascii_lowercase();
+    if !(normalized.starts_with("https://") || normalized.starts_with("http://")) {
+        return Err("Somente URLs HTTP/HTTPS sao permitidas.".to_string());
+    }
+
+    open::that_detached(target).map_err(app_error)
+}
+
+#[tauri::command]
 async fn open_external_editor(
     filename: String,
     content: String,
@@ -2561,22 +2600,17 @@ async fn window_state_restore(
     };
 
     let Some(snapshot) = maybe_state else {
-        let _ = window.unmaximize();
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            DEFAULT_WORKSPACE_WIDTH,
-            DEFAULT_WORKSPACE_HEIGHT,
-        )));
-        let _ = window.center();
+        restore_window_to_default_size(&window);
         return Ok(());
     };
 
     if is_legacy_compact_window_state(&snapshot) {
-        let _ = window.unmaximize();
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            DEFAULT_WORKSPACE_WIDTH,
-            DEFAULT_WORKSPACE_HEIGHT,
-        )));
-        let _ = window.center();
+        restore_window_to_default_size(&window);
+        return Ok(());
+    }
+
+    if is_window_below_minimum(snapshot.width, snapshot.height) {
+        restore_window_to_default_size(&window);
         return Ok(());
     }
 
@@ -2897,6 +2931,11 @@ pub fn run() {
                                     .set_window_origin(position.x as f64, position.y as f64);
                             }
                         }
+                        tauri::WindowEvent::Resized(size) => {
+                            if is_window_below_minimum(size.width, size.height) {
+                                restore_webview_window_to_default_size(&key_actions_window);
+                            }
+                        }
                         _ => {}
                     }
                 });
@@ -3003,6 +3042,7 @@ pub fn run() {
             sync_recovery_probe,
             sync_recovery_restore,
             release_check_latest,
+            open_external_url,
             open_external_editor,
             window_state_save,
             window_state_restore,

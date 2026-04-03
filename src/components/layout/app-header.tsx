@@ -93,7 +93,7 @@ export function AppHeader({
 
   return (
     <header className="sticky top-0 z-30 h-11 flex items-center border-b border-border/50 bg-background/80 backdrop-blur-sm">
-      <div data-tauri-drag-region className="h-full flex items-center px-2">
+      {compact ? null : <div data-tauri-drag-region className="h-full flex items-center px-2">
         <div style={{ WebkitAppRegion: "no-drag" } as CSSProperties}>
           <SidebarTrigger
             variant="ghost"
@@ -104,10 +104,10 @@ export function AppHeader({
             <SidebarIcon className="h-4 w-4" />
           </SidebarTrigger>
         </div>
-      </div>
+      </div>}
 
       {compact ? (
-        <div data-tauri-drag-region className="flex-1 text-xs font-semibold text-muted-foreground">
+        <div data-tauri-drag-region className="ml-4 flex-1 text-xs font-semibold text-muted-foreground">
           {t.app.name}
         </div>
       ) : (
