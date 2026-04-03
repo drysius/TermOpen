@@ -380,7 +380,7 @@ export function SftpBlockView({
   }, []);
 
   const columnButtonClass =
-    "inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-zinc-400 hover:text-zinc-100";
+    "inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-muted-foreground hover:text-foreground";
   const handleEntryDragStart = useCallback(
     (event: DragEvent<HTMLElement>, entry: SftpEntry) => {
       const payload: DragPayload = {
@@ -500,9 +500,9 @@ export function SftpBlockView({
         }
       }}
     >
-      <div className="grid grid-cols-[minmax(140px,0.9fr)_minmax(0,1.7fr)_auto] gap-2 border-b border-white/10 px-2 py-1.5">
+      <div className="grid grid-cols-[minmax(140px,0.9fr)_minmax(0,1.7fr)_auto] gap-2 border-b border-border/50 px-2 py-1.5">
         <select
-          className="h-8 rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
+          className="h-8 rounded border border-border/50 bg-background px-2 text-xs text-foreground"
           value={block.sourceId}
           onChange={(event) => onRefresh(block.path, event.target.value)}
           disabled={!isConnected}
@@ -516,7 +516,7 @@ export function SftpBlockView({
 
         <div className="flex min-w-0 items-center gap-1">
           <input
-            className="h-8 min-w-0 w-full rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-cyan-400/70"
+            className="h-8 min-w-0 w-full rounded border border-border/50 bg-background px-2 text-xs text-foreground outline-none focus:border-primary/70"
             value={pathDraft}
             list={pathListId}
             onChange={(event) => setPathDraft(event.target.value)}
@@ -537,7 +537,7 @@ export function SftpBlockView({
         <div className="relative flex items-center justify-end gap-1">
           <button
             type="button"
-            className="inline-flex h-8 w-8 items-center justify-center rounded border border-white/10 text-zinc-300 hover:border-cyan-400/60 hover:bg-zinc-900"
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-border/50 text-foreground/90 hover:border-primary/60 hover:bg-secondary"
             onClick={() => onRefresh(pathDraft, block.sourceId)}
             disabled={!isConnected}
           >
@@ -547,10 +547,10 @@ export function SftpBlockView({
             ref={transferToggleRef}
             type="button"
             className={cn(
-              "relative inline-flex h-8 w-8 items-center justify-center rounded border text-zinc-300",
+              "relative inline-flex h-8 w-8 items-center justify-center rounded border text-foreground/90",
               runningTransfers > 0
-                ? "border-cyan-400/50 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20"
-                : "border-white/10 hover:border-cyan-400/60 hover:bg-zinc-900",
+                ? "border-primary/50 bg-primary/10 text-primary hover:bg-primary/20"
+                : "border-border/50 hover:border-primary/60 hover:bg-secondary",
             )}
             onClick={() => setTransferMenuOpen((current) => !current)}
             title="Transferencias deste bloco"
@@ -558,7 +558,7 @@ export function SftpBlockView({
           >
             <MonitorUp className={cn("h-3.5 w-3.5", runningTransfers > 0 ? "animate-pulse" : undefined)} />
             {runningTransfers > 0 ? (
-              <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan-500 px-1 text-[10px] font-semibold text-zinc-950">
+              <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
                 {runningTransfers}
               </span>
             ) : null}
@@ -569,14 +569,14 @@ export function SftpBlockView({
         ? createPortal(
             <div
               ref={transferMenuRef}
-              className="fixed z-[12000] w-96 max-w-[78vw] rounded border border-white/15 bg-zinc-950/95 p-2 shadow-2xl shadow-black/40 backdrop-blur"
+              className="fixed z-[12000] w-96 max-w-[78vw] rounded border border-border/60 bg-background/95 p-2 shadow-2xl shadow-black/40 backdrop-blur"
               style={{ left: transferMenuRect.left, top: transferMenuRect.top }}
             >
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 Transferencias do bloco
               </p>
               {transferItems.length === 0 ? (
-                <p className="rounded border border-white/10 bg-zinc-900/60 px-2 py-2 text-xs text-zinc-500">
+                <p className="rounded border border-border/50 bg-secondary/60 px-2 py-2 text-xs text-muted-foreground">
                   Nenhuma transferencia registrada neste bloco.
                 </p>
               ) : (
@@ -589,7 +589,7 @@ export function SftpBlockView({
                           ? "text-emerald-300"
                           : item.transfer.status === "queued"
                             ? "text-amber-200"
-                          : "text-cyan-200";
+                          : "text-primary";
                     const barColor =
                       item.transfer.status === "error"
                         ? "bg-red-500/70"
@@ -597,17 +597,17 @@ export function SftpBlockView({
                           ? "bg-emerald-500/80"
                           : item.transfer.status === "queued"
                             ? "bg-amber-500/70"
-                          : "bg-cyan-500/80";
+                          : "bg-primary/80";
 
                     return (
-                      <div key={`${item.direction}:${item.transfer.id}`} className="rounded border border-white/10 bg-zinc-900/60 p-2">
+                      <div key={`${item.direction}:${item.transfer.id}`} className="rounded border border-border/50 bg-secondary/60 p-2">
                         <div className="flex items-center gap-2">
                           {item.direction === "outgoing" ? (
-                            <ArrowUpAZ className="h-3.5 w-3.5 text-cyan-300" />
+                            <ArrowUpAZ className="h-3.5 w-3.5 text-primary" />
                           ) : (
                             <ArrowDownAZ className="h-3.5 w-3.5 text-emerald-300" />
                           )}
-                          <p className="min-w-0 flex-1 truncate text-xs text-zinc-100">{item.transfer.label}</p>
+                          <p className="min-w-0 flex-1 truncate text-xs text-foreground">{item.transfer.label}</p>
                           <span className={cn("text-[11px] font-medium", statusColor)}>
                             {item.transfer.status === "running"
                               ? `${item.transfer.progress}%`
@@ -618,14 +618,14 @@ export function SftpBlockView({
                                 : "Erro"}
                           </span>
                         </div>
-                        <div className="mt-1 h-1.5 overflow-hidden rounded bg-white/10">
+                        <div className="mt-1 h-1.5 overflow-hidden rounded bg-muted">
                           <div
                             className={cn("h-full transition-all", barColor)}
                             style={{ width: `${Math.max(2, Math.min(100, item.transfer.progress))}%` }}
                           />
                         </div>
-                        <p className="mt-1 truncate text-[11px] text-zinc-500">{item.transfer.from}</p>
-                        <p className="truncate text-[11px] text-zinc-500">{item.transfer.to}</p>
+                        <p className="mt-1 truncate text-[11px] text-muted-foreground">{item.transfer.from}</p>
+                        <p className="truncate text-[11px] text-muted-foreground">{item.transfer.to}</p>
                         {item.transfer.errorMessage ? (
                           <p className="mt-1 text-[11px] text-red-300">{item.transfer.errorMessage}</p>
                         ) : null}
@@ -641,8 +641,8 @@ export function SftpBlockView({
 
       <div className={cn("min-h-0 flex-1 overflow-auto", !isConnected ? "opacity-40" : undefined)}>
         <table className="w-full select-none border-collapse text-xs">
-          <thead className="sticky top-0 z-10 bg-zinc-950/95">
-            <tr className="border-b border-white/10">
+          <thead className="sticky top-0 z-10 bg-background/95">
+            <tr className="border-b border-border/50">
               <th className="px-2 py-1.5 text-left">
                 <button type="button" className={columnButtonClass} onClick={() => onSelectSort("name")}>
                   Nome{" "}
@@ -685,9 +685,9 @@ export function SftpBlockView({
                 <tr
                   key={entry.path}
                   className={cn(
-                    "border-b border-white/5 text-zinc-200 transition hover:bg-zinc-900/70",
+                    "border-b border-border/30 text-foreground transition hover:bg-secondary/70",
                     "cursor-grab active:cursor-grabbing",
-                    selected ? "bg-cyan-600/10" : undefined,
+                    selected ? "bg-primary/10" : undefined,
                   )}
                   draggable
                   onClick={() => onSelectEntry(entry.path)}
@@ -733,23 +733,23 @@ export function SftpBlockView({
                       className="inline-flex items-center gap-2"
                     >
                       {entry.name === ".." ? (
-                        <Folder className="h-3.5 w-3.5 text-cyan-300" />
+                        <Folder className="h-3.5 w-3.5 text-primary" />
                       ) : entry.is_dir ? (
-                        <Folder className="h-3.5 w-3.5 text-cyan-300" />
+                        <Folder className="h-3.5 w-3.5 text-primary" />
                       ) : (
-                        <FileText className="h-3.5 w-3.5 text-zinc-400" />
+                        <FileText className="h-3.5 w-3.5 text-muted-foreground" />
                       )}
                       <span className="truncate">{entry.name}</span>
                     </span>
                   </td>
                   {showPermissions ? (
-                    <td className="px-2 py-1.5 text-zinc-400">{formatPermissions(entry.permissions)}</td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{formatPermissions(entry.permissions)}</td>
                   ) : null}
                   {showSize ? (
-                    <td className="px-2 py-1.5 text-right text-zinc-400">{entry.is_dir ? "-" : formatSize(entry.size)}</td>
+                    <td className="px-2 py-1.5 text-right text-muted-foreground">{entry.is_dir ? "-" : formatSize(entry.size)}</td>
                   ) : null}
                   {showModified ? (
-                    <td className="px-2 py-1.5 text-zinc-400">{formatModified(entry.modified_at)}</td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{formatModified(entry.modified_at)}</td>
                   ) : null}
                 </tr>
               );
@@ -757,7 +757,7 @@ export function SftpBlockView({
             {displayEntries.length === 0 ? (
               <tr>
                 <td
-                  className="px-2 py-6 text-center text-zinc-500"
+                  className="px-2 py-6 text-center text-muted-foreground"
                   colSpan={1 + Number(showPermissions) + Number(showSize) + Number(showModified)}
                 >
                   {block.loading ? "Carregando..." : "Sem arquivos"}
@@ -768,25 +768,25 @@ export function SftpBlockView({
         </table>
       </div>
       {!isConnected ? (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-zinc-950/80 p-3">
-          <div className="w-full max-w-md rounded-lg border border-white/15 bg-zinc-950/95 p-4 shadow-2xl shadow-black/50">
-            <div className="inline-flex items-center gap-2 text-sm text-zinc-100">
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/80 p-3">
+          <div className="w-full max-w-md rounded-lg border border-border/60 bg-background/95 p-4 shadow-2xl shadow-black/20">
+            <div className="inline-flex items-center gap-2 text-sm text-foreground">
               {block.connectStage === "connecting" ? (
-                <RefreshCw className="h-4 w-4 animate-spin text-cyan-300" />
+                <RefreshCw className="h-4 w-4 animate-spin text-primary" />
               ) : (
-                <Folder className="h-4 w-4 text-cyan-300" />
+                <Folder className="h-4 w-4 text-primary" />
               )}
               <span>{block.connectMessage}</span>
             </div>
-            <div className="mt-3 space-y-1 text-xs text-zinc-400">
-              <p className={cn(block.connectStage === "connecting" ? "text-cyan-300" : undefined)}>1. Conectando...</p>
-              <p className={cn(block.connectStage === "verifying_fingerprint" ? "text-cyan-300" : undefined)}>
+            <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+              <p className={cn(block.connectStage === "connecting" ? "text-primary" : undefined)}>1. Conectando...</p>
+              <p className={cn(block.connectStage === "verifying_fingerprint" ? "text-primary" : undefined)}>
                 2. Verificando fingerprint...
               </p>
               <p
                 className={cn(
                   block.connectStage === "awaiting_password" || block.connectStage === "error"
-                    ? "text-cyan-300"
+                    ? "text-primary"
                     : undefined,
                 )}
               >
@@ -795,25 +795,25 @@ export function SftpBlockView({
             </div>
 
             {block.connectStage === "verifying_fingerprint" && block.hostChallenge ? (
-              <div className="mt-3 rounded border border-white/10 bg-zinc-900/70 p-3 text-xs text-zinc-300">
-                <p className="font-medium text-zinc-100">{block.hostChallenge.message}</p>
+              <div className="mt-3 rounded border border-border/50 bg-secondary/70 p-3 text-xs text-foreground/90">
+                <p className="font-medium text-foreground">{block.hostChallenge.message}</p>
                 <p className="mt-1">
                   {block.hostChallenge.host}:{block.hostChallenge.port}
                 </p>
-                <p className="mt-1 break-all text-zinc-400">
+                <p className="mt-1 break-all text-muted-foreground">
                   {block.hostChallenge.keyType} {block.hostChallenge.fingerprint}
                 </p>
                 <div className="mt-3 flex items-center gap-2">
                   <button
                     type="button"
-                    className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                    className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20"
                     onClick={onTrustHost}
                   >
                     Confiar e continuar
                   </button>
                   <button
                     type="button"
-                    className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                    className="rounded border border-border/70 px-2 py-1 text-xs text-foreground/90 hover:bg-secondary"
                     onClick={onRetry}
                   >
                     Tentar novamente
@@ -828,7 +828,7 @@ export function SftpBlockView({
                 <input
                   type="password"
                   value={block.passwordDraft}
-                  className="h-9 w-full rounded border border-white/15 bg-zinc-900 px-2 text-sm text-zinc-100 outline-none focus:border-cyan-400/60"
+                  className="h-9 w-full rounded border border-border/60 bg-secondary/70 px-2 text-sm text-foreground outline-none focus:border-primary/60"
                   placeholder="Senha SSH/SFTP"
                   onChange={(event) => onPasswordDraftChange(event.target.value)}
                   onKeyDown={(event) => {
@@ -837,7 +837,7 @@ export function SftpBlockView({
                     }
                   }}
                 />
-                <label className="inline-flex items-center gap-2 text-xs text-zinc-400">
+                <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                   <input
                     type="checkbox"
                     checked={block.savePasswordChoice}
@@ -848,14 +848,14 @@ export function SftpBlockView({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                    className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20"
                     onClick={onSubmitPassword}
                   >
                     Logar
                   </button>
                   <button
                     type="button"
-                    className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                    className="rounded border border-border/70 px-2 py-1 text-xs text-foreground/90 hover:bg-secondary"
                     onClick={onRetry}
                   >
                     Repetir conexao
@@ -883,7 +883,7 @@ export function SftpBlockView({
             >
               <div
                 ref={contextMenuRef}
-                className="absolute z-[12001] w-56 rounded border border-white/15 bg-zinc-950/95 p-1 shadow-2xl shadow-black/40 backdrop-blur"
+                className="absolute z-[12001] w-56 rounded border border-border/60 bg-background/95 p-1 shadow-2xl shadow-black/40 backdrop-blur"
                 style={{ left: contextMenu.x, top: contextMenu.y }}
                 onMouseDown={(event) => event.stopPropagation()}
               >
@@ -892,8 +892,8 @@ export function SftpBlockView({
                     key={item.action}
                     type="button"
                     className={cn(
-                      "flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-zinc-100 transition",
-                      item.disabled ? "cursor-not-allowed opacity-40" : "hover:bg-zinc-800",
+                      "flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-foreground transition",
+                      item.disabled ? "cursor-not-allowed opacity-40" : "hover:bg-secondary",
                     )}
                     disabled={item.disabled}
                     onClick={() => runContextAction(item.action)}

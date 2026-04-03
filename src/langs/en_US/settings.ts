@@ -9,7 +9,7 @@ export const settings: AppDictionary["settings"] = {
     terminal: "Terminal",
     modifiedFiles: "Modified Files",
     googleDrive: "Google Drive",
-    masterPassword: "Master Password",
+    masterPassword: "Security",
   },
   editor: {
     title: "Default editor",
@@ -57,6 +57,10 @@ export const settings: AppDictionary["settings"] = {
     modalDescription: "Configure label, address and author for the local server.",
     saveChanges: "Save changes",
     addServer: "Add server",
+    connectionTitle: "Connection",
+    connectionDescription: "Manage authentication servers.",
+    editAction: "Edit",
+    deleteAction: "Delete",
   },
   autoReconnect: {
     title: "Auto reconnect SSH",
@@ -96,7 +100,7 @@ export const settings: AppDictionary["settings"] = {
     ask: "Always ask",
     manual: "Manual only",
     modalTitle: "Modified file upload",
-    modalDescription: "How should TermOpen handle modified files in the remote workspace?",
+    modalDescription: "How should ConnectHub handle modified files in the remote workspace?",
   },
   drive: {
     tabAccount: "Account",
@@ -127,6 +131,37 @@ export const settings: AppDictionary["settings"] = {
     newPlaceholder: "New password",
     confirmPlaceholder: "Confirm",
     updateButton: "Update Password",
+  },
+  security: {
+    warningTitle: "Critical encryption warning",
+    warningDescription:
+      "The master password controls all local ConnectHub encryption. Changing it re-encrypts your current app data.",
+    changePasswordTitle: "Change master password",
+    changePasswordDescription:
+      "Set a strong new password. Your current password is required to confirm this change.",
+    deleteAccountTitle: "Delete account",
+    deleteAccountDescription:
+      "Permanently removes all local ConnectHub data, including connections, keychain entries, and settings.",
+    deleteAccountAction: "Delete account",
+    totalConnections: "Connections: {count}",
+    totalKeychain: "Keychain: {count}",
+    totalKnownHosts: "Known hosts: {count}",
+    deleteModalTitle: "Confirm account deletion",
+    deleteModalDescription:
+      "This action is irreversible and will remove connected ConnectHub data on this device.",
+    deleteModalWarningTitle: "All data will be removed",
+    deleteModalWarningDescription:
+      "Continuing will delete all connections, keychain entries, settings, and other ConnectHub-related data.",
+    deleteCloudLabel: "Also delete cloud data",
+    deleteCloudDescription:
+      "When enabled, the connected Google Drive backup is removed before deleting local data.",
+    deleteCloudUnavailable: "Cloud not connected. Only local data will be removed.",
+    confirmPasswordLabel: "Current master password (required)",
+    confirmPasswordPlaceholder: "Enter your current master password",
+    confirmPasswordRequired: "Enter the current master password to confirm account deletion.",
+    deletingAction: "Deleting account...",
+    deleteConfirmAction: "Confirm deletion",
+    deleteSuccess: "Account deleted successfully.",
   },
   unsaved: {
     title: "Unsaved changes",

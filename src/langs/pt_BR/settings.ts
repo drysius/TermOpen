@@ -9,7 +9,7 @@ export const settings: AppDictionary["settings"] = {
     terminal: "Terminal",
     modifiedFiles: "Arquivos Modificados",
     googleDrive: "Google Drive",
-    masterPassword: "Senha Mestre",
+    masterPassword: "Segurança",
   },
   editor: {
     title: "Editor padrao",
@@ -57,6 +57,10 @@ export const settings: AppDictionary["settings"] = {
     modalDescription: "Configure label, endereco e autor para o servidor local.",
     saveChanges: "Salvar alteracoes",
     addServer: "Adicionar servidor",
+    connectionTitle: "Connection",
+    connectionDescription: "Gerenciamento de servidores de autenticação.",
+    editAction: "Editar",
+    deleteAction: "Excluir",
   },
   autoReconnect: {
     title: "Auto reconnect SSH",
@@ -96,7 +100,7 @@ export const settings: AppDictionary["settings"] = {
     ask: "Perguntar sempre",
     manual: "Somente manual",
     modalTitle: "Upload de arquivos modificados",
-    modalDescription: "Como o TermOpen deve tratar arquivos modificados no workspace remoto?",
+    modalDescription: "Como o ConnectHub deve tratar arquivos modificados no workspace remoto?",
   },
   drive: {
     tabAccount: "Conta",
@@ -127,6 +131,37 @@ export const settings: AppDictionary["settings"] = {
     newPlaceholder: "Nova senha",
     confirmPlaceholder: "Confirmar",
     updateButton: "Atualizar Senha",
+  },
+  security: {
+    warningTitle: "Aviso crítico de criptografia",
+    warningDescription:
+      "A senha mestre controla toda a criptografia local do ConnectHub. Alterar essa senha recriptografa os dados atuais do aplicativo.",
+    changePasswordTitle: "Trocar senha mestre",
+    changePasswordDescription:
+      "Defina uma nova senha forte. A senha atual é obrigatória para confirmar a alteração.",
+    deleteAccountTitle: "Deletar conta",
+    deleteAccountDescription:
+      "Remove permanentemente todos os dados locais do ConnectHub, incluindo conexões, keychain e configurações.",
+    deleteAccountAction: "Deletar conta",
+    totalConnections: "Conexões: {count}",
+    totalKeychain: "Keychain: {count}",
+    totalKnownHosts: "Known hosts: {count}",
+    deleteModalTitle: "Confirmar exclusão da conta",
+    deleteModalDescription:
+      "Esta ação é irreversível e removerá os dados conectados ao ConnectHub neste dispositivo.",
+    deleteModalWarningTitle: "Todos os dados serão removidos",
+    deleteModalWarningDescription:
+      "Ao continuar, todas as conexões, keychain, configurações e dados relacionados ao ConnectHub serão apagados.",
+    deleteCloudLabel: "Excluir também os dados na cloud",
+    deleteCloudDescription:
+      "Quando ativo, remove o backup remoto conectado ao Google Drive antes de apagar os dados locais.",
+    deleteCloudUnavailable: "Cloud não conectada. Apenas os dados locais serão removidos.",
+    confirmPasswordLabel: "Senha mestre atual (obrigatória)",
+    confirmPasswordPlaceholder: "Digite sua senha mestre atual",
+    confirmPasswordRequired: "Digite a senha mestre atual para confirmar a exclusão.",
+    deletingAction: "Deletando conta...",
+    deleteConfirmAction: "Confirmar exclusão",
+    deleteSuccess: "Conta removida com sucesso.",
   },
   unsaved: {
     title: "Alteracoes nao salvas",

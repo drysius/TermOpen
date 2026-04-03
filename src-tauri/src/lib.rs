@@ -89,6 +89,23 @@ struct LocalPathStatPayload {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct SshKeyGenerateInput {
+    algorithm: String,
+    comment: Option<String>,
+    passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SshKeyGenerateResult {
+    private_key: String,
+    public_key: String,
+    fingerprint: String,
+    name_suggestion: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum RemoteTransferEndpointInput {
     Local,
@@ -655,6 +672,41 @@ async fn vault_lock(state: State<'_, AppState>) -> Result<VaultStatus, String> {
 
 #[tauri::command]
 async fn vault_reset_all(state: State<'_, AppState>) -> Result<VaultStatus, String> {
+    let status = {
+        let mut vault = state.vault.lock().await;
+        vault.reset_all().map_err(app_error)?
+    };
+    {
+        let sync = state.sync.lock().await;
+        sync.clear_local_auth();
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+async fn vault_delete_account(
+    state: State<'_, AppState>,
+    current_password: String,
+    delete_cloud_data: bool,
+) -> Result<VaultStatus, String> {
+    {
+        let vault = state.vault.lock().await;
+        vault
+            .verify_master_password(&current_password)
+            .map_err(app_error)?;
+    }
+
+    if delete_cloud_data {
+        let (server_address, fallbacks) = {
+            let vault = state.vault.lock().await;
+            resolve_server_addresses(&vault)?
+        };
+        let mut sync = state.sync.lock().await;
+        sync.delete_remote_backup(&server_address, &fallbacks)
+            .await
+            .map_err(app_error)?;
+    }
+
     let status = {
         let mut vault = state.vault.lock().await;
         vault.reset_all().map_err(app_error)?
@@ -2347,6 +2399,135 @@ async fn open_external_editor(
     open::that_detached(&file_path).map_err(app_error)
 }
 
+fn sanitize_key_name_fragment(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+    }
+    let compact = out.trim_matches('_').to_string();
+    if compact.is_empty() {
+        "generated".to_string()
+    } else {
+        compact
+    }
+}
+
+fn parse_ssh_keygen_fingerprint(line: &str) -> String {
+    let mut parts = line.split_whitespace();
+    let _bits = parts.next();
+    parts
+        .next()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| line.trim().to_string())
+}
+
+#[tauri::command]
+async fn ssh_key_generate(input: SshKeyGenerateInput) -> Result<SshKeyGenerateResult, String> {
+    let algorithm = input.algorithm.trim().to_ascii_lowercase();
+    let normalized_passphrase = normalize_optional_input(input.passphrase).unwrap_or_default();
+    let normalized_comment = normalize_optional_input(input.comment)
+        .unwrap_or_else(|| "connecthub-generated".to_string());
+
+    let (key_type, bits, name_prefix) = match algorithm.as_str() {
+        "ed25519" => ("ed25519", None, "id_ed25519"),
+        "rsa4096" => ("rsa", Some("4096"), "id_rsa"),
+        "rsa2048" => ("rsa", Some("2048"), "id_rsa"),
+        "ecdsa521" => ("ecdsa", Some("521"), "id_ecdsa"),
+        other => {
+            return Err(format!(
+                "Algoritmo de chave SSH nao suportado: {}. Use ed25519, rsa4096, rsa2048 ou ecdsa521.",
+                other
+            ));
+        }
+    };
+
+    let base_name = format!(
+        "{}_{}",
+        name_prefix,
+        sanitize_key_name_fragment(&normalized_comment)
+    );
+
+    let temp_dir = tempfile::tempdir().map_err(app_error)?;
+    let key_path = temp_dir.path().join(&base_name);
+
+    let mut generate = Command::new("ssh-keygen");
+    generate
+        .arg("-t")
+        .arg(key_type)
+        .arg("-N")
+        .arg(&normalized_passphrase)
+        .arg("-C")
+        .arg(&normalized_comment)
+        .arg("-f")
+        .arg(&key_path)
+        .arg("-q");
+    if let Some(bits_value) = bits {
+        generate.arg("-b").arg(bits_value);
+    }
+
+    let output = generate.output().map_err(|error| {
+        app_error(format!(
+            "Falha ao executar ssh-keygen. Verifique se OpenSSH esta instalado ({})",
+            error
+        ))
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let reason = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "erro desconhecido".to_string()
+        };
+        return Err(app_error(format!("ssh-keygen retornou erro: {}", reason)));
+    }
+
+    let private_key = fs::read_to_string(&key_path).map_err(|error| {
+        app_error(format!(
+            "Falha ao ler chave privada gerada ({})",
+            error
+        ))
+    })?;
+    let public_key_path = PathBuf::from(format!("{}.pub", key_path.to_string_lossy()));
+    let public_key = fs::read_to_string(&public_key_path).map_err(|error| {
+        app_error(format!(
+            "Falha ao ler chave publica gerada ({})",
+            error
+        ))
+    })?;
+
+    let fingerprint_output = Command::new("ssh-keygen")
+        .arg("-lf")
+        .arg(&public_key_path)
+        .output()
+        .map_err(|error| {
+            app_error(format!(
+                "Falha ao calcular fingerprint da chave gerada ({})",
+                error
+            ))
+        })?;
+
+    let fingerprint = if fingerprint_output.status.success() {
+        parse_ssh_keygen_fingerprint(&String::from_utf8_lossy(&fingerprint_output.stdout))
+    } else {
+        "N/A".to_string()
+    };
+
+    Ok(SshKeyGenerateResult {
+        private_key,
+        public_key,
+        fingerprint,
+        name_suggestion: base_name,
+    })
+}
+
 #[tauri::command]
 async fn window_state_save(
     window: tauri::Window,
@@ -2746,6 +2927,7 @@ pub fn run() {
             vault_unlock,
             vault_lock,
             vault_reset_all,
+            vault_delete_account,
             vault_change_master_password,
             connections_list,
             connection_save,
@@ -2753,6 +2935,7 @@ pub fn run() {
             keychain_list,
             keychain_save,
             keychain_delete,
+            ssh_key_generate,
             settings_get,
             settings_update,
             debug_logs_list,

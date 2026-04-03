@@ -4,10 +4,13 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   FileText,
   Folder,
+  HardDrive,
   Maximize2,
   Minimize2,
   Monitor,
   Plus,
+  Search,
+  Server,
   TerminalSquare,
   X,
 } from "lucide-react";
@@ -21,7 +24,7 @@ import {
 import { toast } from "sonner";
 
 import { WorkspaceBlockController, type WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
-import { Dialog } from "@/components/ui/dialog";
+import { AppDialog } from "@/components/ui/app-dialog";
 import { baseName, getError, joinPath, joinRemotePath, normalizeRemotePath, supportsProtocol } from "@/functions/common";
 import {
   detectEditorFileMeta,
@@ -33,6 +36,8 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
 import type {
   ClipboardLocalItem,
+  ConnectionProfile,
+  ConnectionProtocol,
   KeyActionsActiveTargetInput,
   KeyActionsStatusPayload,
   RemoteTransferEndpoint,
@@ -168,7 +173,64 @@ function supportsExactProfileProtocol(
   return profileProtocols(profile).includes(protocol);
 }
 
-export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: WorkspaceTabPageProps) {
+function primaryProfileProtocol(profile: { protocols?: string[]; kind?: string | null }): ConnectionProtocol {
+  const protocols = profileProtocols(profile);
+  if (protocols.includes("rdp")) {
+    return "rdp";
+  }
+  if (protocols.includes("sftp")) {
+    return "sftp";
+  }
+  if (protocols.includes("ftp")) {
+    return "ftp";
+  }
+  if (protocols.includes("ftps")) {
+    return "ftps";
+  }
+  if (protocols.includes("smb")) {
+    return "smb";
+  }
+  return "ssh";
+}
+
+function resolveWorkspaceFileProtocol(
+  profile: { protocols?: string[]; kind?: string | null },
+): "sftp" | "ftp" | "ftps" | "smb" | null {
+  const protocols = profileProtocols(profile);
+  if (protocols.includes("sftp")) {
+    return "sftp";
+  }
+  if (protocols.includes("ftp")) {
+    return "ftp";
+  }
+  if (protocols.includes("ftps")) {
+    return "ftps";
+  }
+  if (protocols.includes("smb")) {
+    return "smb";
+  }
+  return null;
+}
+
+const connectionProtocolIcon: Record<ConnectionProtocol, typeof Monitor> = {
+  ssh: Monitor,
+  sftp: Server,
+  ftp: Server,
+  ftps: Server,
+  smb: HardDrive,
+  rdp: Monitor,
+};
+
+const connectionProtocolColor: Record<ConnectionProtocol, string> = {
+  ssh: "bg-primary/15 text-primary",
+  sftp: "bg-info/15 text-info",
+  ftp: "bg-success/15 text-success",
+  ftps: "bg-success/15 text-success",
+  smb: "bg-warning/15 text-warning",
+  rdp: "bg-destructive/15 text-destructive",
+};
+
+export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initialOpenFiles = false }: WorkspaceTabPageProps) {
   const t = useT();
   const sessions = useAppStore((state) => state.sessions);
   const connections = useAppStore((state) => state.connections);
@@ -186,9 +248,12 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const blocksRef = useRef<WorkspaceBlock[]>([]);
   const initialBlocks =
     workspaceSnapshot?.workspaceMode === "free" && Array.isArray(workspaceSnapshot.blocks)
-      ? (workspaceSnapshot.blocks as WorkspaceBlock[]).filter(
-          (item) => (item as { kind?: string }).kind !== "logs",
-        )
+      ? (workspaceSnapshot.blocks as WorkspaceBlock[])
+          .filter((item) => (item as { kind?: string }).kind !== "logs")
+          .map((item) => ({
+            ...item,
+            minimized: Boolean((item as { minimized?: boolean }).minimized),
+          }))
       : [];
   const initialLogs = Array.isArray(workspaceSnapshot?.logs)
     ? (workspaceSnapshot.logs as WorkspaceLogEntry[])
@@ -201,9 +266,13 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
   const [workspaceLogs, setWorkspaceLogs] = useState<WorkspaceLogEntry[]>(initialLogs);
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [createBlockModalOpen, setCreateBlockModalOpen] = useState(false);
+  const [selectConnectionDialogOpen, setSelectConnectionDialogOpen] = useState(false);
+  const [selectConnectionSearch, setSelectConnectionSearch] = useState("");
   const [createBlockKind, setCreateBlockKind] = useState<"terminal" | "sftp" | "rdp" | "editor">("terminal");
   const [createSourceDraft, setCreateSourceDraft] = useState("local");
-  const [focusedBlockId, setFocusedBlockId] = useState<string | null>(initialBlocks[0]?.id ?? null);
+  const [focusedBlockId, setFocusedBlockId] = useState<string | null>(
+    initialBlocks.find((item) => !item.minimized)?.id ?? initialBlocks[0]?.id ?? null,
+  );
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [snapPreview, setSnapPreview] = useState<WorkspaceBlockLayout | null>(null);
   const [keyActionsStatus, setKeyActionsStatus] = useState<KeyActionsStatusPayload | null>(null);
@@ -313,10 +382,19 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       return;
     }
 
-    const stillExists = focusedBlockId ? blocks.some((block) => block.id === focusedBlockId) : false;
-    if (stillExists) {
+    const focusedBlock = focusedBlockId ? blocks.find((block) => block.id === focusedBlockId) : null;
+    if (focusedBlock && !focusedBlock.minimized) {
       return;
     }
+
+    const topVisibleBlock = [...blocks]
+      .filter((block) => !block.minimized)
+      .sort((left, right) => right.zIndex - left.zIndex)[0];
+    if (topVisibleBlock) {
+      setFocusedBlockId(topVisibleBlock.id);
+      return;
+    }
+
     const topBlock = [...blocks].sort((left, right) => right.zIndex - left.zIndex)[0];
     setFocusedBlockId(topBlock?.id ?? null);
   }, [blocks, focusedBlockId]);
@@ -556,6 +634,22 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       })),
     [sftpProfiles],
   );
+  const terminalRemoteSourceOptions = useMemo(
+    () =>
+      sshProfiles.map((profile) => ({
+        id: formatProfileSourceId(profile.id, "sftp"),
+        label: `${profile.host} (${profile.username})`,
+      })),
+    [sshProfiles],
+  );
+  const rdpSourceOptions = useMemo(
+    () =>
+      rdpProfiles.map((profile) => ({
+        id: formatProfileSourceId(profile.id, "sftp"),
+        label: `${profile.host} (${profile.username})`,
+      })),
+    [rdpProfiles],
+  );
   const externalFileProfileSourceOptions = useMemo(
     () => [
       ...ftpProfiles.map((profile) => ({
@@ -573,31 +667,69 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     ],
     [ftpProfiles, ftpsProfiles, smbProfiles],
   );
+  const remoteFileSourceOptions = useMemo(
+    () => [...sftpProfileSourceOptions, ...externalFileProfileSourceOptions],
+    [externalFileProfileSourceOptions, sftpProfileSourceOptions],
+  );
   const createSourceOptions = useMemo(() => {
     if (createBlockKind === "terminal") {
       return [
         { id: "local", label: "Local Terminal" },
-        ...sshProfiles.map((profile) => ({
-          id: formatProfileSourceId(profile.id, "sftp"),
-          label: `${profile.host} (${profile.username})`,
-        })),
+        ...terminalRemoteSourceOptions,
       ];
     }
     if (createBlockKind === "sftp") {
       return [
         { id: "local", label: "Local File System" },
-        ...sftpProfileSourceOptions,
-        ...externalFileProfileSourceOptions,
+        ...remoteFileSourceOptions,
       ];
     }
     if (createBlockKind === "rdp") {
-      return rdpProfiles.map((profile) => ({
-        id: formatProfileSourceId(profile.id, "sftp"),
-        label: `${profile.host} (${profile.username})`,
-      }));
+      return rdpSourceOptions;
     }
     return [];
-  }, [createBlockKind, externalFileProfileSourceOptions, rdpProfiles, sftpProfileSourceOptions, sshProfiles]);
+  }, [createBlockKind, rdpSourceOptions, remoteFileSourceOptions, terminalRemoteSourceOptions]);
+  const selectedCreateSourceOptions = useMemo(() => {
+    if (createBlockKind === "rdp") {
+      return rdpSourceOptions;
+    }
+    if (createBlockKind === "terminal" && createSourceDraft !== "local") {
+      return terminalRemoteSourceOptions;
+    }
+    if (createBlockKind === "sftp" && createSourceDraft !== "local") {
+      return remoteFileSourceOptions;
+    }
+    return [];
+  }, [
+    createBlockKind,
+    createSourceDraft,
+    rdpSourceOptions,
+    remoteFileSourceOptions,
+    terminalRemoteSourceOptions,
+  ]);
+  const selectableConnections = useMemo(() => {
+    const query = selectConnectionSearch.trim().toLowerCase();
+    if (!query) {
+      return connections;
+    }
+    return connections.filter((profile) => {
+      const protocols = profileProtocols(profile).join(" ");
+      return (
+        profile.name.toLowerCase().includes(query) ||
+        profile.host.toLowerCase().includes(query) ||
+        profile.username.toLowerCase().includes(query) ||
+        protocols.includes(query)
+      );
+    });
+  }, [connections, selectConnectionSearch]);
+  const openCreateBlockModal = useCallback(
+    () => {
+      setCreateBlockKind("terminal");
+      setCreateSourceDraft("local");
+      setCreateBlockModalOpen(true);
+    },
+    [],
+  );
 
   const sourceOptions = useMemo(
     () => [
@@ -691,7 +823,15 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         return current;
       }
       const top = current.reduce((highest, item) => Math.max(highest, item.zIndex), 1);
-      return current.map((block) => (block.id === id ? { ...block, zIndex: top + 1 } : block));
+      return current.map((block) =>
+        block.id === id
+          ? {
+              ...block,
+              zIndex: top + 1,
+              minimized: false,
+            }
+          : block,
+      );
     });
   }, []);
 
@@ -749,10 +889,41 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
   const toggleMaximize = useCallback((id: string) => {
     setBlocks((current) =>
-      current.map((block) => (block.id === id ? { ...block, maximized: !block.maximized } : block)),
+      current.map((block) =>
+        block.id === id ? { ...block, maximized: !block.maximized, minimized: false } : block,
+      ),
     );
     focusBlock(id);
   }, [focusBlock]);
+
+  const toggleMinimize = useCallback(
+    (id: string) => {
+      const target = blocksRef.current.find((block) => block.id === id);
+      if (!target) {
+        return;
+      }
+
+      const nextMinimized = !target.minimized;
+      setBlocks((current) =>
+        current.map((block) =>
+          block.id === id ? { ...block, minimized: nextMinimized, maximized: false } : block,
+        ),
+      );
+
+      if (!nextMinimized) {
+        setFocusedBlockId(id);
+        return;
+      }
+
+      if (focusedBlockId === id) {
+        const nextFocused = [...blocksRef.current]
+          .filter((block) => block.id !== id && !block.minimized)
+          .sort((left, right) => right.zIndex - left.zIndex)[0];
+        setFocusedBlockId(nextFocused?.id ?? id);
+      }
+    },
+    [focusedBlockId],
+  );
 
   const onLayoutChange = useCallback((id: string, nextLayout: WorkspaceBlockLayout) => {
     setBlocks((current) =>
@@ -1009,6 +1180,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           saving: false,
           layout: workspaceDefaultLayout("editor", blocksRef.current.length + 1, workspaceSize.width, workspaceSize.height),
           zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+          minimized: false,
           maximized: false,
         };
         setBlocks((current) => [...current, editorBlock]);
@@ -1552,6 +1724,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         retryInSeconds: null,
         layout: workspaceDefaultLayout("sftp", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+        minimized: false,
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
@@ -1979,6 +2152,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         capturedAt: null,
         layout: workspaceDefaultLayout("rdp", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+        minimized: false,
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
@@ -2347,6 +2521,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         retryInSeconds: null,
         layout: workspaceDefaultLayout("terminal", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+        minimized: false,
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
@@ -2805,6 +2980,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         retryInSeconds: null,
         layout: workspaceDefaultLayout("terminal", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+        minimized: false,
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
@@ -2856,6 +3032,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         retryInSeconds: null,
         layout: workspaceDefaultLayout("sftp", blocksRef.current.length, workspaceSize.width, workspaceSize.height),
         zIndex: blocksRef.current.reduce((acc, item) => Math.max(acc, item.zIndex), 1) + 1,
+        minimized: false,
         maximized: false,
       };
       setBlocks((current) => [...current, block]);
@@ -2867,6 +3044,39 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     [appendWorkspaceLog, connections, resolvePendingSftpConnection, workspaceSize.height, workspaceSize.width],
   );
 
+  const openConnectionInWorkspace = useCallback(
+    (profile: ConnectionProfile, options?: { openSftpWithSsh?: boolean }) => {
+      const protocols = profileProtocols(profile);
+      if (protocols.includes("rdp")) {
+        addPendingRdpBlock(profile.id);
+        return;
+      }
+
+      const hasSsh = protocols.includes("ssh");
+      const fileProtocol = resolveWorkspaceFileProtocol(profile);
+
+      if (hasSsh) {
+        addPendingTerminalBlock(profile.id);
+        if ((options?.openSftpWithSsh ?? false) && fileProtocol === "sftp") {
+          addPendingSftpBlock(profile.id);
+        }
+        return;
+      }
+
+      if (fileProtocol === "sftp") {
+        addPendingSftpBlock(profile.id);
+        return;
+      }
+      if (fileProtocol) {
+        addSftpBlock(formatProfileSourceId(profile.id, fileProtocol));
+        return;
+      }
+
+      toast.error("Esta conexão não possui protocolo suportado para abrir no workspace.");
+    },
+    [addPendingRdpBlock, addPendingSftpBlock, addPendingTerminalBlock, addSftpBlock],
+  );
+
   useEffect(() => {
     if (initializedRef.current) {
       return;
@@ -2876,6 +3086,12 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
       const profileId = parseProfileSourceId(initialSourceId);
       if (profileId) {
         addPendingTerminalBlock(profileId);
+        if (initialOpenFiles) {
+          const profile = connections.find((item) => item.id === profileId);
+          if (profile && resolveWorkspaceFileProtocol(profile) === "sftp") {
+            addPendingSftpBlock(profileId);
+          }
+        }
         return;
       }
       addTerminalBlock(initialSourceId);
@@ -2906,7 +3122,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
     addPendingTerminalBlock,
     addSftpBlock,
     addTerminalBlock,
+    connections,
     initialBlock,
+    initialOpenFiles,
     initialSourceId,
   ]);
 
@@ -3180,13 +3398,15 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
   const renderedBlocks = useMemo(
     () =>
-      blocks.map((block) => ({
-        block,
-        layout: block.maximized
-          ? { x: 0, y: 0, width: workspaceSize.width, height: workspaceSize.height }
-          : block.layout,
-        interactive: !block.maximized,
-      })),
+      blocks
+        .filter((block) => !block.minimized)
+        .map((block) => ({
+          block,
+          layout: block.maximized
+            ? { x: 0, y: 0, width: workspaceSize.width, height: workspaceSize.height }
+            : block.layout,
+          interactive: !block.maximized,
+        })),
     [blocks, workspaceSize.height, workspaceSize.width],
   );
 
@@ -3201,66 +3421,124 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-10 items-center gap-1 border-b border-white/10 px-2">
-        <button
-          type="button"
-          className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 transition hover:border-cyan-400/60 hover:bg-zinc-900"
-          onClick={() => {
-            setCreateBlockKind("terminal");
-            setCreateSourceDraft("local");
-            setCreateBlockModalOpen(true);
-          }}
-        >
-          <Plus className="h-4 w-4" />
-        </button>
+      <div className="flex h-10 items-center gap-2 border-b border-border/60 bg-card/60 px-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          {blocks.map((block) => {
+            const iconClass =
+              block.kind === "terminal"
+                ? "text-primary"
+                : block.kind === "sftp"
+                  ? "text-info"
+                  : block.kind === "rdp"
+                    ? "text-destructive"
+                    : "text-warning";
+            const Icon =
+              block.kind === "terminal"
+                ? TerminalSquare
+                : block.kind === "sftp"
+                  ? Folder
+                  : block.kind === "rdp"
+                    ? Monitor
+                    : FileText;
+            const active = focusedBlockId === block.id && !block.minimized;
+            return (
+              <button
+                key={block.id}
+                type="button"
+                onClick={() => {
+                  if (block.minimized) {
+                    toggleMinimize(block.id);
+                    focusBlock(block.id);
+                    return;
+                  }
+                  if (focusedBlockId === block.id) {
+                    toggleMinimize(block.id);
+                    return;
+                  }
+                  focusBlock(block.id);
+                }}
+                className={cn(
+                  "flex h-7 shrink-0 items-center gap-1.5 rounded border px-2.5 text-[11px] transition-colors",
+                  active
+                    ? "border-primary/40 bg-primary/12 text-primary"
+                    : block.minimized
+                      ? "border-border/40 bg-secondary/35 text-muted-foreground"
+                      : "border-border/50 bg-secondary/55 text-foreground hover:bg-secondary",
+                )}
+                title={block.title}
+              >
+                <Icon className={cn("h-3 w-3", iconClass)} />
+                <span className="max-w-[180px] truncate">{block.title}</span>
+                <X
+                  className="ml-0.5 h-2.5 w-2.5 text-muted-foreground hover:text-destructive"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    closeBlock(block.id);
+                  }}
+                />
+              </button>
+            );
+          })}
 
-        <div className="ml-auto flex items-center gap-2 text-xs text-zinc-300">
-          {activeTransfers > 0 ? (
-            <div className="flex items-center gap-2 rounded border border-cyan-400/40 bg-cyan-500/10 px-2 py-1 text-cyan-200">
-              <Folder className="h-3.5 w-3.5 animate-pulse" />
-              <span>{activeTransfers} transferencia(s)</span>
-            </div>
-          ) : null}
+          <button
+            type="button"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border/60 text-muted-foreground transition hover:border-primary/60 hover:bg-secondary hover:text-foreground"
+            title={t.workspace.addBlock}
+            onClick={() => openCreateBlockModal()}
+          >
+            <Plus className="h-4 w-4" />
+          </button>
         </div>
+
+        {activeTransfers > 0 ? (
+          <div className="flex items-center gap-1.5 rounded border border-primary/40 bg-primary/10 px-2 py-1 text-[11px] text-primary">
+            <Folder className="h-3.5 w-3.5 animate-pulse" />
+            <span>{activeTransfers} {t.workspace.transfer}</span>
+          </div>
+        ) : null}
       </div>
 
-      <div ref={workspaceRef} className="relative min-h-0 flex-1 overflow-hidden bg-zinc-950">
-        {renderedBlocks.length === 0 ? (
+      <div ref={workspaceRef} className="relative min-h-0 flex-1 overflow-hidden bg-background">
+        <div
+          className="pointer-events-none absolute inset-0 opacity-[0.04]"
+          style={{
+            backgroundImage: "radial-gradient(circle, hsl(var(--foreground)) 1px, transparent 1px)",
+            backgroundSize: "22px 22px",
+          }}
+        />
+
+        {blocks.length === 0 ? (
           <div className="flex h-full items-center justify-center">
-            <div className="text-center">
-              <p className="text-sm font-semibold text-zinc-200">Workspace vazio</p>
-              <p className="mt-1 text-xs text-zinc-500">Adicione blocos de terminal e SFTP para comecar.</p>
-              <div className="mt-4 flex items-center justify-center gap-2">
+            <div className="w-full max-w-md rounded-2xl border border-border/50 bg-card/80 p-6 text-center shadow-xl">
+              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl border border-primary/25 bg-primary/10">
+                <Monitor className="h-6 w-6 text-primary" />
+              </div>
+              <p className="text-sm font-semibold text-foreground">{t.workspace.newBlockTitle}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{t.workspace.newBlockDescription}</p>
+              <div className="mt-4 flex items-center justify-center">
                 <button
                   type="button"
-                  className="flex h-8 items-center gap-2 rounded border border-white/15 px-3 text-xs text-zinc-200 hover:bg-zinc-900"
-                  onClick={() => {
-                    setCreateBlockKind("sftp");
-                    setCreateSourceDraft("local");
-                    setCreateBlockModalOpen(true);
-                  }}
+                  className="flex h-8 items-center gap-2 rounded-lg border border-border/60 px-3 text-xs text-foreground transition hover:bg-secondary"
+                  onClick={() => setSelectConnectionDialogOpen(true)}
                 >
-                  <Folder className="h-3.5 w-3.5" /> SFTP
-                </button>
-                <button
-                  type="button"
-                  className="flex h-8 items-center gap-2 rounded border border-white/15 px-3 text-xs text-zinc-200 hover:bg-zinc-900"
-                  onClick={() => {
-                    setCreateBlockKind("terminal");
-                    setCreateSourceDraft("local");
-                    setCreateBlockModalOpen(true);
-                  }}
-                >
-                  <TerminalSquare className="h-3.5 w-3.5" /> Terminal
+                  <Monitor className="h-3.5 w-3.5" /> {t.workspace.accessConnection}
                 </button>
               </div>
             </div>
           </div>
         ) : null}
 
+        {blocks.length > 0 && renderedBlocks.length === 0 ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="rounded-xl border border-border/50 bg-card/70 px-4 py-3 text-xs text-muted-foreground">
+              {t.workspace.allMinimizedHint}
+            </div>
+          </div>
+        ) : null}
+
         {snapPreview ? (
           <div
-            className="pointer-events-none absolute rounded-md border border-cyan-400/70 bg-cyan-500/12 shadow-[0_0_24px_rgba(34,211,238,0.35)]"
+            className="pointer-events-none absolute rounded-md border border-primary/70 bg-primary/12 shadow-[0_0_24px_hsl(var(--primary)/0.35)]"
             style={{
               left: snapPreview.x,
               top: snapPreview.y,
@@ -3291,14 +3569,22 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
               <>
                 <button
                   type="button"
-                  className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                  className="rounded p-1 text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+                  onClick={() => toggleMinimize(block.id)}
+                  title="Minimizar"
+                >
+                  <Minimize2 className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  className="rounded p-1 text-muted-foreground transition hover:bg-secondary hover:text-foreground"
                   onClick={() => toggleMaximize(block.id)}
                 >
                   {block.maximized ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
                 </button>
                 <button
                   type="button"
-                  className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                  className="rounded p-1 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive"
                   onClick={() => closeBlock(block.id)}
                 >
                   <X className="h-3.5 w-3.5" />
@@ -3668,23 +3954,118 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
         ))}
       </div>
 
-      <Dialog
+      <AppDialog
+        open={selectConnectionDialogOpen}
+        title={t.workspace.selectConnectionTitle}
+        description={t.workspace.selectConnectionDescription}
+        onClose={() => {
+          setSelectConnectionDialogOpen(false);
+          setSelectConnectionSearch("");
+        }}
+      >
+        <div className="space-y-3">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              value={selectConnectionSearch}
+              onChange={(event) => setSelectConnectionSearch(event.target.value)}
+              placeholder={t.workspace.selectConnectionSearchPlaceholder}
+              className="h-9 w-full rounded-lg border border-border/60 bg-secondary/50 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+
+          <div className="max-h-[420px] overflow-auto rounded-xl border border-border/40">
+            {selectableConnections.length === 0 ? (
+              <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+                {t.workspace.selectConnectionEmpty}
+              </div>
+            ) : (
+              selectableConnections.map((profile) => {
+                const protocols = profileProtocols(profile);
+                const primary = primaryProfileProtocol(profile);
+                const Icon = connectionProtocolIcon[primary];
+                const hasSsh = protocols.includes("ssh");
+                const fileProtocol = resolveWorkspaceFileProtocol(profile);
+                const quickLabel =
+                  hasSsh && fileProtocol === "sftp"
+                    ? t.home.connections.protocolBoth
+                    : protocols.includes("rdp")
+                      ? t.home.connections.protocolRdp
+                      : fileProtocol === "sftp"
+                        ? t.home.connections.protocolSftp
+                        : fileProtocol === "ftp"
+                          ? t.home.connections.protocolFtp
+                          : fileProtocol === "ftps"
+                            ? t.home.connections.protocolFtps
+                            : fileProtocol === "smb"
+                              ? t.home.connections.protocolSmb
+                              : t.home.connections.protocolSsh;
+
+                return (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    className="flex w-full items-center gap-3 border-b border-border/15 px-4 py-3 text-left transition-colors hover:bg-accent/40 last:border-b-0"
+                    onClick={() => {
+                      openConnectionInWorkspace(profile, { openSftpWithSsh: true });
+                      setSelectConnectionDialogOpen(false);
+                      setSelectConnectionSearch("");
+                    }}
+                  >
+                    <div
+                      className={cn(
+                        "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
+                        connectionProtocolColor[primary],
+                      )}
+                    >
+                      <Icon className="h-4 w-4" />
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-foreground">{profile.name}</p>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {profile.host}:{profile.port} · {profile.username}
+                      </p>
+                    </div>
+
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <span
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                          connectionProtocolColor[primary],
+                        )}
+                      >
+                        {quickLabel}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {protocols.map((item) => item.toUpperCase()).join(" · ")}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </AppDialog>
+
+      <AppDialog
         open={createBlockModalOpen}
-        title="Novo Bloco"
-        description="Escolha qual bloco deseja abrir neste workspace."
+        title={t.workspace.newBlockTitle}
+        description={t.workspace.newBlockDescription}
         onClose={() => setCreateBlockModalOpen(false)}
         footer={
           <div className="flex items-center justify-end gap-2">
             <button
               type="button"
-              className="rounded border border-white/20 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-900"
+              className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-foreground/90 transition hover:bg-secondary"
               onClick={() => setCreateBlockModalOpen(false)}
             >
               Cancelar
             </button>
             <button
               type="button"
-              className="rounded bg-cyan-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-600"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90"
               onClick={() => void createBlock()}
             >
               Criar Bloco
@@ -3692,89 +4073,161 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId }: Works
           </div>
         }
       >
-        <div className="space-y-3">
-          <div className="grid grid-cols-4 gap-2">
-            <button
-              type="button"
-              className={cn(
-                "rounded border p-2 text-xs transition",
-                createBlockKind === "terminal"
-                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
-              )}
-              onClick={() => setCreateBlockKind("terminal")}
-            >
-              <TerminalSquare className="mx-auto h-4 w-4" />
-              <p className="mt-1">Terminal</p>
-            </button>
-            <button
-              type="button"
-              className={cn(
-                "rounded border p-2 text-xs transition",
-                createBlockKind === "sftp"
-                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
-              )}
-              onClick={() => setCreateBlockKind("sftp")}
-            >
-              <Folder className="mx-auto h-4 w-4" />
-              <p className="mt-1">SFTP</p>
-            </button>
-            <button
-              type="button"
-              className={cn(
-                "rounded border p-2 text-xs transition",
-                createBlockKind === "rdp"
-                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
-              )}
-              onClick={() => setCreateBlockKind("rdp")}
-            >
-              <Monitor className="mx-auto h-4 w-4" />
-              <p className="mt-1">RDP</p>
-            </button>
-            <button
-              type="button"
-              className={cn(
-                "rounded border p-2 text-xs transition",
-                createBlockKind === "editor"
-                  ? "border-cyan-400/60 bg-cyan-600/20 text-cyan-100"
-                  : "border-white/10 bg-zinc-900/60 text-zinc-300 hover:border-cyan-400/40",
-              )}
-              onClick={() => setCreateBlockKind("editor")}
-            >
-              <FileText className="mx-auto h-4 w-4" />
-              <p className="mt-1">Editor</p>
-            </button>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {t.workspace.createLocalTitle}
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                className={cn(
+                  "rounded-lg border p-2 text-xs transition",
+                  createBlockKind === "terminal" && createSourceDraft === "local"
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "border-border/50 bg-secondary/50 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                )}
+                onClick={() => {
+                  setCreateBlockKind("terminal");
+                  setCreateSourceDraft("local");
+                }}
+              >
+                <TerminalSquare className="mx-auto h-4 w-4" />
+                <p className="mt-1">{t.workspace.localTerminal}</p>
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "rounded-lg border p-2 text-xs transition",
+                  createBlockKind === "sftp" && createSourceDraft === "local"
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "border-border/50 bg-secondary/50 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                )}
+                onClick={() => {
+                  setCreateBlockKind("sftp");
+                  setCreateSourceDraft("local");
+                }}
+              >
+                <Folder className="mx-auto h-4 w-4" />
+                <p className="mt-1">{t.workspace.localSftp}</p>
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "rounded-lg border p-2 text-xs transition",
+                  createBlockKind === "editor"
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "border-border/50 bg-secondary/50 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                )}
+                onClick={() => {
+                  setCreateBlockKind("editor");
+                  setCreateSourceDraft("local");
+                }}
+              >
+                <FileText className="mx-auto h-4 w-4" />
+                <p className="mt-1">{t.workspace.localEditor}</p>
+              </button>
+            </div>
           </div>
 
-          {createBlockKind === "terminal" || createBlockKind === "sftp" || createBlockKind === "rdp" ? (
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {t.workspace.createRemoteTitle}
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                disabled={terminalRemoteSourceOptions.length === 0}
+                className={cn(
+                  "rounded-lg border p-2 text-xs transition disabled:cursor-not-allowed disabled:opacity-45",
+                  createBlockKind === "terminal" && createSourceDraft !== "local"
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "border-border/50 bg-secondary/50 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                )}
+                onClick={() => {
+                  const nextSource = terminalRemoteSourceOptions[0]?.id;
+                  if (!nextSource) {
+                    return;
+                  }
+                  setCreateBlockKind("terminal");
+                  setCreateSourceDraft(nextSource);
+                }}
+              >
+                <TerminalSquare className="mx-auto h-4 w-4" />
+                <p className="mt-1">{t.workspace.remoteTerminal}</p>
+              </button>
+              <button
+                type="button"
+                disabled={remoteFileSourceOptions.length === 0}
+                className={cn(
+                  "rounded-lg border p-2 text-xs transition disabled:cursor-not-allowed disabled:opacity-45",
+                  createBlockKind === "sftp" && createSourceDraft !== "local"
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "border-border/50 bg-secondary/50 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                )}
+                onClick={() => {
+                  const nextSource = remoteFileSourceOptions[0]?.id;
+                  if (!nextSource) {
+                    return;
+                  }
+                  setCreateBlockKind("sftp");
+                  setCreateSourceDraft(nextSource);
+                }}
+              >
+                <Folder className="mx-auto h-4 w-4" />
+                <p className="mt-1">{t.workspace.remoteFiles}</p>
+              </button>
+              <button
+                type="button"
+                disabled={rdpSourceOptions.length === 0}
+                className={cn(
+                  "rounded-lg border p-2 text-xs transition disabled:cursor-not-allowed disabled:opacity-45",
+                  createBlockKind === "rdp"
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "border-border/50 bg-secondary/50 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                )}
+                onClick={() => {
+                  const nextSource = rdpSourceOptions[0]?.id;
+                  if (!nextSource) {
+                    return;
+                  }
+                  setCreateBlockKind("rdp");
+                  setCreateSourceDraft(nextSource);
+                }}
+              >
+                <Monitor className="mx-auto h-4 w-4" />
+                <p className="mt-1">{t.workspace.remoteRdp}</p>
+              </button>
+            </div>
+          </div>
+
+          {selectedCreateSourceOptions.length > 0 ? (
             <div className="space-y-1">
-              <p className="text-xs font-medium text-zinc-300">Origem</p>
+              <p className="text-xs font-medium text-foreground/90">{t.workspace.sourceLabel}</p>
               <select
-                className="h-9 w-full rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
+                className="h-9 w-full rounded-md border border-border/60 bg-secondary/40 px-2 text-xs text-foreground"
                 value={createSourceDraft}
                 onChange={(event) => setCreateSourceDraft(event.target.value)}
               >
-                {createSourceOptions.map((option) => (
+                {selectedCreateSourceOptions.map((option) => (
                   <option key={option.id} value={option.id}>
                     {option.label}
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-zinc-500">
+              <p className="text-xs text-muted-foreground">
                 {createBlockKind === "terminal"
-                  ? "Escolha terminal local ou um host remoto para criar nova sessao."
+                  ? t.workspace.sourceHelpTerminal
                   : createBlockKind === "sftp"
-                    ? "Escolha local ou host remoto para abrir o explorador SFTP."
-                    : "Escolha um perfil remoto para abrir o bloco RDP."}
+                    ? t.workspace.sourceHelpFiles
+                    : t.workspace.sourceHelpRdp}
               </p>
             </div>
-          ) : createBlockKind === "editor" ? (
-            <p className="text-xs text-zinc-500">O editor abre arquivo local selecionado pelo sistema.</p>
           ) : null}
         </div>
-      </Dialog>
+      </AppDialog>
     </div>
   );
 }
+
+

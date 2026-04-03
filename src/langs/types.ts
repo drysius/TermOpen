@@ -15,6 +15,11 @@ export interface AppDictionary {
       statusDisconnected: string;
       login: string;
       syncNow: string;
+      sidebarToggle: string;
+      windowMinimize: string;
+      windowMaximize: string;
+      windowRestore: string;
+      windowClose: string;
       loginServerTitle: string;
       loginServerDescription: string;
       loginServerLoading: string;
@@ -40,8 +45,50 @@ export interface AppDictionary {
     settings: string;
     debugLogs: string;
     about: string;
+    newConnection: string;
+    groupMain: string;
+    groupSystem: string;
   };
   vault: {
+    intro: {
+      title: string;
+      description: string;
+      pointOne: string;
+      pointTwo: string;
+      pointThree: string;
+      continue: string;
+      skip: string;
+      back: string;
+      next: string;
+      start: string;
+      stepWelcomeTitle: string;
+      stepWelcomeDescription: string;
+      stepWelcomePointOne: string;
+      stepWelcomePointTwo: string;
+      stepWelcomePointThree: string;
+      stepDriveTitle: string;
+      stepDriveDescription: string;
+      stepDrivePointOne: string;
+      stepDrivePointTwo: string;
+      stepDrivePointThree: string;
+      stepAuthTitle: string;
+      stepAuthDescription: string;
+      stepAuthPointOne: string;
+      stepAuthPointTwo: string;
+      stepAuthPointThree: string;
+      stepSecurityTitle: string;
+      stepSecurityDescription: string;
+      stepSecurityPointOne: string;
+      stepSecurityPointTwo: string;
+      stepSecurityPointThree: string;
+      setupTitle: string;
+      setupDescription: string;
+      setupCreateTitle: string;
+      setupCreateDescription: string;
+      setupRecoverTitle: string;
+      setupRecoverDescription: string;
+      setupHint: string;
+    };
     init: {
       passwordPlaceholder: string;
       confirmPlaceholder: string;
@@ -138,6 +185,21 @@ export interface AppDictionary {
     connections: {
       title: string;
       subtitle: string;
+      searchPlaceholder: string;
+      filters: string;
+      filterProtocolLabel: string;
+      filterProtocolAll: string;
+      filterStatusLabel: string;
+      filterStatusAll: string;
+      filterStatusActive: string;
+      filterStatusIdle: string;
+      filterClear: string;
+      statsTotal: string;
+      statsSsh: string;
+      statsSftp: string;
+      statsProtocols: string;
+      statusActive: string;
+      statusIdle: string;
       zeroLabel: string;
       newConnection: string;
       createFirst: string;
@@ -146,6 +208,10 @@ export interface AppDictionary {
       openSsh: string;
       openSftp: string;
       openRdp: string;
+      accessAction: string;
+      deleteConfirmTitle: string;
+      deleteConfirmMessage: string;
+      deleteConfirmAction: string;
       quickActions: string;
       cardHint: string;
       protocolSsh: string;
@@ -214,6 +280,10 @@ export interface AppDictionary {
       modalDescription: string;
       saveChanges: string;
       addServer: string;
+      connectionTitle: string;
+      connectionDescription: string;
+      editAction: string;
+      deleteAction: string;
     };
     autoReconnect: {
       title: string;
@@ -285,6 +355,31 @@ export interface AppDictionary {
       confirmPlaceholder: string;
       updateButton: string;
     };
+    security: {
+      warningTitle: string;
+      warningDescription: string;
+      changePasswordTitle: string;
+      changePasswordDescription: string;
+      deleteAccountTitle: string;
+      deleteAccountDescription: string;
+      deleteAccountAction: string;
+      totalConnections: string;
+      totalKeychain: string;
+      totalKnownHosts: string;
+      deleteModalTitle: string;
+      deleteModalDescription: string;
+      deleteModalWarningTitle: string;
+      deleteModalWarningDescription: string;
+      deleteCloudLabel: string;
+      deleteCloudDescription: string;
+      deleteCloudUnavailable: string;
+      confirmPasswordLabel: string;
+      confirmPasswordPlaceholder: string;
+      confirmPasswordRequired: string;
+      deletingAction: string;
+      deleteConfirmAction: string;
+      deleteSuccess: string;
+    };
     unsaved: {
       title: string;
       description: string;
@@ -297,7 +392,10 @@ export interface AppDictionary {
   };
   keychain: {
     title: string;
+    subtitle: string;
     newKey: string;
+    newItem: string;
+    importKey: string;
     edit: string;
     remove: string;
     password: string;
@@ -310,6 +408,40 @@ export interface AppDictionary {
     typePassword: string;
     typeSshKey: string;
     typeSecret: string;
+    fingerprintLabel: string;
+    importDialog: {
+      title: string;
+      description: string;
+      methodManual: string;
+      methodFile: string;
+      methodPaste: string;
+      methodGenerate: string;
+      nameLabel: string;
+      namePlaceholder: string;
+      passphraseLabel: string;
+      passphrasePlaceholder: string;
+      selectFileTitle: string;
+      readFileError: string;
+      saveError: string;
+      missingKey: string;
+      missingManualData: string;
+      selectFileButton: string;
+      fileFormats: string;
+      fileContentPlaceholder: string;
+      pasteLabel: string;
+      pastePlaceholder: string;
+      algorithmLabel: string;
+      algorithmEd25519: string;
+      algorithmRsa4096: string;
+      algorithmRsa2048: string;
+      algorithmEcdsa521: string;
+      commentLabel: string;
+      commentPlaceholder: string;
+      generatedFingerprint: string;
+      importAction: string;
+      generateAction: string;
+      generatingAction: string;
+    };
     drawer: {
       titleEdit: string;
       titleNew: string;
@@ -329,11 +461,16 @@ export interface AppDictionary {
   };
   knownHosts: {
     title: string;
+    subtitle: string;
     description: string;
     refresh: string;
     createFile: string;
     pathLabel: string;
     pathDefault: string;
+    headerHost: string;
+    headerAlgorithm: string;
+    headerFingerprint: string;
+    headerStatus: string;
     headerType: string;
     headerActions: string;
     removeTooltip: string;
@@ -342,6 +479,11 @@ export interface AppDictionary {
   about: {
     title: string;
     description: string;
+    protocolsLabel: string;
+    frameworkLabel: string;
+    licenseLabel: string;
+    githubButton: string;
+    docsButton: string;
     projectSection: string;
     projectVisionSection: string;
     projectVisionP1: string;
@@ -370,6 +512,18 @@ export interface AppDictionary {
     titleEdit: string;
     titleNew: string;
     description: string;
+    steps: { protocol: string; connection: string; auth: string };
+    wizard: {
+      selectProtocolTitle: string;
+      selectProtocolDescription: string;
+      connectionTitle: string;
+      connectionDescription: string;
+      authTitle: string;
+      authDescription: string;
+      back: string;
+      next: string;
+      create: string;
+    };
     name: { label: string; description: string; placeholder: string };
     host: { label: string; description: string; placeholder: string };
     port: { label: string; description: string; placeholder: string };
@@ -379,6 +533,8 @@ export interface AppDictionary {
       label: string;
       description: string;
       placeholder: string;
+      sshAlsoSftpLabel: string;
+      sshAlsoSftpDescription: string;
       sshDescription: string;
       sftpDescription: string;
       ftpDescription: string;
@@ -387,6 +543,13 @@ export interface AppDictionary {
       rdpDescription: string;
     };
     password: { label: string; description: string; placeholder: string };
+    auth: {
+      passwordMethod: string;
+      keyMethod: string;
+      agentMethod: string;
+      agentUnavailableTitle: string;
+      agentUnavailableDescription: string;
+    };
     keychainField: { label: string; description: string; none: string };
     privateKey: {
       label: string;
@@ -399,13 +562,32 @@ export interface AppDictionary {
     save: string;
   };
   workspace: {
+    tabTitle: string;
     modeFree: string;
     modeGrid: string;
     addBlock: string;
     newBlockTitle: string;
     newBlockDescription: string;
+    createLocalTitle: string;
+    createRemoteTitle: string;
+    localTerminal: string;
+    localSftp: string;
+    localEditor: string;
+    remoteTerminal: string;
+    remoteFiles: string;
+    remoteRdp: string;
+    sourceLabel: string;
+    sourceHelpTerminal: string;
+    sourceHelpFiles: string;
+    sourceHelpRdp: string;
+    accessConnection: string;
+    selectConnectionTitle: string;
+    selectConnectionDescription: string;
+    selectConnectionSearchPlaceholder: string;
+    selectConnectionEmpty: string;
     blockSftp: string;
     blockTerminal: string;
+    allMinimizedHint: string;
     transfer: string;
     transferFolder: string;
     transferSuccess: string;

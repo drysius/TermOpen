@@ -1,21 +1,26 @@
 import type { AppDictionary } from "../types";
 
 export const app: AppDictionary["app"] = {
-  name: "TermOpen",
+  name: "ConnectHub",
   boot: {
-    starting: "Iniciando TermOpen...",
-    checkingUpdates: "Verificando atualizacoes...",
+    starting: "Iniciando ConnectHub...",
+    checkingUpdates: "Verificando atualizações...",
     loadingData: "Carregando dados locais...",
   },
   sync: {
-    autoRunning: "Sincronizacao automatica em andamento...",
-    autoFailed: "Falha na sincronizacao automatica.",
+    autoRunning: "Sincronização automática em andamento...",
+    autoFailed: "Falha na sincronização automática.",
   },
   header: {
     statusConnected: "Conectado",
     statusDisconnected: "Desconectado",
     login: "Fazer login",
     syncNow: "Sincronizar agora",
+    sidebarToggle: "Alternar barra lateral",
+    windowMinimize: "Minimizar",
+    windowMaximize: "Maximizar",
+    windowRestore: "Restaurar",
+    windowClose: "Fechar",
     loginServerTitle: "Selecionar servidor de login",
     loginServerDescription: "Escolha qual servidor de autenticação deseja usar antes de continuar.",
     loginServerLoading: "Carregando servidores...",
@@ -25,12 +30,12 @@ export const app: AppDictionary["app"] = {
     loginServerUnknownMs: "sem ms",
     loginServerAction: "Fazer login",
     loginServerRefresh: "Atualizar lista",
-    hello: "Ola",
-    guest: "usuario",
+    hello: "Olá",
+    guest: "usuário",
     syncing: "Sincronizando...",
     stageUploading: "Enviando arquivos",
     stageDownloading: "Baixando arquivos",
     stageCleaningRemote: "Limpando remoto",
-    stageComplete: "Concluido",
+    stageComplete: "Concluído",
   },
 };

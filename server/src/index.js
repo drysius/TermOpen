@@ -1,6 +1,5 @@
 /**
- * TermOpen Auth Worker — Google OAuth broker
- *
+ * ConnectHub Auth Worker — Google OAuth broker
  */
 
 let GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -8,6 +7,236 @@ let GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
+
+const BASE_STYLE = `
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      :root {
+        --background: hsl(228 12% 8%);
+        --foreground: hsl(220 20% 92%);
+        --card: hsl(228 12% 11%);
+        --primary: hsl(217 92% 62%);
+        --primary-15: hsla(217, 92%, 62%, 0.15);
+        --primary-20: hsla(217, 92%, 62%, 0.2);
+        --primary-30: hsla(217, 92%, 62%, 0.3);
+        --muted-foreground: hsl(220 10% 50%);
+        --border: hsl(228 10% 18%);
+        --border-60: hsla(228, 10%, 18%, 0.6);
+        --border-40: hsla(228, 10%, 18%, 0.4);
+        --success: hsl(152 60% 48%);
+        --success-10: hsla(152, 60%, 48%, 0.1);
+        --success-30: hsla(152, 60%, 48%, 0.3);
+        --destructive: hsl(0 72% 55%);
+        --destructive-10: hsla(0, 72%, 55%, 0.1);
+        --destructive-30: hsla(0, 72%, 55%, 0.3);
+        --secondary: hsl(228 12% 15%);
+        --glow-primary: hsla(217, 92%, 62%, 0.15);
+      }
+
+      body {
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        background: var(--background);
+        color: var(--foreground);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .container {
+        width: 100%;
+        max-width: 384px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 24px;
+      }
+
+      .icon-box {
+        width: 80px;
+        height: 80px;
+        border-radius: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .icon-box.success {
+        background: var(--success-10);
+        border: 1px solid var(--success-30);
+      }
+
+      .icon-box.error {
+        background: var(--destructive-10);
+        border: 1px solid var(--destructive-30);
+      }
+
+      .icon-box svg {
+        width: 40px;
+        height: 40px;
+      }
+
+      .icon-box.success svg { color: var(--success); }
+      .icon-box.error svg { color: var(--destructive); }
+
+      .text-center { text-align: center; }
+
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--foreground);
+        line-height: 1.4;
+      }
+
+      .subtitle {
+        font-size: 12px;
+        color: var(--muted-foreground);
+        margin-top: 4px;
+        line-height: 1.5;
+      }
+
+      .user-card {
+        width: 100%;
+        border-radius: 12px;
+        border: 1px solid var(--border-60);
+        background: var(--card);
+        padding: 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .user-avatar {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: var(--secondary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        flex-shrink: 0;
+      }
+
+      .user-avatar img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .user-avatar svg {
+        width: 20px;
+        height: 20px;
+        color: var(--muted-foreground);
+      }
+
+      .user-info {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .user-name {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--foreground);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .user-email {
+        font-size: 11px;
+        color: var(--muted-foreground);
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .info-block {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid var(--border-40);
+        background: var(--card);
+        padding: 12px;
+      }
+
+      .info-block p {
+        font-size: 10px;
+        color: var(--muted-foreground);
+        text-align: center;
+        line-height: 1.6;
+      }
+
+      .error-detail {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid var(--destructive-30);
+        background: var(--destructive-10);
+        padding: 12px;
+      }
+
+      .error-detail p {
+        font-size: 12px;
+        color: var(--destructive);
+        font-weight: 500;
+        text-align: center;
+      }
+
+      .spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid var(--border);
+        border-top-color: var(--primary);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        display: inline-block;
+        vertical-align: middle;
+        margin-right: 6px;
+      }
+
+      .closing-text {
+        font-size: 11px;
+        color: var(--muted-foreground);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes scaleIn {
+        from { opacity: 0; transform: scale(0.8); }
+        to { opacity: 1; transform: scale(1); }
+      }
+
+      .animate-fade-in {
+        animation: fadeIn 0.5s ease-out forwards;
+      }
+
+      .animate-scale-in {
+        animation: scaleIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+      }
+
+      .delay-1 { animation-delay: 0.1s; opacity: 0; }
+      .delay-2 { animation-delay: 0.2s; opacity: 0; }
+      .delay-3 { animation-delay: 0.3s; opacity: 0; }
+    </style>
+  `;
+
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -72,7 +301,6 @@ async function handleGoogleAuth(request, env) {
   const redirectUri = `${url.origin}/auth/google/callback`;
   const localCallback = url.searchParams.get('local_callback') || '';
 
-  // Guardar local_callback no state para usar no callback
   const state = localCallback
     ? encodeURIComponent(localCallback)
     : crypto.randomUUID();
@@ -104,7 +332,6 @@ async function handleGoogleCallback(request, env) {
 
   const redirectUri = `${url.origin}/auth/google/callback`;
 
-  // Trocar code por tokens (aqui o client_secret é usado — e nunca sai do worker)
   const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -125,13 +352,11 @@ async function handleGoogleCallback(request, env) {
     });
   }
 
-  // Buscar perfil do usuário
   const userRes = await fetch(GOOGLE_USERINFO_URL, {
     headers: { Authorization: `Bearer ${tokens.access_token}` },
   });
   const user = await userRes.json();
 
-  // Se tem local_callback (vindo do state), redirecionar pro localhost do app
   const state = url.searchParams.get('state') || '';
   const localCallback = decodeURIComponent(state);
 
@@ -144,7 +369,6 @@ async function handleGoogleCallback(request, env) {
     return Response.redirect(`${localCallback}?${redirectParams}`, 302);
   }
 
-  // Fallback: retorna HTML com postMessage
   return new Response(renderCallbackHTML({
     tokens: {
       access_token: tokens.access_token,
@@ -162,47 +386,119 @@ async function handleGoogleCallback(request, env) {
   });
 }
 
-// ─── Callback HTML ──────────────────────────────────────────────────
+// ─── Callback HTML (ConnectHub Design System) ───────────────────────
 
 function renderCallbackHTML({ tokens, user, error }) {
+  // ── SVG icons ──
+  const checkIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`;
+  const xIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+  const userIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+
   if (error) {
-    return `<!DOCTYPE html><html><body>
-      <h2>Erro na autenticacao</h2><p>${error}</p>
-      <script>
-        if (window.opener) window.opener.postMessage({ type: 'auth-error', error: '${error}' }, '*');
-        setTimeout(() => window.close(), 3000);
-      </script>
-    </body></html>`;
+    return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ConnectHub — Erro</title>
+  ${BASE_STYLE}
+</head>
+<body>
+  <div class="container">
+    <div class="icon-box error animate-scale-in">${xIcon}</div>
+
+    <div class="text-center animate-fade-in delay-1">
+      <h1>Erro na autenticação</h1>
+      <p class="subtitle">Não foi possível completar o login com o Google.</p>
+    </div>
+
+    <div class="error-detail animate-fade-in delay-2">
+      <p>${error}</p>
+    </div>
+
+    <div class="info-block animate-fade-in delay-3">
+      <p>Esta janela será fechada automaticamente em alguns segundos. Tente novamente pelo ConnectHub.</p>
+    </div>
+
+    <div class="closing-text animate-fade-in delay-3">
+      <span class="spinner"></span>
+      Fechando...
+    </div>
+  </div>
+
+  <script>
+    if (window.opener) {
+      window.opener.postMessage({ type: 'auth-error', error: '${error}' }, '*');
+    }
+    setTimeout(() => window.close(), 4000);
+  </script>
+</body>
+</html>`;
   }
 
   const payload = JSON.stringify({ type: 'auth-success', tokens, user });
+  const avatarHTML = user.picture
+    ? `<img src="${user.picture}" alt="${user.name}" />`
+    : userIcon;
 
-  return `<!DOCTYPE html><html><body>
-    <p>Autenticado com sucesso! Fechando...</p>
-    <script>
-      const data = ${payload};
-      if (window.opener) {
-        window.opener.postMessage(data, '*');
-      }
-      // Deep link fallback para Tauri
-      try {
-        const params = new URLSearchParams({
-          refresh_token: data.tokens.refresh_token || '',
-          email: data.user.email || '',
-          name: data.user.name || '',
-        });
-        window.location.href = 'termopen://auth?' + params.toString();
-      } catch(e) {}
-      setTimeout(() => window.close(), 2000);
-    </script>
-  </body></html>`;
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ConnectHub — Autenticado</title>
+  ${BASE_STYLE}
+</head>
+<body>
+  <div class="container">
+    <div class="icon-box success animate-scale-in">${checkIcon}</div>
+
+    <div class="text-center animate-fade-in delay-1">
+      <h1>Autenticado com sucesso</h1>
+      <p class="subtitle">Sua conta Google foi conectada ao ConnectHub.</p>
+    </div>
+
+    <div class="user-card animate-fade-in delay-2">
+      <div class="user-avatar">${avatarHTML}</div>
+      <div class="user-info">
+        <div class="user-name">${user.name || 'Usuário'}</div>
+        <div class="user-email">${user.email || ''}</div>
+      </div>
+    </div>
+
+    <div class="info-block animate-fade-in delay-3">
+      <p>Seus tokens foram enviados com segurança para o aplicativo. Esta janela será fechada automaticamente.</p>
+    </div>
+
+    <div class="closing-text animate-fade-in delay-3">
+      <span class="spinner"></span>
+      Fechando...
+    </div>
+  </div>
+
+  <script>
+    const data = ${payload};
+    if (window.opener) {
+      window.opener.postMessage(data, '*');
+    }
+    try {
+      const params = new URLSearchParams({
+        refresh_token: data.tokens.refresh_token || '',
+        email: data.user.email || '',
+        name: data.user.name || '',
+      });
+      window.location.href = 'termopen://auth?' + params.toString();
+    } catch(e) {}
+    setTimeout(() => window.close(), 3000);
+  </script>
+</body>
+</html>`;
 }
 
 // ─── Router ─────────────────────────────────────────────────────────
 
 export default {
   async fetch(request, env, ctx) {
-    // Injetar credentials do env
     GOOGLE_CLIENT_ID = env.GOOGLE_CLIENT_ID;
     GOOGLE_CLIENT_SECRET = env.GOOGLE_CLIENT_SECRET;
 
@@ -225,7 +521,7 @@ export default {
         return handleRefreshToken(request, env, origin);
 
       case '/':
-        return jsonResponse({ service: 'termopen-auth', status: 'ok' }, 200, origin, env);
+        return jsonResponse({ service: 'connecthub-auth', status: 'ok' }, 200, origin, env);
     }
 
     return jsonResponse({ error: 'not_found' }, 404, origin, env);

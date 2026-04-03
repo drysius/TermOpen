@@ -236,6 +236,46 @@ impl VaultManager {
         self.status()
     }
 
+    pub fn verify_master_password(&self, password: &str) -> Result<()> {
+        self.assert_unlocked()?;
+
+        let normalized = password.trim();
+        if normalized.is_empty() {
+            return Err(anyhow!("Informe a senha mestre atual"));
+        }
+
+        let current_mode = self
+            .runtime
+            .key_mode
+            .clone()
+            .ok_or_else(|| anyhow!("Modo de chave nao encontrado"))?;
+
+        match current_mode {
+            KeyMode::Password => {
+                let salt = self
+                    .runtime
+                    .salt
+                    .ok_or_else(|| anyhow!("Salt ausente para validar senha atual"))?;
+                let derived = derive_key(normalized, &salt)?;
+                let current_key = self
+                    .runtime
+                    .key
+                    .ok_or_else(|| anyhow!("Chave atual indisponivel"))?;
+
+                if derived != current_key {
+                    return Err(anyhow!("Senha mestre atual invalida"));
+                }
+            }
+            KeyMode::Keychain => {
+                return Err(anyhow!(
+                    "Este vault usa chave do sistema e nao aceita senha mestre local"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn change_master_password(
         &mut self,
         old_password: Option<String>,
@@ -265,20 +305,7 @@ impl VaultManager {
                 if old.is_empty() {
                     return Err(anyhow!("Informe a senha mestre atual para trocar"));
                 }
-
-                let salt = self
-                    .runtime
-                    .salt
-                    .ok_or_else(|| anyhow!("Salt ausente para validar senha atual"))?;
-                let derived = derive_key(&old, &salt)?;
-                let current_key = self
-                    .runtime
-                    .key
-                    .ok_or_else(|| anyhow!("Chave atual indisponivel"))?;
-
-                if derived != current_key {
-                    return Err(anyhow!("Senha mestre atual invalida"));
-                }
+                self.verify_master_password(&old)?;
             }
             KeyMode::Keychain => {}
         }

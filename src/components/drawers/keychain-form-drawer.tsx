@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
 import { Button } from "@/components/ui/button";
-import { Drawer } from "@/components/ui/drawer";
+import { AppDrawer } from "@/components/ui/app-drawer";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useT } from "@/langs";
@@ -115,7 +115,7 @@ export function KeychainFormDrawer() {
   };
 
   return (
-    <Drawer
+    <AppDrawer
       open={open}
       onClose={closeKeychainDrawer}
       title={initialEntry.id ? t.keychain.drawer.titleEdit : t.keychain.drawer.titleNew}
@@ -179,6 +179,8 @@ export function KeychainFormDrawer() {
           </Button>
         </div>
       </form>
-    </Drawer>
+    </AppDrawer>
   );
 }
+
+

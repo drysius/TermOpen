@@ -45,6 +45,19 @@ export interface KeychainEntry {
   created_at: number;
 }
 
+export interface SshKeyGenerateInput {
+  algorithm: "ed25519" | "rsa4096" | "rsa2048" | "ecdsa521";
+  comment?: string | null;
+  passphrase?: string | null;
+}
+
+export interface SshKeyGenerateResult {
+  private_key: string;
+  public_key: string;
+  fingerprint: string;
+  name_suggestion: string;
+}
+
 export interface AppSettings {
   preferred_editor: EditorPreference;
   external_editor_command: string;

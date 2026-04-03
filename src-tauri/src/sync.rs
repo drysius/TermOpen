@@ -132,6 +132,28 @@ impl SyncManager {
         delete_keyring_field(KEYRING_USER_PICTURE);
     }
 
+    pub async fn delete_remote_backup(
+        &mut self,
+        server_address: &str,
+        fallback_addresses: &[String],
+    ) -> Result<()> {
+        let access_token =
+            access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
+        let client = Client::new();
+
+        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+            return Ok(());
+        };
+
+        let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
+        for (_, metadata) in remote_files {
+            delete_drive_file(&client, &access_token, &metadata.id).await?;
+        }
+
+        delete_drive_file(&client, &access_token, &folder_id).await?;
+        Ok(())
+    }
+
     pub async fn google_login(
         &mut self,
         app: &tauri::AppHandle,

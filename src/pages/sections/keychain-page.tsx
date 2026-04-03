@@ -1,21 +1,23 @@
-import { KeyRound, MoreVertical, Plus } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Fingerprint, Key, Plus, Shield } from "lucide-react";
+import { useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
+import { ImportKeyDialog, type ImportMethod } from "@/components/import-key-dialog";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
-import type { KeychainEntryType } from "@/types/termopen";
 
-function entryTypeLabel(entryType: KeychainEntryType, t: ReturnType<typeof useT>): string {
-  if (entryType === "ssh_key") {
-    return t.keychain.typeSshKey;
+function formatCreatedAt(timestamp: number): string {
+  if (!timestamp) {
+    return "-";
   }
-  if (entryType === "secret") {
-    return t.keychain.typeSecret;
+  return new Date(timestamp * 1000).toLocaleDateString();
+}
+
+function fingerprintPreview(publicKey: string | null | undefined): string {
+  if (!publicKey) {
+    return "-";
   }
-  return t.keychain.typePassword;
+  return publicKey.length > 32 ? `${publicKey.slice(0, 32)}...` : publicKey;
 }
 
 export function KeychainPage() {
@@ -23,105 +25,83 @@ export function KeychainPage() {
   const entries = useAppStore((state) => state.keychainEntries);
   const openKeychainDrawer = useAppStore((state) => state.openKeychainDrawer);
   const deleteKeychain = useAppStore((state) => state.deleteKeychain);
-
-  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const onPointerDown = (event: MouseEvent) => {
-      if (!rootRef.current) {
-        return;
-      }
-      if (!rootRef.current.contains(event.target as Node)) {
-        setMenuOpenId(null);
-      }
-    };
-    window.addEventListener("mousedown", onPointerDown);
-    return () => window.removeEventListener("mousedown", onPointerDown);
-  }, []);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importMethod, setImportMethod] = useState<ImportMethod>("file");
 
   return (
-    <div ref={rootRef} className="h-full overflow-auto px-4 py-3">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-100">{t.keychain.title}</h2>
-        <Button size="sm" onClick={() => openKeychainDrawer()}>
-          <Plus className="mr-1 h-4 w-4" /> {t.keychain.newKey}
-        </Button>
+    <div className="flex-1 p-6 space-y-6">
+      <ImportKeyDialog open={importOpen} onOpenChange={setImportOpen} initialMethod={importMethod} />
+
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">{t.sidebar.keychain}</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">{t.keychain.subtitle}</p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-2"
+            onClick={() => {
+              setImportMethod("manual");
+              setImportOpen(true);
+            }}
+          >
+            <Plus className="h-4 w-4" />
+            {t.keychain.newItem}
+          </Button>
+          <Button
+            size="sm"
+            className="gap-2"
+            onClick={() => {
+              setImportMethod("file");
+              setImportOpen(true);
+            }}
+          >
+            <Plus className="h-4 w-4" />
+            {t.keychain.importKey}
+          </Button>
+        </div>
       </div>
 
-      {entries.length === 0 ? (
-        <Card className="rounded-xl border-dashed border-white/20 bg-zinc-950/70">
-          <CardContent className="py-8 text-center">
-            <p className="text-base font-semibold text-zinc-100">{t.keychain.emptyTitle}</p>
-            <p className="mx-auto mt-2 max-w-xl text-sm text-zinc-400">{t.keychain.emptyDescription}</p>
-            <Button className="mt-4" onClick={() => openKeychainDrawer()}>
-              <Plus className="mr-1 h-4 w-4" />
-              {t.keychain.addFirst}
-            </Button>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {entries.map((entry) => {
-            const isMenuOpen = menuOpenId === entry.id;
-            return (
-              <Card key={entry.id} className="rounded-xl border-white/10 bg-zinc-950/70">
-                <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center justify-between text-sm">
-                    <span className="inline-flex min-w-0 items-center gap-2">
-                      <KeyRound className="h-4 w-4 shrink-0 text-cyan-300" />
-                      <span className="truncate">{entry.name}</span>
-                    </span>
-                    <div className="relative">
-                      <button
-                        type="button"
-                        className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 hover:bg-zinc-900"
-                        onClick={() => setMenuOpenId(isMenuOpen ? null : entry.id)}
-                      >
-                        <MoreVertical className="h-4 w-4" />
-                      </button>
-                      {isMenuOpen ? (
-                        <div className="absolute right-0 top-8 z-[240] min-w-[140px] rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
-                          <button
-                            type="button"
-                            className="w-full rounded px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-900"
-                            onClick={() => {
-                              openKeychainDrawer(entry);
-                              setMenuOpenId(null);
-                            }}
-                          >
-                            {t.keychain.edit}
-                          </button>
-                          <button
-                            type="button"
-                            className="w-full rounded px-2 py-1.5 text-left text-xs text-red-300 hover:bg-zinc-900"
-                            onClick={() => {
-                              void deleteKeychain(entry.id);
-                              setMenuOpenId(null);
-                            }}
-                          >
-                            {t.keychain.remove}
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  </CardTitle>
-                  <p className="text-xs text-zinc-400">{new Date(entry.created_at * 1000).toLocaleString()}</p>
-                </CardHeader>
-                <CardContent className="pt-0">
-                  <div className="flex flex-wrap gap-1">
-                    <Badge variant="outline">{entryTypeLabel(entry.entry_type ?? "password", t)}</Badge>
-                    {entry.password ? <Badge variant="secondary">{t.keychain.password}</Badge> : null}
-                    {entry.private_key ? <Badge variant="secondary">{t.keychain.privateKey}</Badge> : null}
-                    {entry.public_key ? <Badge variant="secondary">{t.keychain.publicKey}</Badge> : null}
-                    {entry.passphrase ? <Badge variant="secondary">{t.keychain.passphrase}</Badge> : null}
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {entries.map((entry) => (
+          <div
+            key={entry.id}
+            className="rounded-xl border border-border/60 bg-card p-4 transition-all hover:border-border hover:bg-surface-elevated animate-fade-in"
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-warning/15">
+                <Key className="h-5 w-5 text-warning" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-medium text-foreground font-mono truncate">{entry.name}</h3>
+                <span className="text-[10px] text-muted-foreground/60">{formatCreatedAt(entry.created_at)}</span>
+              </div>
+            </div>
+            <div className="space-y-1.5 border-t border-border/40 pt-3">
+              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Shield className="h-3 w-3 shrink-0" />
+                {entry.entry_type}
+              </div>
+              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Fingerprint className="h-3 w-3 shrink-0" />
+                <span className="truncate font-mono">
+                  {t.keychain.fingerprintLabel}: {fingerprintPreview(entry.public_key)}
+                </span>
+              </div>
+            </div>
+            <div className="mt-3 pt-2 border-t border-border/20 flex items-center justify-end gap-2">
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openKeychainDrawer(entry)}>
+                {t.keychain.edit}
+              </Button>
+              <Button size="sm" variant="outline" className="h-7 text-xs text-destructive" onClick={() => void deleteKeychain(entry.id)}>
+                {t.keychain.remove}
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

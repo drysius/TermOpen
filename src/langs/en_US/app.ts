@@ -1,9 +1,9 @@
 import type { AppDictionary } from "../types";
 
 export const app: AppDictionary["app"] = {
-  name: "TermOpen",
+  name: "ConnectHub",
   boot: {
-    starting: "Starting TermOpen...",
+    starting: "Starting ConnectHub...",
     checkingUpdates: "Checking for updates...",
     loadingData: "Loading local data...",
   },
@@ -16,6 +16,11 @@ export const app: AppDictionary["app"] = {
     statusDisconnected: "Disconnected",
     login: "Sign in",
     syncNow: "Sync now",
+    sidebarToggle: "Toggle sidebar",
+    windowMinimize: "Minimize",
+    windowMaximize: "Maximize",
+    windowRestore: "Restore",
+    windowClose: "Close",
     loginServerTitle: "Select login server",
     loginServerDescription: "Choose which authentication server should be used before continuing.",
     loginServerLoading: "Loading servers...",

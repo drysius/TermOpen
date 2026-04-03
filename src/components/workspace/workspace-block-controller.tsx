@@ -113,17 +113,17 @@ export function WorkspaceBlockController({
       dragHandleClassName="workspace-block-handle"
       className={
         active
-          ? "overflow-hidden rounded-md border border-cyan-400/45 bg-zinc-950 shadow-[0_0_18px_rgba(34,211,238,0.22)]"
-          : "overflow-hidden rounded-md border border-white/10 bg-zinc-950 shadow-2xl"
+          ? "overflow-hidden rounded-lg border border-primary/45 bg-card shadow-[0_0_18px_hsl(var(--primary)/0.22)]"
+          : "overflow-hidden rounded-lg border border-border/55 bg-card shadow-xl"
       }
       style={{ zIndex }}
       onMouseDown={() => onFocus?.(id)}
     >
       <div className="flex h-full min-h-0 flex-col">
-        <header className="workspace-block-handle flex cursor-move items-center justify-between gap-2 border-b border-white/10 px-2 py-1.5">
+        <header className="workspace-block-handle flex cursor-move items-center justify-between gap-2 border-b border-border/55 bg-secondary/35 px-2 py-1.5">
           <div className="min-w-0">
-            <p className="truncate text-xs font-semibold text-zinc-100">{title}</p>
-            {subtitle ? <p className="truncate text-[11px] text-zinc-500">{subtitle}</p> : null}
+            <p className="truncate text-xs font-semibold text-foreground">{title}</p>
+            {subtitle ? <p className="truncate text-[11px] text-muted-foreground">{subtitle}</p> : null}
           </div>
           <div className="flex items-center gap-1">{headerRight}</div>
         </header>

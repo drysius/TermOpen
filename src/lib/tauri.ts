@@ -10,6 +10,8 @@ import type {
   DebugLogEntry,
   KnownHostEntry,
   KeychainEntry,
+  SshKeyGenerateInput,
+  SshKeyGenerateResult,
   LocalPathStat,
   RemoteTransferEndpoint,
   RecoveryProbeResult,
@@ -37,6 +39,11 @@ export const api = {
     invoke<VaultStatus>("vault_unlock", { password }),
   vaultLock: () => invoke<VaultStatus>("vault_lock"),
   vaultResetAll: () => invoke<VaultStatus>("vault_reset_all"),
+  vaultDeleteAccount: (currentPassword: string, deleteCloudData: boolean) =>
+    invoke<VaultStatus>("vault_delete_account", {
+      currentPassword,
+      deleteCloudData,
+    }),
   vaultChangeMasterPassword: (oldPassword: string | null, newPassword: string) =>
     invoke<VaultStatus>("vault_change_master_password", {
       oldPassword,
@@ -50,6 +57,8 @@ export const api = {
   keychainList: () => invoke<KeychainEntry[]>("keychain_list"),
   keychainSave: (entry: KeychainEntry) => invoke<KeychainEntry>("keychain_save", { entry }),
   keychainDelete: (id: string) => invoke<void>("keychain_delete", { id }),
+  sshKeyGenerate: (input: SshKeyGenerateInput) =>
+    invoke<SshKeyGenerateResult>("ssh_key_generate", { input }),
 
   settingsGet: () => invoke<AppSettings>("settings_get"),
   settingsUpdate: (settings: AppSettings) => invoke<AppSettings>("settings_update", { settings }),

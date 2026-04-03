@@ -2,13 +2,18 @@ import type { AppDictionary } from "../types";
 
 export const knownHosts: AppDictionary["knownHosts"] = {
   title: "Known Hosts",
-  description: "Entradas confiaveis usadas na verificacao de host key.",
+  subtitle: "Hosts verificados e confiáveis.",
+  description: "Entradas confiáveis usadas na verificação de host key.",
   refresh: "Atualizar",
   createFile: "Criar arquivo",
   pathLabel: "Caminho usado",
-  pathDefault: "(padrao do sistema)",
+  pathDefault: "(padrão do sistema)",
+  headerHost: "Host",
+  headerAlgorithm: "Algoritmo",
+  headerFingerprint: "Fingerprint",
+  headerStatus: "Status",
   headerType: "Tipo",
-  headerActions: "Acoes",
-  removeTooltip: "Remover",
-  empty: "Sem entradas conhecidas.",
+  headerActions: "Ações",
+  removeTooltip: "Remover host",
+  empty: "Nenhum host conhecido.",
 };

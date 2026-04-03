@@ -311,12 +311,12 @@ export function TerminalBlockView({
   }, [isConnected, safeResize, sessionId]);
 
   return (
-    <div className="h-full min-h-0 overflow-hidden bg-zinc-950 p-1.5">
-      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded border border-white/10 bg-zinc-950">
-        <div className="flex h-9 items-center gap-2 border-b border-white/10 px-2">
-          <TerminalSquare className="h-4 w-4 text-cyan-300" />
+    <div className="h-full min-h-0 overflow-hidden bg-background p-1.5">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded border border-border/50 bg-background">
+        <div className="flex h-9 items-center gap-2 border-b border-border/50 px-2">
+          <TerminalSquare className="h-4 w-4 text-primary" />
           <select
-            className="h-7 min-w-[220px] rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
+            className="h-7 min-w-[220px] rounded border border-border/50 bg-background px-2 text-xs text-foreground"
             value={sessionId ?? ""}
             onChange={(event) => {
               if (event.target.value) {
@@ -339,25 +339,25 @@ export function TerminalBlockView({
             </div>
           ) : null}
           {!isConnected ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80 p-3">
-              <div className="w-full max-w-md rounded-lg border border-white/15 bg-zinc-950/95 p-4 shadow-2xl shadow-black/50">
-                <div className="inline-flex items-center gap-2 text-sm text-zinc-100">
+            <div className="absolute inset-0 flex items-center justify-center bg-background/80 p-3">
+              <div className="w-full max-w-md rounded-lg border border-border/60 bg-background/95 p-4 shadow-2xl shadow-black/20">
+                <div className="inline-flex items-center gap-2 text-sm text-foreground">
                   {block.connectStage === "connecting" ? (
-                    <RefreshCw className="h-4 w-4 animate-spin text-cyan-300" />
+                    <RefreshCw className="h-4 w-4 animate-spin text-primary" />
                   ) : (
-                    <TerminalSquare className="h-4 w-4 text-cyan-300" />
+                    <TerminalSquare className="h-4 w-4 text-primary" />
                   )}
                   <span>{block.connectMessage}</span>
                 </div>
-                <div className="mt-3 space-y-1 text-xs text-zinc-400">
-                  <p className={cn(block.connectStage === "connecting" ? "text-cyan-300" : undefined)}>1. Conectando...</p>
-                  <p className={cn(block.connectStage === "verifying_fingerprint" ? "text-cyan-300" : undefined)}>
+                <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                  <p className={cn(block.connectStage === "connecting" ? "text-primary" : undefined)}>1. Conectando...</p>
+                  <p className={cn(block.connectStage === "verifying_fingerprint" ? "text-primary" : undefined)}>
                     2. Verificando fingerprint...
                   </p>
                   <p
                     className={cn(
                       block.connectStage === "awaiting_password" || block.connectStage === "error"
-                        ? "text-cyan-300"
+                        ? "text-primary"
                         : undefined,
                     )}
                   >
@@ -366,25 +366,25 @@ export function TerminalBlockView({
                 </div>
 
                 {block.connectStage === "verifying_fingerprint" && block.hostChallenge ? (
-                  <div className="mt-3 rounded border border-white/10 bg-zinc-900/70 p-3 text-xs text-zinc-300">
-                    <p className="font-medium text-zinc-100">{block.hostChallenge.message}</p>
+                  <div className="mt-3 rounded border border-border/50 bg-secondary/70 p-3 text-xs text-foreground/90">
+                    <p className="font-medium text-foreground">{block.hostChallenge.message}</p>
                     <p className="mt-1">
                       {block.hostChallenge.host}:{block.hostChallenge.port}
                     </p>
-                    <p className="mt-1 break-all text-zinc-400">
+                    <p className="mt-1 break-all text-muted-foreground">
                       {block.hostChallenge.keyType} {block.hostChallenge.fingerprint}
                     </p>
                     <div className="mt-3 flex items-center gap-2">
                       <button
                         type="button"
-                        className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                        className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20"
                         onClick={onTrustHost}
                       >
                         Confiar e continuar
                       </button>
                       <button
                         type="button"
-                        className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                        className="rounded border border-border/70 px-2 py-1 text-xs text-foreground/90 hover:bg-secondary"
                         onClick={onRetry}
                       >
                         Tentar novamente
@@ -399,7 +399,7 @@ export function TerminalBlockView({
                     <input
                       type="password"
                       value={block.passwordDraft}
-                      className="h-9 w-full rounded border border-white/15 bg-zinc-900 px-2 text-sm text-zinc-100 outline-none focus:border-cyan-400/60"
+                      className="h-9 w-full rounded border border-border/60 bg-secondary/70 px-2 text-sm text-foreground outline-none focus:border-primary/60"
                       placeholder="Senha SSH"
                       onChange={(event) => onPasswordDraftChange(event.target.value)}
                       onKeyDown={(event) => {
@@ -408,7 +408,7 @@ export function TerminalBlockView({
                         }
                       }}
                     />
-                    <label className="inline-flex items-center gap-2 text-xs text-zinc-400">
+                    <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                       <input
                         type="checkbox"
                         checked={block.savePasswordChoice}
@@ -419,14 +419,14 @@ export function TerminalBlockView({
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                        className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20"
                         onClick={onSubmitPassword}
                       >
                         Logar
                       </button>
                       <button
                         type="button"
-                        className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                        className="rounded border border-border/70 px-2 py-1 text-xs text-foreground/90 hover:bg-secondary"
                         onClick={onRetry}
                       >
                         Repetir conexao

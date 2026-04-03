@@ -237,7 +237,7 @@ export function createConnectionActions(
       }
     },
 
-    saveSettings: async (next: AppSettings) => {
+    saveSettings: async (next: AppSettings, options?: { silent?: boolean }) => {
       set({ busy: true });
       try {
         const saved = await api.settingsUpdate(next);
@@ -249,7 +249,9 @@ export function createConnectionActions(
           const synced = await api.syncPush();
           set({ syncState: synced });
         }
-        toast.success(getT().toasts.settingsSaved);
+        if (!options?.silent) {
+          toast.success(getT().toasts.settingsSaved);
+        }
       } catch (error) {
         toast.error(getError(error));
       } finally {

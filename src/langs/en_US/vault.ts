@@ -1,6 +1,49 @@
 import type { AppDictionary } from "../types";
 
 export const vault: AppDictionary["vault"] = {
+  intro: {
+    title: "Welcome to ConnectHub",
+    description: "Before you start, here is how the app handles connections and protects your vault.",
+    pointOne: "Workspaces with SSH, SFTP, FTP/FTPS, SMB and RDP in one place.",
+    pointTwo: "Sensitive data is encrypted locally using your master password.",
+    pointThree: "Optional Google Drive sync with explicit server selection.",
+    continue: "Continue",
+    skip: "Skip introduction",
+    back: "Back",
+    next: "Next",
+    start: "Start",
+    stepWelcomeTitle: "Welcome to ConnectHub",
+    stepWelcomeDescription:
+      "A terminal control panel that lets you use multiple protocols — SSH, SFTP, FTP, FTPS, SMB and RDP — focused on organization and trust.",
+    stepWelcomePointOne: "Manage all your connections in one place.",
+    stepWelcomePointTwo: "Workspaces with multiple side-by-side windows.",
+    stepWelcomePointThree: "Automatic Windows-style snap for organization.",
+    stepDriveTitle: "Your data, in your Drive",
+    stepDriveDescription:
+      "One core idea is allowing you to store connection data in your own Google Drive, without depending on external servers for sensitive storage.",
+    stepDrivePointOne: "Vault saved as cloud save in Google Drive.",
+    stepDrivePointTwo: "Recover your data on any platform.",
+    stepDrivePointThree: "No dedicated storage backend.",
+    stepAuthTitle: "Secure Auth Server",
+    stepAuthDescription:
+      "The server used for Google Drive auth exists to protect project private keys and enable secure access token retrieval.",
+    stepAuthPointOne: "Developers' private keys are protected.",
+    stepAuthPointTwo: "Access token is retrieved securely.",
+    stepAuthPointThree: "No connection data passes through the server.",
+    stepSecurityTitle: "Master Password Encryption",
+    stepSecurityDescription:
+      "All ConnectHub data is encrypted from your Master Password. This password unlocks the Vault and decrypts your connection and access information.",
+    stepSecurityPointOne: "End-to-end encrypted vault.",
+    stepSecurityPointTwo: "Master password is never stored.",
+    stepSecurityPointThree: "Locally protected keychain.",
+    setupTitle: "Set Up Vault",
+    setupDescription: "Define a master password to protect your connections or recover an existing vault from Google Drive.",
+    setupCreateTitle: "Create master password",
+    setupCreateDescription: "Start from scratch with a new encrypted vault.",
+    setupRecoverTitle: "Recover with Google Drive",
+    setupRecoverDescription: "Restore vault from an existing cloud backup.",
+    setupHint: "The master password is the only way to access your data. It is never stored or transmitted.",
+  },
   init: {
     passwordPlaceholder: "Master password",
     confirmPlaceholder: "Confirm password",
@@ -17,7 +60,7 @@ export const vault: AppDictionary["vault"] = {
     description: "Without the master password, recovery is not possible.",
     warning: "Data cannot be recovered without the master password.",
     explanation:
-      "All TermOpen data is encrypted locally. If you lost your password, the only option is to delete current data and start fresh.",
+      "All ConnectHub data is encrypted locally. If you lost your password, the only option is to delete current data and start fresh.",
     confirmLabel: "Type 'DELETE DATA' to continue",
     confirmPlaceholder: 'Type "DELETE DATA"',
     confirmPhrase: "DELETE DATA",

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Toaster, toast } from "sonner";
+import { Cloud, Loader2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
@@ -9,7 +10,8 @@ import { HostFormDrawer } from "@/components/drawers/host-form-drawer";
 import { KeychainFormDrawer } from "@/components/drawers/keychain-form-drawer";
 import { AppHeader } from "@/components/layout/app-header";
 import { AppSidebar } from "@/components/layout/app-sidebar";
-import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
+import { AppConfirmDialog, AppDialog } from "@/components/ui/app-dialog";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { getError } from "@/functions/common";
 import { useT } from "@/langs";
 import { logFrontendDebug, logFrontendError } from "@/lib/debug-logs";
@@ -239,7 +241,7 @@ function App() {
   const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
   const [closingWorkspace, setClosingWorkspace] = useState(false);
   const [booting, setBooting] = useState(true);
-  const [bootMessage, setBootMessage] = useState("Iniciando TermOpen...");
+  const [bootMessage, setBootMessage] = useState(t.app.boot.starting);
   const [syncChoices, setSyncChoices] = useState<Record<string, SyncKeepSide>>({});
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [loggedUser, setLoggedUser] = useState<SyncLoggedUser | null>(null);
@@ -294,8 +296,14 @@ function App() {
   );
   const currentSection = activeTabId ? "home" : sectionFromPath(location.pathname);
   const shellClass = isWindowMaximized
-    ? "flex h-full w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100"
-    : "flex w-full h-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/95 text-zinc-100 shadow-2xl";
+    ? "flex h-full w-full flex-col overflow-hidden bg-background text-foreground"
+    : "flex w-full h-full flex-col overflow-hidden rounded-2xl border border-border/50 bg-background/95 text-foreground shadow-2xl";
+  const insetShellClass = isWindowMaximized
+    ? "flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground"
+    : "flex h-full min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/50 bg-background/95 text-foreground shadow-2xl";
+  const bootSteps = [t.app.boot.starting, t.app.boot.checkingUpdates, t.app.boot.loadingData];
+  const bootStepIndex = Math.max(0, bootSteps.indexOf(bootMessage));
+  const bootProgress = ((bootStepIndex + 1) / bootSteps.length) * 100;
 
   async function refreshMaximizeState() {
     const value = await api.windowIsMaximized().catch(() => false);
@@ -501,14 +509,14 @@ function App() {
     let mounted = true;
     void (async () => {
       try {
-        setBootMessage("Verificando atualizacoes...");
+        setBootMessage(t.app.boot.checkingUpdates);
         const release = await api.releaseCheckLatest().catch(() => null);
         if (mounted && release?.available) {
           toast.message(release.message);
         }
       } finally {
         if (mounted) {
-          setBootMessage("Carregando dados locais...");
+          setBootMessage(t.app.boot.loadingData);
         }
       }
 
@@ -556,7 +564,7 @@ function App() {
 
     const timer = window.setInterval(() => {
       useAppStore.setState((state) => ({
-        syncState: { ...state.syncState, status: "running", message: "Sincronizacao automatica em andamento..." },
+        syncState: { ...state.syncState, status: "running", message: t.app.sync.autoRunning },
       }));
       void api
         .syncPush()
@@ -568,14 +576,14 @@ function App() {
             syncState: {
               ...state.syncState,
               status: "error",
-              message: "Falha na sincronizacao automatica.",
+              message: t.app.sync.autoFailed,
             },
           }));
         });
     }, Math.max(1, settings.sync_interval_minutes) * 60_000);
 
     return () => window.clearInterval(timer);
-  }, [settings.sync_auto_enabled, settings.sync_interval_minutes, syncState.connected, vaultStatus]);
+  }, [settings.sync_auto_enabled, settings.sync_interval_minutes, syncState.connected, t.app.sync.autoFailed, t.app.sync.autoRunning, vaultStatus]);
 
   useEffect(() => {
     if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
@@ -742,129 +750,159 @@ function App() {
 
   if (booting) {
     return (
-      <main className={shellClass}>
-        <Toaster theme="dark" richColors position="bottom-right" />
-        <AppHeader
-          tabs={[]}
-          activeTabId={null}
-          onSelectTab={() => undefined}
-          onCloseTab={() => undefined}
-          onCreateWorkspaceTab={() => undefined}
-          syncRunning={false}
-          syncProgress={null}
-          loggedUser={null}
-          onSyncLogin={() => undefined}
-          onSyncNow={() => undefined}
-          maximized={isWindowMaximized}
-          onMinimize={() => void api.windowMinimize()}
-          onToggleMaximize={() => void handleToggleMaximize()}
-          onCloseWindow={() => void api.windowClose()}
-          compact
-        />
-        <section className="flex flex-1 items-center justify-center">
-          <div className="w-full max-w-sm px-8 text-center">
-            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-white/20 bg-white/5">
-              <span className="text-xl font-semibold text-zinc-100">TO</span>
+      <SidebarProvider className={shellClass}>
+        <main className="h-full">
+          <Toaster theme="dark" richColors position="bottom-right" />
+          <AppHeader
+            tabs={[]}
+            activeTabId={null}
+            onSelectTab={() => undefined}
+            onCloseTab={() => undefined}
+            onCreateWorkspaceTab={() => undefined}
+            syncRunning={false}
+            syncProgress={null}
+            loggedUser={null}
+            onSyncLogin={() => undefined}
+            onSyncNow={() => undefined}
+            maximized={isWindowMaximized}
+            onMinimize={() => void api.windowMinimize()}
+            onToggleMaximize={() => void handleToggleMaximize()}
+            onCloseWindow={() => void api.windowClose()}
+            compact
+          />
+          <section className="h-full flex items-center justify-center p-6">
+            <div className="w-full max-w-sm space-y-8">
+              <div className="flex flex-col items-center gap-3">
+                <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10">
+                  <Cloud className="h-7 w-7 text-primary" />
+                </div>
+                <p className="text-lg font-semibold text-foreground">{t.app.name}</p>
+              </div>
+
+              <div className="space-y-3">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${bootProgress}%` }} />
+                </div>
+                <p className="text-center text-xs text-muted-foreground">{bootMessage}</p>
+              </div>
+
+              <div className="space-y-1.5 rounded-xl border border-border/40 bg-card/60 p-3">
+                {bootSteps.map((stepLabel, index) => (
+                  <div key={stepLabel} className="flex items-center gap-2">
+                    {index < bootStepIndex ? (
+                      <span className="h-1.5 w-1.5 rounded-full bg-success" />
+                    ) : index === bootStepIndex ? (
+                      <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                    ) : (
+                      <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+                    )}
+                    <span
+                      className={index <= bootStepIndex ? "text-[11px] text-foreground" : "text-[11px] text-muted-foreground"}
+                    >
+                      {stepLabel}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-            <p className="text-xl font-semibold text-zinc-100">TermOpen</p>
-            <p className="mt-3 text-sm text-zinc-300">{bootMessage}</p>
-          </div>
-        </section>
-      </main>
+          </section>
+        </main>
+      </SidebarProvider>
     );
   }
 
   if (!vaultStatus || !vaultStatus.initialized || vaultStatus.locked) {
     return (
-      <main className={shellClass}>
-        <Toaster theme="dark" richColors position="bottom-right" />
-        <AppHeader
-          tabs={tabs}
-          activeTabId={activeTabId}
-          onSelectTab={setActiveTab}
-          onCloseTab={(id) => void closeTab(id)}
-          onCreateWorkspaceTab={() =>
-            openTab({
-              id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
-              type: "workspace",
-              title: "Workspace",
-              closable: true,
-            })
-          }
-          syncRunning={false}
-          syncProgress={null}
-          loggedUser={null}
-          onSyncLogin={() => undefined}
-          onSyncNow={() => undefined}
-          maximized={isWindowMaximized}
-          onMinimize={() => void api.windowMinimize()}
-          onToggleMaximize={() => void handleToggleMaximize()}
-          onCloseWindow={() => void api.windowClose()}
-          compact
-        />
-        <VaultGatePage />
-      </main>
+      <SidebarProvider>
+        <main className="h-full w-full">
+          <Toaster theme="dark" richColors position="bottom-right" />
+          <AppHeader
+            tabs={tabs}
+            activeTabId={activeTabId}
+            onSelectTab={setActiveTab}
+            onCloseTab={(id) => void closeTab(id)}
+            onCreateWorkspaceTab={() =>
+              openTab({
+                id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+                type: "workspace",
+                title: t.workspace.tabTitle,
+                closable: true,
+              })
+            }
+            syncRunning={false}
+            syncProgress={null}
+            loggedUser={null}
+            onSyncLogin={() => undefined}
+            onSyncNow={() => undefined}
+            maximized={isWindowMaximized}
+            onMinimize={() => void api.windowMinimize()}
+            onToggleMaximize={() => void handleToggleMaximize()}
+            onCloseWindow={() => void api.windowClose()}
+            compact
+          />
+          <VaultGatePage />
+        </main>
+      </SidebarProvider>
     );
   }
 
   return (
-    <main className={shellClass}>
-      <Toaster theme="dark" richColors position="bottom-right" />
-
-      <AppHeader
-        tabs={tabs}
-        activeTabId={activeTabId}
-        onSelectTab={setActiveTab}
-        onCloseTab={(id) => {
-          const tab = tabs.find((item) => item.id === id);
-          if (!tab) {
+    <SidebarProvider>
+      <AppSidebar
+        current={currentSection}
+        onSelect={(next) => {
+          if (currentSection === "settings" && next !== "settings" && settingsUnsavedDraft) {
+            setPendingSettingsNavigation(next);
             return;
           }
-          if (tab.type !== "workspace") {
-            void closeTab(id);
-            return;
-          }
-          const hasBlocks = (workspaceBlockCountByTab[id] ?? 0) > 0;
-          if (!hasBlocks) {
-            void closeTab(id);
-            return;
-          }
-          setPendingCloseTabId(id);
+          setSettingsUnsavedDraft(null);
+          setActiveTab(null);
+          navigate(pathFromSection(next));
         }}
-        onCreateWorkspaceTab={() =>
-          openTab({
-            id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
-            type: "workspace",
-            title: "Workspace",
-            closable: true,
-          })
-        }
-        syncRunning={syncState.status === "running" || headerSyncBusy}
-        syncProgress={syncProgress}
-        loggedUser={loggedUser}
-        onSyncLogin={() => void handleHeaderSync("login")}
-        onSyncNow={() => void handleHeaderSync("push")}
-        maximized={isWindowMaximized}
-        onMinimize={() => void api.windowMinimize()}
-        onToggleMaximize={() => void handleToggleMaximize()}
-        onCloseWindow={() => void api.windowClose()}
       />
+      <SidebarInset className={insetShellClass}>
+        <Toaster theme="dark" richColors position="bottom-right" />
 
-      <div className="flex min-h-0 flex-1">
-        <AppSidebar
-          current={currentSection}
-          onSelect={(next) => {
-            if (currentSection === "settings" && next !== "settings" && settingsUnsavedDraft) {
-              setPendingSettingsNavigation(next);
+        <AppHeader
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSelectTab={setActiveTab}
+          onCloseTab={(id) => {
+            const tab = tabs.find((item) => item.id === id);
+            if (!tab) {
               return;
             }
-            setSettingsUnsavedDraft(null);
-            setActiveTab(null);
-            navigate(pathFromSection(next));
+            if (tab.type !== "workspace") {
+              void closeTab(id);
+              return;
+            }
+            const hasBlocks = (workspaceBlockCountByTab[id] ?? 0) > 0;
+            if (!hasBlocks) {
+              void closeTab(id);
+              return;
+            }
+            setPendingCloseTabId(id);
           }}
+          onCreateWorkspaceTab={() =>
+            openTab({
+                id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+                type: "workspace",
+                title: t.workspace.tabTitle,
+                closable: true,
+              })
+            }
+          syncRunning={syncState.status === "running" || headerSyncBusy}
+          syncProgress={syncProgress}
+          loggedUser={loggedUser}
+          onSyncLogin={() => void handleHeaderSync("login")}
+          onSyncNow={() => void handleHeaderSync("push")}
+          maximized={isWindowMaximized}
+          onMinimize={() => void api.windowMinimize()}
+          onToggleMaximize={() => void handleToggleMaximize()}
+          onCloseWindow={() => void api.windowClose()}
         />
 
-        <section className="min-h-0 flex-1 bg-zinc-950/80">
+        <section className="min-h-0 flex-1 bg-background">
           {tabs.map((tab) => (
             <div key={tab.id} className={tab.id === activeTabId ? "h-full" : "hidden h-full"}>
               {tab.type === "editor" ? (
@@ -888,6 +926,7 @@ function App() {
                   tabId={tab.id}
                   initialBlock={tab.initialBlock}
                   initialSourceId={tab.initialSourceId ?? tab.sessionId ?? undefined}
+                  initialOpenFiles={tab.initialOpenFiles}
                 />
               ) : null}
             </div>
@@ -908,11 +947,10 @@ function App() {
             </Routes>
           ) : null}
         </section>
-      </div>
 
-      <HostFormDrawer />
-      <KeychainFormDrawer />
-      <Dialog
+        <HostFormDrawer />
+        <KeychainFormDrawer />
+        <AppDialog
         open={loginServerModalOpen}
         title={t.app.header.loginServerTitle}
         description={t.app.header.loginServerDescription}
@@ -995,11 +1033,11 @@ function App() {
             })}
           </div>
         )}
-      </Dialog>
-      <Dialog
+      </AppDialog>
+      <AppDialog
         open={startupConflicts.length > 0}
-        title="Conflitos de Sincronizacao"
-        description="Foram detectadas diferencas entre cliente e servidor. Escolha qual lado manter para cada item."
+        title={t.conflicts.title}
+        description={t.conflicts.description}
         onClose={() => undefined}
         footer={
           <div className="flex justify-end gap-2">
@@ -1009,7 +1047,7 @@ function App() {
               disabled={startupSyncBusy}
               onClick={() => void handleResolveStartupConflicts()}
             >
-              {startupSyncBusy ? "Aplicando..." : "Aplicar Resolucao"}
+              {startupSyncBusy ? t.conflicts.applying : t.conflicts.applyButton}
             </button>
           </div>
         }
@@ -1022,7 +1060,7 @@ function App() {
               <div key={key} className="rounded-lg border border-white/10 p-3">
                 <p className="text-sm font-medium text-zinc-100">{item.label}</p>
                 <p className="mt-1 truncate text-xs text-zinc-500">
-                  Local: {item.local_hash ?? "ausente"} | Servidor: {item.remote_hash ?? "ausente"}
+                  {t.conflicts.local}: {item.local_hash ?? t.conflicts.absent} | {t.conflicts.server}: {item.remote_hash ?? t.conflicts.absent}
                 </p>
                 <div className="mt-2 flex gap-2">
                   <button
@@ -1034,7 +1072,7 @@ function App() {
                     }`}
                     onClick={() => setSyncChoices((prev) => ({ ...prev, [key]: "client" }))}
                   >
-                    Manter Cliente
+                    {t.conflicts.keepClient}
                   </button>
                   <button
                     type="button"
@@ -1045,15 +1083,15 @@ function App() {
                     }`}
                     onClick={() => setSyncChoices((prev) => ({ ...prev, [key]: "server" }))}
                   >
-                    Manter Servidor
+                    {t.conflicts.keepServer}
                   </button>
                 </div>
               </div>
             );
           })}
         </div>
-      </Dialog>
-      <Dialog
+      </AppDialog>
+      <AppDialog
         open={pendingSettingsNavigation !== null}
         title={t.settings.unsaved.title}
         description={t.settings.unsaved.description}
@@ -1118,17 +1156,17 @@ function App() {
             </div>
           )}
         </div>
-      </Dialog>
-      <ConfirmDialog
+      </AppDialog>
+        <AppConfirmDialog
         open={pendingCloseTab !== null}
-        title="Fechar workspace"
+        title={t.workspace.closeTitle}
         message={
           closingWorkspace
-            ? "Fechando terminais e blocos do workspace..."
-            : `Deseja realmente fechar "${pendingCloseTab?.title ?? "Workspace"}"? Isso encerrara as sessoes associadas.`
+            ? t.workspace.closing
+            : t.workspace.closeMessage.replace("{title}", pendingCloseTab?.title ?? t.workspace.tabTitle)
         }
         busy={closingWorkspace}
-        confirmLabel={closingWorkspace ? "Fechando..." : "Fechar Workspace"}
+        confirmLabel={closingWorkspace ? t.workspace.closing : t.workspace.closeConfirm}
         onCancel={() => {
           if (!closingWorkspace) {
             setPendingCloseTabId(null);
@@ -1145,9 +1183,12 @@ function App() {
               setPendingCloseTabId(null);
             });
         }}
-      />
-    </main>
+        />
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
 
 export default App;
+
+

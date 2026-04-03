@@ -1,131 +1,57 @@
 import pkg from "../../../package.json";
+import { ExternalLink, Github, Network } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
 import { useT } from "@/langs";
-
-const coreDependencies = [
-  { name: "Tauri", url: "https://github.com/tauri-apps/tauri" },
-  { name: "React", url: "https://github.com/facebook/react" },
-  { name: "Zustand", url: "https://github.com/pmndrs/zustand" },
-  { name: "React Hook Form", url: "https://github.com/react-hook-form/react-hook-form" },
-  { name: "shadcn/ui", url: "https://github.com/shadcn-ui/ui" },
-  { name: "Tailwind CSS", url: "https://github.com/tailwindlabs/tailwindcss" },
-  { name: "xterm.js", url: "https://github.com/xtermjs/xterm.js" },
-  { name: "Monaco Editor", url: "https://github.com/microsoft/monaco-editor" },
-  { name: "ssh2 (Rust)", url: "https://github.com/alexcrichton/ssh2-rs" },
-  { name: "IronRDP (Rust)", url: "https://github.com/Devolutions/IronRDP" },
-  { name: "smb-rs (Rust)", url: "https://github.com/afiffon/smb-rs" },
-  { name: "suppaftp (Rust)", url: "https://github.com/veeso/suppaftp" },
-];
-
-const recentPackages = [
-  { name: "@tauri-apps/plugin-http", url: "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/http" },
-  { name: "tauri-plugin-deep-link", url: "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/deep-link" },
-  { name: "@tauri-apps/plugin-dialog", url: "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/dialog" },
-  { name: "@tauri-apps/plugin-opener", url: "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/opener" },
-  { name: "smb-rs", url: "https://github.com/afiffon/smb-rs?tab=License-1-ov-file" },
-  { name: "suppaftp", url: "https://github.com/veeso/suppaftp" },
-];
-
-const licensePackages = [
-  {
-    name: "smb-rs",
-    license: "MIT",
-    url: "https://github.com/afiffon/smb-rs?tab=License-1-ov-file",
-  },
-  {
-    name: "suppaftp",
-    license: "MIT OR Apache-2.0",
-    url: "https://github.com/veeso/suppaftp",
-  },
-];
 
 export function AboutPage() {
   const t = useT();
 
   return (
-    <div className="h-full overflow-auto px-4 py-4">
-      <section className="rounded-xl border border-white/10 bg-gradient-to-br from-cyan-500/15 via-zinc-950 to-zinc-950 p-5 shadow-2xl shadow-black/20">
-        <h2 className="text-lg font-semibold text-zinc-100">{t.about.title}</h2>
-        <p className="mt-2 max-w-3xl text-sm text-zinc-300">{t.about.description}</p>
-        <div className="mt-4 flex flex-wrap gap-2 text-xs">
-          <span className="rounded-full border border-white/10 bg-zinc-900/60 px-2 py-1 text-zinc-300">
-            {t.about.versionLabel}
-            <span className="font-semibold text-zinc-100">{pkg.version}</span>
-          </span>
-          <span className="rounded-full border border-white/10 bg-zinc-900/60 px-2 py-1 text-zinc-300">{t.about.updatesInfo}</span>
+    <div className="flex-1 p-6 flex items-center justify-center">
+      <div className="max-w-md text-center space-y-8 animate-fade-in">
+        <div className="flex justify-center">
+          <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-primary/10 glow-md">
+            <Network className="h-10 w-10 text-primary" />
+          </div>
         </div>
-      </section>
 
-      <section className="mt-4 grid gap-3 xl:grid-cols-3">
-        <article className="rounded-xl border border-white/10 bg-zinc-950/70 p-4 xl:col-span-1">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.projectSection}</h3>
-          <p className="mt-2 text-sm text-zinc-300">
-            {t.about.repoLabel}
-            <a
-              className="text-cyan-300 hover:text-cyan-200"
-              href="https://github.com/UrubuCode/TermOpen"
-              target="_blank"
-              rel="noreferrer"
-            >
-              github.com/UrubuCode/TermOpen
-            </a>
+        <div className="space-y-2">
+          <h1 className="text-2xl font-bold text-foreground">{t.app.name}</h1>
+          <p className="text-muted-foreground text-sm">{t.about.description}</p>
+          <p className="text-xs text-muted-foreground/60 font-mono">
+            {t.about.versionLabel}: {pkg.version}
           </p>
-        </article>
-
-        <article className="rounded-xl border border-white/10 bg-zinc-950/70 p-4 xl:col-span-1">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.newPackagesSection}</h3>
-          <p className="mt-2 text-sm text-zinc-400">{t.about.newPackagesDescription}</p>
-          <ul className="mt-3 space-y-1 text-sm text-zinc-300">
-            {recentPackages.map((item) => (
-              <li key={item.name}>
-                <a className="text-cyan-300 hover:text-cyan-200" href={item.url} target="_blank" rel="noreferrer">
-                  {item.name}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </article>
-
-        <article className="rounded-xl border border-white/10 bg-zinc-950/70 p-4 xl:col-span-1">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.licensesSection}</h3>
-          <p className="mt-2 text-sm text-zinc-400">{t.about.licensesDescription}</p>
-          <ul className="mt-3 space-y-2 text-sm text-zinc-300">
-            {licensePackages.map((item) => (
-              <li key={item.name} className="rounded border border-white/10 bg-zinc-900/50 px-2 py-1.5">
-                <a className="text-cyan-300 hover:text-cyan-200" href={item.url} target="_blank" rel="noreferrer">
-                  {item.name}
-                </a>
-                <p className="text-[11px] text-zinc-400">{item.license}</p>
-              </li>
-            ))}
-          </ul>
-        </article>
-      </section>
-
-      <section className="mt-4 rounded-xl border border-white/10 bg-zinc-950/70 p-4">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.projectVisionSection}</h3>
-        <div className="mt-2 space-y-2 text-sm text-zinc-300">
-          <p>{t.about.projectVisionP1}</p>
-          <p>{t.about.projectVisionP2}</p>
-          <p>{t.about.projectVisionP3}</p>
         </div>
-      </section>
 
-      <section className="mt-4 rounded-xl border border-white/10 bg-zinc-950/70 p-4">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{t.about.stackSection}</h3>
-        <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-          {coreDependencies.map((item) => (
-            <a
-              key={item.name}
-              href={item.url}
-              target="_blank"
-              rel="noreferrer"
-              className="rounded border border-white/10 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300 transition hover:border-cyan-400/40 hover:text-zinc-100"
-            >
-              {item.name}
-            </a>
-          ))}
+        <div className="rounded-xl border border-border/60 bg-card p-4 space-y-3">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">{t.about.protocolsLabel}</span>
+            <span className="text-foreground">SSH, SFTP, SMB, FTP, FTPS, RDP</span>
+          </div>
+          <div className="border-t border-border/30" />
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">{t.about.frameworkLabel}</span>
+            <span className="text-foreground">Tauri + React</span>
+          </div>
+          <div className="border-t border-border/30" />
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">{t.about.licenseLabel}</span>
+            <span className="text-foreground">MIT</span>
+          </div>
         </div>
-      </section>
+
+        <div className="flex items-center justify-center gap-3">
+          <Button variant="outline" size="sm" className="gap-2" onClick={() => window.open("https://github.com/UrubuCode/TermOpen", "_blank")}>
+            <Github className="h-4 w-4" />
+            {t.about.githubButton}
+          </Button>
+          <Button variant="outline" size="sm" className="gap-2" onClick={() => window.open("https://tauri.app", "_blank")}>
+            <ExternalLink className="h-4 w-4" />
+            {t.about.docsButton}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

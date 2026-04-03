@@ -326,10 +326,10 @@ export function RdpBlockView({
   const statusMessage = block.connectMessage;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-zinc-950">
-      <div className="border-b border-white/10 px-2 py-1.5">
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="border-b border-border/50 px-2 py-1.5">
         <select
-          className="h-8 rounded border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-100"
+          className="h-8 rounded border border-border/50 bg-background px-2 text-xs text-foreground"
           value={block.profileId}
           onChange={(event) => onProfileChange(event.target.value)}
         >
@@ -344,10 +344,10 @@ export function RdpBlockView({
       <div className="relative min-h-0 flex-1 overflow-hidden p-2">
         <div
           className={cn(
-            "relative h-full overflow-hidden rounded border bg-zinc-950",
+            "relative h-full overflow-hidden rounded border bg-background",
             active
-              ? "border-cyan-400/45 shadow-[0_0_16px_rgba(34,211,238,0.2)]"
-              : "border-white/10",
+              ? "border-primary/45 shadow-[0_0_16px_hsl(var(--primary)/0.2)]"
+              : "border-border/50",
           )}
         >
           <canvas
@@ -373,22 +373,22 @@ export function RdpBlockView({
           ) : null}
 
           {!isConnected ? (
-            <div className="absolute inset-0 z-20 flex items-center justify-center bg-zinc-950/80 p-3">
-              <div className="w-full max-w-md rounded-lg border border-white/15 bg-zinc-950/95 p-4 shadow-2xl shadow-black/50">
-                <div className="inline-flex items-center gap-2 text-sm text-zinc-100">
+            <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/80 p-3">
+              <div className="w-full max-w-md rounded-lg border border-border/60 bg-background/95 p-4 shadow-2xl shadow-black/20">
+                <div className="inline-flex items-center gap-2 text-sm text-foreground">
                   {block.connectStage === "connecting" ? (
-                    <RefreshCw className="h-4 w-4 animate-spin text-cyan-300" />
+                    <RefreshCw className="h-4 w-4 animate-spin text-primary" />
                   ) : (
-                    <Monitor className="h-4 w-4 text-cyan-300" />
+                    <Monitor className="h-4 w-4 text-primary" />
                   )}
                   <span>{statusMessage}</span>
                 </div>
-                <div className="mt-3 space-y-1 text-xs text-zinc-400">
-                  <p className={cn(block.connectStage === "connecting" ? "text-cyan-300" : undefined)}>1. {t.workspace.rdp.connecting}</p>
-                  <p className={cn(block.connectStage === "awaiting_password" ? "text-cyan-300" : undefined)}>
+                <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                  <p className={cn(block.connectStage === "connecting" ? "text-primary" : undefined)}>1. {t.workspace.rdp.connecting}</p>
+                  <p className={cn(block.connectStage === "awaiting_password" ? "text-primary" : undefined)}>
                     2. {t.workspace.rdp.authRequired}
                   </p>
-                  <p className={cn(block.connectStage === "error" ? "text-cyan-300" : undefined)}>3. {t.workspace.rdp.error}</p>
+                  <p className={cn(block.connectStage === "error" ? "text-primary" : undefined)}>3. {t.workspace.rdp.error}</p>
                 </div>
 
                 {(block.connectStage === "awaiting_password" || block.connectStage === "error") ? (
@@ -396,7 +396,7 @@ export function RdpBlockView({
                     <input
                       type="password"
                       value={block.passwordDraft}
-                      className="h-9 w-full rounded border border-white/15 bg-zinc-900 px-2 text-sm text-zinc-100 outline-none focus:border-cyan-400/60"
+                      className="h-9 w-full rounded border border-border/60 bg-secondary/70 px-2 text-sm text-foreground outline-none focus:border-primary/60"
                       placeholder={t.workspace.rdp.passwordPlaceholder}
                       onChange={(event) => onPasswordDraftChange(event.target.value)}
                       onKeyDown={(event) => {
@@ -405,7 +405,7 @@ export function RdpBlockView({
                         }
                       }}
                     />
-                    <label className="inline-flex items-center gap-2 text-xs text-zinc-400">
+                    <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                       <input
                         type="checkbox"
                         checked={block.savePasswordChoice}
@@ -416,14 +416,14 @@ export function RdpBlockView({
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        className="rounded border border-cyan-400/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                        className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20"
                         onClick={onSubmitPassword}
                       >
                         {t.workspace.rdp.applyPassword}
                       </button>
                       <button
                         type="button"
-                        className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                        className="rounded border border-border/70 px-2 py-1 text-xs text-foreground/90 hover:bg-secondary"
                         onClick={onRetry}
                       >
                         {t.workspace.rdp.retry}
@@ -445,7 +445,7 @@ export function RdpBlockView({
         </div>
       </div>
 
-      <div className="flex h-8 items-center gap-4 border-t border-white/10 px-3 text-[11px] text-zinc-400">
+      <div className="flex h-8 items-center gap-4 border-t border-border/50 px-3 text-[11px] text-muted-foreground">
         <span>
           {t.workspace.rdp.lastFrame}: {formatCapturedAt(block.capturedAt)}
         </span>

@@ -1,23 +1,27 @@
 import type { AppDictionary } from "../types";
 
 export const about: AppDictionary["about"] = {
-  title: "Sobre o TermOpen",
-  description:
-    "Painel de terminal focado em gerenciamento confiavel de conexoes e dados sensiveis.",
+  title: "Sobre o ConnectHub",
+  description: "Gerenciador de conexões remotas seguro e moderno.",
+  protocolsLabel: "Protocolos",
+  frameworkLabel: "Framework",
+  licenseLabel: "Licença",
+  githubButton: "GitHub",
+  docsButton: "Documentação",
   projectSection: "Projeto",
-  projectVisionSection: "Como o TermOpen funciona",
+  projectVisionSection: "Como o ConnectHub funciona",
   projectVisionP1:
-    "O TermOpen e um painel de terminal que permite usar protocolos SSH e SFTP, como outros aplicativos do tipo, com foco em organizacao e confianca.",
+    "O ConnectHub é um painel desktop para conexões remotas com foco em produtividade e confiabilidade.",
   projectVisionP2:
-    "Uma das ideias centrais e permitir que voce guarde informacoes de conexoes no seu proprio Google Drive, sem depender de servidores externos para armazenar dados sensiveis de conexao e keychain.",
+    "Os dados de conexão e keychain permanecem no vault local criptografado, com opção de sincronização no Google Drive.",
   projectVisionP3:
-    "O servidor usado no auth do Google Drive existe para proteger as chaves privadas do projeto Google dos desenvolvedores e viabilizar a obtencao do access token. Com isso, o TermOpen consegue enviar os arquivos do vault como cloud save e recuperar seus dados em qualquer plataforma suportada, sem backend de armazenamento dedicado.",
-  repoLabel: "Repositorio oficial: ",
-  versionLabel: "Versao do app: ",
-  updatesInfo: "Atualizacoes: verifique releases e commits no GitHub.",
-  stackSection: "Stack e Bibliotecas",
+    "A sincronização utiliza autenticação OAuth e mantém compatibilidade de perfis, sessões e workspaces entre plataformas.",
+  repoLabel: "Repositório oficial:",
+  versionLabel: "Versão do app",
+  updatesInfo: "Atualizações: verifique releases e commits no GitHub.",
+  stackSection: "Stack e bibliotecas",
   newPackagesSection: "Pacotes recentes",
-  newPackagesDescription: "Inclui novas integracoes para HTTP e Deep Link nativos no Tauri.",
-  licensesSection: "Licencas",
-  licensesDescription: "SMB (`smb-rs`) usa licenca MIT. FTP/FTPS (`suppaftp`) usa licenciamento duplo MIT OR Apache-2.0.",
+  newPackagesDescription: "Inclui integrações modernas de UI, HTTP e Deep Link no Tauri.",
+  licensesSection: "Licenças",
+  licensesDescription: "SMB (`smb-rs`) usa licença MIT. FTP/FTPS (`suppaftp`) usa licenciamento MIT OR Apache-2.0.",
 };

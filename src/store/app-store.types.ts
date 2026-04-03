@@ -77,7 +77,7 @@ export interface AppActions {
   saveKeychain: (entry: KeychainEntry) => Promise<void>;
   deleteKeychain: (id: string) => Promise<void>;
 
-  saveSettings: (next: AppSettings) => Promise<void>;
+  saveSettings: (next: AppSettings, options?: { silent?: boolean }) => Promise<void>;
   changeMasterPassword: (oldPassword: string, newPassword: string, confirmPassword: string) => Promise<void>;
   runSync: (action: SyncAction, serverAddress?: string | null) => Promise<void>;
   syncCancel: () => Promise<void>;

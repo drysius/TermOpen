@@ -1,86 +1,95 @@
 import * as React from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-interface DialogProps {
-  open: boolean;
-  title: string;
-  description?: string;
-  onClose: () => void;
-  children: React.ReactNode;
-  footer?: React.ReactNode;
-}
+const Dialog = DialogPrimitive.Root;
 
-export function Dialog({ open, title, description, onClose, children, footer }: DialogProps) {
-  if (!open) {
-    return null;
-  }
+const DialogTrigger = DialogPrimitive.Trigger;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4" onMouseDown={onClose}>
-      <div
-        className="w-full max-w-2xl rounded-xl border border-white/10 bg-zinc-950/95 shadow-2xl"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="border-b border-white/10 px-5 py-4">
-          <h3 className="text-base font-semibold text-white">{title}</h3>
-          {description ? <p className="mt-1 text-sm text-zinc-400">{description}</p> : null}
-        </div>
-        <div className="max-h-[65vh] overflow-auto px-5 py-4">{children}</div>
-        {footer ? <div className="border-t border-white/10 px-5 py-4">{footer}</div> : null}
-      </div>
-    </div>
-  );
-}
+const DialogPortal = DialogPrimitive.Portal;
 
-interface ConfirmDialogProps {
-  open: boolean;
-  title: string;
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-  busy?: boolean;
-  confirmLabel?: string;
-}
+const DialogClose = DialogPrimitive.Close;
 
-export function ConfirmDialog({
-  open,
-  title,
-  message,
-  onConfirm,
-  onCancel,
-  busy,
-  confirmLabel = "Confirmar",
-}: ConfirmDialogProps) {
-  return (
-    <Dialog
-      open={open}
-      title={title}
-      onClose={onCancel}
-      footer={
-        <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-md border border-white/20 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800"
-          >
-            Cancelar
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onConfirm}
-            className={cn(
-              "rounded-md px-3 py-1.5 text-sm font-medium text-white",
-              busy ? "bg-purple-700/50" : "bg-purple-700 hover:bg-purple-600",
-            )}
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      }
+const DialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      className,
+    )}
+    {...props}
+  />
+));
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
+
+const DialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+>(({ className, children, ...props }, ref) => (
+  <DialogPortal>
+    <DialogOverlay />
+    <DialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+        className,
+      )}
+      {...props}
     >
-      <p className="text-sm text-zinc-300">{message}</p>
-    </Dialog>
-  );
-}
+      {children}
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity data-[state=open]:bg-accent data-[state=open]:text-muted-foreground hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+        <X className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    </DialogPrimitive.Content>
+  </DialogPortal>
+));
+DialogContent.displayName = DialogPrimitive.Content.displayName;
+
+const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("flex flex-col space-y-1.5 text-center sm:text-left", className)} {...props} />
+);
+DialogHeader.displayName = "DialogHeader";
+
+const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2", className)} {...props} />
+);
+DialogFooter.displayName = "DialogFooter";
+
+const DialogTitle = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title
+    ref={ref}
+    className={cn("text-lg font-semibold leading-none tracking-tight", className)}
+    {...props}
+  />
+));
+DialogTitle.displayName = DialogPrimitive.Title.displayName;
+
+const DialogDescription = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
+));
+DialogDescription.displayName = DialogPrimitive.Description.displayName;
+
+export {
+  Dialog,
+  DialogPortal,
+  DialogOverlay,
+  DialogClose,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogFooter,
+  DialogTitle,
+  DialogDescription,
+};

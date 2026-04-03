@@ -12,6 +12,7 @@ export interface WorkTab {
   path?: string;
   initialBlock?: "terminal" | "sftp" | "rdp";
   initialSourceId?: string;
+  initialOpenFiles?: boolean;
 }
 
 export interface WorkspaceSnapshot {

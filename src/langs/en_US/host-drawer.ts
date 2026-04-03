@@ -1,9 +1,25 @@
 import type { AppDictionary } from "../types";
 
 export const hostDrawer: AppDictionary["hostDrawer"] = {
-  titleEdit: "Edit Connection",
-  titleNew: "New Connection",
-  description: "Set identification, protocols and credentials for the connection.",
+  titleEdit: "Edit connection",
+  titleNew: "New connection",
+  description: "Configure protocol, identity and authentication for the connection.",
+  steps: {
+    protocol: "Protocol",
+    connection: "Connection",
+    auth: "Authentication",
+  },
+  wizard: {
+    selectProtocolTitle: "Select protocol",
+    selectProtocolDescription: "Choose the type of connection you want to create.",
+    connectionTitle: "Connection details",
+    connectionDescription: "Configure host, port and basic information.",
+    authTitle: "Authentication",
+    authDescription: "Configure how this connection should authenticate.",
+    back: "Back",
+    next: "Next",
+    create: "Save connection",
+  },
   name: {
     label: "Name",
     description: "Name displayed on cards and workspace tabs.",
@@ -16,7 +32,7 @@ export const hostDrawer: AppDictionary["hostDrawer"] = {
   },
   port: {
     label: "Port",
-    description: "SSH/SFTP server port (usually 22).",
+    description: "Server port for the selected protocol.",
     placeholder: "22",
   },
   username: {
@@ -25,14 +41,16 @@ export const hostDrawer: AppDictionary["hostDrawer"] = {
     placeholder: "root",
   },
   remotePath: {
-    label: "Initial Remote Path",
-    description: "Initial directory when opening an SFTP block.",
+    label: "Initial remote directory",
+    description: "Initial directory when opening a file block.",
     placeholder: "/var/www/app",
   },
   protocols: {
     label: "Protocols",
-    description: "Select which features this host can open in the app.",
+    description: "Select which features this connection can open in the app.",
     placeholder: "Select",
+    sshAlsoSftpLabel: "Use SSH as SFTP too",
+    sshAlsoSftpDescription: "Enable this to use the same profile for SSH terminal and SFTP files.",
     sshDescription: "Opens remote terminal blocks in the workspace.",
     sftpDescription: "Opens remote file explorer and transfers.",
     ftpDescription: "Opens plain FTP remote file explorer and transfers.",
@@ -45,14 +63,21 @@ export const hostDrawer: AppDictionary["hostDrawer"] = {
     description: "Optional. Used when no private key is available.",
     placeholder: "Password (optional)",
   },
+  auth: {
+    passwordMethod: "Password",
+    keyMethod: "SSH Key",
+    agentMethod: "SSH Agent",
+    agentUnavailableTitle: "SSH Agent unavailable",
+    agentUnavailableDescription: "SSH Agent backend support is not available yet in this phase.",
+  },
   keychainField: {
     label: "Keychain",
     description: "Select an entry to auto-fill password/keys.",
     none: "No keychain",
   },
   privateKey: {
-    label: "Private Key",
-    description: "Optional. You can paste the key or select a local file (content saved in vault).",
+    label: "Private key",
+    description: "Optional. Paste the key or select a local file (content is saved in vault).",
     selectFile: "Select file",
     noFile: "No file selected",
     placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----",

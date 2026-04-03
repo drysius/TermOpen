@@ -1,23 +1,27 @@
 import type { AppDictionary } from "../types";
 
 export const about: AppDictionary["about"] = {
-  title: "About TermOpen",
-  description:
-    "Terminal panel focused on reliable connection management and sensitive-data safety.",
+  title: "About ConnectHub",
+  description: "A modern and secure remote connection manager.",
+  protocolsLabel: "Protocols",
+  frameworkLabel: "Framework",
+  licenseLabel: "License",
+  githubButton: "GitHub",
+  docsButton: "Documentation",
   projectSection: "Project",
-  projectVisionSection: "How TermOpen works",
+  projectVisionSection: "How ConnectHub works",
   projectVisionP1:
-    "TermOpen is a terminal panel for SSH and SFTP workflows, similar to other tools in this category, with emphasis on organization and trust.",
+    "ConnectHub is a desktop panel for remote connections with a strong focus on productivity and reliability.",
   projectVisionP2:
-    "A core idea is letting users keep connection data in their own Google Drive, without relying on third-party storage backends for sensitive connection/keychain information.",
+    "Connection and keychain data remain in an encrypted local vault, with optional Google Drive synchronization.",
   projectVisionP3:
-    "The Google auth server is used to protect developer-side Google Project private credentials and enable access token issuance. TermOpen then uploads vault files as cloud save and restores them across supported platforms, without a dedicated data-storage server.",
-  repoLabel: "Official repository: ",
-  versionLabel: "App version: ",
+    "Sync uses OAuth authentication and preserves profile, session and workspace compatibility across platforms.",
+  repoLabel: "Official repository:",
+  versionLabel: "App version",
   updatesInfo: "Updates: check releases and commits on GitHub.",
-  stackSection: "Stack & Libraries",
+  stackSection: "Stack and libraries",
   newPackagesSection: "Recent packages",
-  newPackagesDescription: "Includes new integrations for native Tauri HTTP and Deep Link.",
+  newPackagesDescription: "Includes modern UI, HTTP and native Deep Link integrations in Tauri.",
   licensesSection: "Licenses",
   licensesDescription: "SMB (`smb-rs`) is MIT. FTP/FTPS (`suppaftp`) is dual-licensed MIT OR Apache-2.0.",
 };

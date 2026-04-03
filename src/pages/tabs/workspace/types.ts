@@ -12,6 +12,7 @@ export interface WorkspaceTabPageProps {
   tabId: string;
   initialBlock?: "terminal" | "sftp" | "rdp";
   initialSourceId?: string;
+  initialOpenFiles?: boolean;
 }
 
 interface BaseBlock {
@@ -20,6 +21,7 @@ interface BaseBlock {
   title: string;
   layout: WorkspaceBlockLayout;
   zIndex: number;
+  minimized: boolean;
   maximized: boolean;
 }
 

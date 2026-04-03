@@ -1,80 +1,63 @@
-import { FolderOpen, Monitor, MoreVertical, Plus, Server, TerminalSquare } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Plus, Search } from "lucide-react";
+import { useMemo, useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
+import { ConnectionCard } from "@/components/connection-card";
+import { ConnectionDetailDialog } from "@/components/connection-detail-dialog";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { supportsProtocol } from "@/functions/common";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useT } from "@/langs";
+import { formatProfileSourceId } from "@/pages/tabs/workspace/natives/runtime";
 import { useAppStore } from "@/store/app-store";
 import type { ConnectionProfile, ConnectionProtocol } from "@/types/termopen";
 
-function normalizedProtocols(profile: ConnectionProfile): ConnectionProtocol[] {
-  const raw = profile.protocols?.length
-    ? profile.protocols
-    : profile.kind === "host"
-      ? (["ssh"] as ConnectionProtocol[])
-      : profile.kind === "sftp"
-        ? (["sftp"] as ConnectionProtocol[])
-        : profile.kind === "rdp"
-          ? (["rdp"] as ConnectionProtocol[])
-          : (["ssh", "sftp"] as ConnectionProtocol[]);
-  const unique = Array.from(new Set(raw));
-  if (unique.includes("rdp")) {
+function normalizeProtocols(profile: ConnectionProfile): string[] {
+  if (profile.protocols?.length) {
+    return profile.protocols;
+  }
+  if (profile.kind === "rdp") {
     return ["rdp"];
   }
-  return unique;
+  if (profile.kind === "sftp") {
+    return ["sftp"];
+  }
+  return ["ssh"];
 }
 
-function protocolLabel(profile: ConnectionProfile, t: ReturnType<typeof useT>): string {
-  const protocols = normalizedProtocols(profile);
-  const labels: string[] = [];
-  for (const protocol of protocols) {
-    if (protocol === "ssh") {
-      labels.push(t.home.connections.protocolSsh);
-    } else if (protocol === "sftp") {
-      labels.push(t.home.connections.protocolSftp);
-    } else if (protocol === "ftp") {
-      labels.push(t.home.connections.protocolFtp);
-    } else if (protocol === "ftps") {
-      labels.push(t.home.connections.protocolFtps);
-    } else if (protocol === "smb") {
-      labels.push(t.home.connections.protocolSmb);
-    } else if (protocol === "rdp") {
-      labels.push(t.home.connections.protocolRdp);
-    }
+function primaryProtocol(profile: ConnectionProfile): ConnectionProfile["protocols"][number] {
+  const protocols = normalizeProtocols(profile);
+  if (protocols.includes("rdp")) {
+    return "rdp";
   }
-
-  if (labels.length === 0) {
-    return t.home.connections.protocolSsh;
-  }
-  if (labels.length === 2 && labels.includes(t.home.connections.protocolSsh) && labels.includes(t.home.connections.protocolSftp)) {
-    return t.home.connections.protocolBoth;
-  }
-
-  return labels.join(" + ");
-}
-
-function resolvePrimaryProtocol(profile: ConnectionProfile): "ssh" | "sftp" | "ftp" | "ftps" | "smb" | "rdp" {
-  for (const protocol of normalizedProtocols(profile)) {
-    if (
-      protocol === "ssh" ||
-      protocol === "sftp" ||
-      protocol === "ftp" ||
-      protocol === "ftps" ||
-      protocol === "smb" ||
-      protocol === "rdp"
-    ) {
-      return protocol;
-    }
-  }
-  if (supportsProtocol(profile, "ssh")) {
-    return "ssh";
-  }
-  if (supportsProtocol(profile, "sftp") || supportsProtocol(profile, "ftp") || supportsProtocol(profile, "ftps") || supportsProtocol(profile, "smb")) {
+  if (protocols.includes("sftp")) {
     return "sftp";
   }
-  return "rdp";
+  if (protocols.includes("ftp")) {
+    return "ftp";
+  }
+  if (protocols.includes("ftps")) {
+    return "ftps";
+  }
+  if (protocols.includes("smb")) {
+    return "smb";
+  }
+  return "ssh";
+}
+
+function resolveFileProtocol(profile: ConnectionProfile): "sftp" | "ftp" | "ftps" | "smb" | null {
+  const protocols = normalizeProtocols(profile);
+  if (protocols.includes("sftp")) {
+    return "sftp";
+  }
+  if (protocols.includes("ftp")) {
+    return "ftp";
+  }
+  if (protocols.includes("ftps")) {
+    return "ftps";
+  }
+  if (protocols.includes("smb")) {
+    return "smb";
+  }
+  return null;
 }
 
 export function HomePage() {
@@ -86,231 +69,185 @@ export function HomePage() {
   const openSsh = useAppStore((state) => state.openSsh);
   const openSftpWorkspace = useAppStore((state) => state.openSftpWorkspace);
   const openRdp = useAppStore((state) => state.openRdp);
+  const openTab = useAppStore((state) => state.openTab);
 
-  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
-  const menuRootRef = useRef<HTMLDivElement | null>(null);
+  const [search, setSearch] = useState("");
+  const [protocolFilter, setProtocolFilter] = useState<ConnectionProtocol | "all">("all");
+  const [selectedConn, setSelectedConn] = useState<ConnectionProfile | null>(null);
 
-  useEffect(() => {
-    const onPointerDown = (event: MouseEvent) => {
-      if (!menuRootRef.current) {
-        return;
-      }
-      if (!menuRootRef.current.contains(event.target as Node)) {
-        setMenuOpenId(null);
-      }
-    };
-    window.addEventListener("mousedown", onPointerDown);
-    return () => window.removeEventListener("mousedown", onPointerDown);
-  }, []);
+  const activeProfileIds = useMemo(() => new Set(sessions.map((session) => session.profile_id)), [sessions]);
 
-  const subtitle = useMemo(
-    () => t.home.connections.subtitle.replace("{count}", String(connections.length)),
-    [connections.length, t.home.connections.subtitle],
-  );
+  const filteredConnections = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return connections.filter((connection) => {
+      const protocols = normalizeProtocols(connection).join(" ");
+      const matchesQuery =
+        !query ||
+        connection.name.toLowerCase().includes(query) ||
+        connection.host.toLowerCase().includes(query) ||
+        connection.username.toLowerCase().includes(query) ||
+        protocols.includes(query);
+      const matchesProtocol =
+        protocolFilter === "all" || normalizeProtocols(connection).includes(protocolFilter);
+
+      return matchesQuery && matchesProtocol;
+    });
+  }, [connections, protocolFilter, search]);
+
+  const stats = useMemo(() => {
+    const protocols = filteredConnections.flatMap((connection) => normalizeProtocols(connection));
+    return [
+      { label: t.home.connections.statsTotal, value: String(filteredConnections.length), color: "text-foreground" },
+      { label: t.home.connections.statsSsh, value: String(protocols.filter((protocol) => protocol === "ssh").length), color: "text-primary" },
+      { label: t.home.connections.statsSftp, value: String(protocols.filter((protocol) => protocol === "sftp").length), color: "text-info" },
+      { label: t.home.connections.statsProtocols, value: String(new Set(protocols).size), color: "text-warning" },
+    ];
+  }, [filteredConnections, t.home.connections.statsProtocols, t.home.connections.statsSftp, t.home.connections.statsSsh, t.home.connections.statsTotal]);
 
   return (
-    <div ref={menuRootRef} className="h-full overflow-auto px-4 py-4">
-      <section className="rounded-xl border border-white/10 bg-gradient-to-br from-cyan-500/15 via-zinc-950 to-zinc-950 p-4 shadow-xl shadow-black/20">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-cyan-400/40 bg-cyan-500/10">
-            <Server className="h-5 w-5 text-cyan-200" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-base font-semibold text-zinc-100">{t.home.connections.title}</p>
-            <p className="text-xs text-zinc-400">{subtitle}</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="rounded-full border border-white/10 bg-zinc-900/70 px-2 py-1 text-xs text-zinc-300">
-              {connections.length > 0 ? `${connections.length}` : t.home.connections.zeroLabel}
-            </span>
-            <Button size="sm" onClick={() => openHostDrawer(undefined, "ssh")}>
-              <Plus className="mr-1 h-4 w-4" />
-              {t.home.connections.newConnection}
-            </Button>
-          </div>
-        </div>
-      </section>
+    <div className="flex-1 p-6 space-y-6">
+      <ConnectionDetailDialog
+        open={!!selectedConn}
+        onOpenChange={(open) => !open && setSelectedConn(null)}
+        connection={selectedConn}
+        onEdit={(profile) => {
+          openHostDrawer(profile, primaryProtocol(profile));
+        }}
+        onCopy={(profile) => {
+          openHostDrawer(
+            {
+              ...profile,
+              id: "",
+              name: `${profile.name} (cópia)`,
+            },
+            primaryProtocol(profile),
+          );
+          setSelectedConn(null);
+        }}
+        onDelete={(profileId) => {
+          void deleteHost(profileId);
+          setSelectedConn(null);
+        }}
+        onAccess={(profile) => {
+          const protocols = normalizeProtocols(profile);
+          const hasSsh = protocols.includes("ssh");
+          const fileProtocol = resolveFileProtocol(profile);
 
-      <section className="mt-4">
-        {connections.length === 0 ? (
-          <Card className="rounded-xl border-dashed border-white/20 bg-zinc-950/60">
-            <CardContent className="py-8 text-center">
-              <p className="text-base font-semibold text-zinc-100">{t.home.connections.emptyTitle}</p>
-              <p className="mx-auto mt-2 max-w-xl text-sm text-zinc-400">{t.home.connections.emptyDescription}</p>
-              <Button className="mt-4" onClick={() => openHostDrawer(undefined, "ssh")}>
-                <Plus className="mr-1 h-4 w-4" />
-                {t.home.connections.createFirst}
-              </Button>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {connections.map((profile) => {
-              const protocols = normalizedProtocols(profile);
-              const hasSsh = supportsProtocol(profile, "ssh");
-              const hasFileWorkspace = protocols.some(
-                (protocol) => protocol === "sftp" || protocol === "ftp" || protocol === "ftps" || protocol === "smb",
-              );
-              const hasRdp = supportsProtocol(profile, "rdp");
-              const primaryProtocol = resolvePrimaryProtocol(profile);
-              const editProtocol = protocols.includes("ssh")
-                ? "ssh"
-                : protocols.includes("sftp")
-                  ? "sftp"
-                  : protocols.includes("ftp")
-                    ? "ftp"
-                    : protocols.includes("ftps")
-                      ? "ftps"
-                      : protocols.includes("smb")
-                        ? "smb"
-                        : "rdp";
-              const isMenuOpen = menuOpenId === profile.id;
-              return (
-                <Card
-                  key={profile.id}
-                  className="group cursor-pointer rounded-xl border-white/10 bg-zinc-950/70 transition hover:border-cyan-400/40"
-                  onClick={() => {
-                    if (primaryProtocol === "ssh" && hasSsh) {
-                      void openSsh(profile);
-                      return;
-                    }
-                    if (
-                      (primaryProtocol === "sftp" ||
-                        primaryProtocol === "ftp" ||
-                        primaryProtocol === "ftps" ||
-                        primaryProtocol === "smb") &&
-                      hasFileWorkspace
-                    ) {
-                      void openSftpWorkspace(profile);
-                      return;
-                    }
-                    if (primaryProtocol === "rdp" && hasRdp) {
-                      void openRdp(profile);
-                      return;
-                    }
-                    if (hasSsh) {
-                      void openSsh(profile);
-                    } else if (hasFileWorkspace) {
-                      void openSftpWorkspace(profile);
-                    } else if (hasRdp) {
-                      void openRdp(profile);
-                    }
-                  }}
-                >
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-start justify-between gap-2 text-sm">
-                      <span className="inline-flex min-w-0 items-center gap-2">
-                        {(
-                          primaryProtocol === "sftp" ||
-                          primaryProtocol === "ftp" ||
-                          primaryProtocol === "ftps" ||
-                          primaryProtocol === "smb"
-                        ) && !hasSsh ? (
-                          <FolderOpen className="h-4 w-4 shrink-0 text-cyan-300" />
-                        ) : primaryProtocol === "rdp" && !hasSsh && !hasFileWorkspace ? (
-                          <Monitor className="h-4 w-4 shrink-0 text-cyan-300" />
-                        ) : (
-                          <TerminalSquare className="h-4 w-4 shrink-0 text-cyan-300" />
-                        )}
-                        <span className="truncate">{profile.name}</span>
-                      </span>
-                      <div className="relative shrink-0">
-                        <button
-                          type="button"
-                          className="flex h-7 w-7 items-center justify-center rounded border border-white/15 text-zinc-300 hover:bg-zinc-900"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setMenuOpenId(isMenuOpen ? null : profile.id);
-                          }}
-                        >
-                          <MoreVertical className="h-4 w-4" />
-                        </button>
-                        {isMenuOpen ? (
-                          <div className="absolute right-0 top-8 z-[240] min-w-[170px] rounded-md border border-white/10 bg-zinc-950 p-1 shadow-2xl">
-                            <button
-                              type="button"
-                              className="w-full rounded px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-900"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openHostDrawer(profile, editProtocol);
-                                setMenuOpenId(null);
-                              }}
-                            >
-                              {t.home.hosts.edit}
-                            </button>
-                            <button
-                              type="button"
-                              className="w-full rounded px-2 py-1.5 text-left text-xs text-red-300 hover:bg-zinc-900"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void deleteHost(profile.id);
-                                setMenuOpenId(null);
-                              }}
-                            >
-                              {t.home.hosts.remove}
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    </CardTitle>
-                    <p className="truncate text-xs text-zinc-400">
-                      {profile.username}@{profile.host}:{profile.port}
-                    </p>
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <div className="mb-3 flex items-center gap-1">
-                      <Badge variant="outline">{protocolLabel(profile, t)}</Badge>
-                      <Badge variant="secondary">{sessions.length} session(s)</Badge>
-                    </div>
-                    <p className="text-xs text-zinc-500">{t.home.connections.cardHint}</p>
-                    <div className="mt-3">
-                      <p className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">{t.home.connections.quickActions}</p>
-                      <div className="flex gap-2">
-                        {hasSsh ? (
-                          <button
-                            type="button"
-                            className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void openSsh(profile);
-                            }}
-                          >
-                            {t.home.connections.openSsh}
-                          </button>
-                        ) : null}
-                        {hasFileWorkspace ? (
-                          <button
-                            type="button"
-                            className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void openSftpWorkspace(profile);
-                            }}
-                          >
-                            {t.home.connections.openSftp}
-                          </button>
-                        ) : null}
-                        {hasRdp ? (
-                          <button
-                            type="button"
-                            className="rounded border border-white/20 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void openRdp(profile);
-                            }}
-                          >
-                            {t.home.connections.openRdp}
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
+          if (protocols.includes("rdp")) {
+            void openRdp(profile);
+            setSelectedConn(null);
+            return;
+          }
+
+          if (hasSsh) {
+            openTab({
+              id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+              type: "workspace",
+              title: `Workspace - ${profile.name}`,
+              closable: true,
+              profileId: profile.id,
+              initialBlock: "terminal",
+              initialSourceId: formatProfileSourceId(profile.id, "sftp"),
+              initialOpenFiles: fileProtocol === "sftp",
+            });
+            setSelectedConn(null);
+            return;
+          }
+
+          if (fileProtocol) {
+            openTab({
+              id: `workspace:${Date.now()}:${Math.random().toString(16).slice(2, 7)}`,
+              type: "workspace",
+              title: `Workspace - ${profile.name}`,
+              closable: true,
+              profileId: profile.id,
+              initialBlock: "sftp",
+              initialSourceId: formatProfileSourceId(profile.id, fileProtocol),
+            });
+            setSelectedConn(null);
+          }
+        }}
+        onOpenSsh={(profile) => {
+          void openSsh(profile);
+          setSelectedConn(null);
+        }}
+        onOpenFiles={(profile) => {
+          void openSftpWorkspace(profile);
+          setSelectedConn(null);
+        }}
+        onOpenRdp={(profile) => {
+          void openRdp(profile);
+          setSelectedConn(null);
+        }}
+      />
+
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">{t.home.connections.title}</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            {t.home.connections.subtitle}
+          </p>
+        </div>
+        <Button size="sm" className="gap-2" onClick={() => openHostDrawer(undefined, "ssh")}>
+          <Plus className="h-4 w-4" />
+          {t.home.connections.newConnection}
+        </Button>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={t.home.connections.searchPlaceholder}
+            className="h-9 w-full rounded-lg border border-border bg-secondary/50 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+        <Select
+          value={protocolFilter}
+          onValueChange={(value) => setProtocolFilter(value as ConnectionProtocol | "all")}
+        >
+          <SelectTrigger className="h-9 w-[180px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t.home.connections.filterProtocolAll}</SelectItem>
+            <SelectItem value="ssh">{t.home.connections.protocolSsh}</SelectItem>
+            <SelectItem value="sftp">{t.home.connections.protocolSftp}</SelectItem>
+            <SelectItem value="ftp">{t.home.connections.protocolFtp}</SelectItem>
+            <SelectItem value="ftps">{t.home.connections.protocolFtps}</SelectItem>
+            <SelectItem value="smb">{t.home.connections.protocolSmb}</SelectItem>
+            <SelectItem value="rdp">{t.home.connections.protocolRdp}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="grid grid-cols-4 gap-3">
+        {stats.map((stat) => (
+          <div key={stat.label} className="rounded-lg border border-border/40 bg-card p-3">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{stat.label}</p>
+            <p className={`text-2xl font-semibold mt-1 ${stat.color}`}>{stat.value}</p>
           </div>
-        )}
-      </section>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {filteredConnections.map((connection) => {
+          const protocol = primaryProtocol(connection);
+          return (
+            <div key={connection.id} onClick={() => setSelectedConn(connection)}>
+              <ConnectionCard
+                name={connection.name}
+                host={`${connection.host}:${connection.port}`}
+                protocol={protocol}
+                user={connection.username}
+                lastUsed={activeProfileIds.has(connection.id) ? t.home.connections.statusActive : t.home.connections.statusIdle}
+              />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

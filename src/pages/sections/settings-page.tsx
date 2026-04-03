@@ -1,106 +1,43 @@
-import { ChevronDown, Cloud, CloudDownload, CloudUpload, ExternalLink, Lock, Save, Server } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Cloud,
+  CloudDownload,
+  CloudUpload,
+  ExternalLink,
+  FolderOpen,
+  Lock,
+  Monitor,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Server,
+  Shield,
+  TerminalSquare,
+  TriangleAlert,
+  Trash2,
+  UserRound,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { open } from "@tauri-apps/plugin-dialog";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Dialog } from "@/components/ui/dialog";
+import { AppDialog } from "@/components/ui/app-dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { getError } from "@/functions/common";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
 import { api } from "@/lib/tauri";
 import type { AppSettings, AuthServer, ModifiedUploadPolicy, SyncLoggedUser } from "@/types/termopen";
-
-interface SettingsFormValues extends AppSettings {}
-
-interface PasswordFormValues {
-  oldPassword: string;
-  newPassword: string;
-  confirmPassword: string;
-}
+import { OptionDropdown } from "@/pages/sections/settings/option-dropdown";
+import { SettingsPanel } from "@/pages/sections/settings/settings-panel";
+import { SettingsRow } from "@/pages/sections/settings/settings-row";
+import type { PasswordFormValues, SettingsFormValues } from "@/pages/sections/settings/types";
 
 const uploadPolicyStorageKey = "termopen.upload-policy.prompted";
-
-function SettingsRow({
-  title,
-  description,
-  control,
-}: {
-  title: string;
-  description: string;
-  control: ReactNode;
-}) {
-  return (
-    <div className="grid gap-3 rounded-xl border border-white/10 bg-zinc-950/45 p-3 xl:grid-cols-3 xl:items-center">
-      <div className="xl:col-span-1">
-        <p className="text-sm font-medium text-zinc-100">{title}</p>
-        <p className="text-xs text-zinc-400">{description}</p>
-      </div>
-      <div className="xl:col-span-2">{control}</div>
-    </div>
-  );
-}
-
-function OptionDropdown<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: ReadonlyArray<{ value: T; label: string; description: string }>;
-  onChange: (value: T) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const selected = options.find((item) => item.value === value) ?? options[0];
-
-  useEffect(() => {
-    const onDown = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, []);
-
-  return (
-    <div ref={rootRef} className="relative">
-      <button
-        type="button"
-        className="flex h-10 w-full items-center justify-between rounded-lg border border-white/15 bg-zinc-900/85 px-3 text-left text-sm text-zinc-100 transition hover:border-cyan-400/45"
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span>{selected?.label}</span>
-        <ChevronDown className={`h-4 w-4 text-zinc-400 transition ${open ? "rotate-180" : ""}`} />
-      </button>
-      {selected?.description ? (
-        <p className="mt-1 text-xs text-zinc-500">{selected.description}</p>
-      ) : null}
-      {open ? (
-        <div className="absolute z-[260] mt-1 w-full rounded-lg border border-white/10 bg-zinc-950/95 p-1 shadow-2xl">
-          {options.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={`w-full rounded px-2 py-2 text-left transition ${
-                option.value === value ? "bg-cyan-500/20 text-cyan-100" : "text-zinc-300 hover:bg-zinc-900"
-              }`}
-              onClick={() => {
-                onChange(option.value);
-                setOpen(false);
-              }}
-            >
-              <p className="text-xs font-medium">{option.label}</p>
-              <p className="mt-0.5 text-[11px] text-zinc-500">{option.description}</p>
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 function normalizeSettingsValues(values: SettingsFormValues): AppSettings {
   return {
@@ -119,12 +56,16 @@ export function SettingsPage() {
   const t = useT();
   const settings = useAppStore((state) => state.settings);
   const syncState = useAppStore((state) => state.syncState);
+  const connections = useAppStore((state) => state.connections);
+  const keychainEntries = useAppStore((state) => state.keychainEntries);
+  const knownHosts = useAppStore((state) => state.knownHosts);
   const busy = useAppStore((state) => state.busy);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const setSettingsUnsavedDraft = useAppStore((state) => state.setSettingsUnsavedDraft);
   const runSync = useAppStore((state) => state.runSync);
   const syncCancel = useAppStore((state) => state.syncCancel);
   const changeMasterPassword = useAppStore((state) => state.changeMasterPassword);
+  const bootstrap = useAppStore((state) => state.bootstrap);
 
   const [showUploadPolicyModal, setShowUploadPolicyModal] = useState(false);
   const [authServers, setAuthServers] = useState<AuthServer[]>([]);
@@ -139,6 +80,10 @@ export function SettingsPage() {
   const [syncAction, setSyncAction] = useState<"login" | "push" | "pull" | null>(null);
   const [serverDraft, setServerDraft] = useState({ id: "", label: "", address: "", author: "" });
   const [showLocalServerModal, setShowLocalServerModal] = useState(false);
+  const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
+  const [deleteAccountBusy, setDeleteAccountBusy] = useState(false);
+  const [deleteCloudData, setDeleteCloudData] = useState(false);
+  const [deleteCurrentPassword, setDeleteCurrentPassword] = useState("");
   const SERVERS_PER_PAGE = 5;
 
   const settingsForm = useForm<SettingsFormValues>({
@@ -151,24 +96,49 @@ export function SettingsPage() {
       confirmPassword: "",
     },
   });
+  const saveInFlightRef = useRef(false);
+  const pendingSettingsRef = useRef<AppSettings | null>(null);
 
   useEffect(() => {
     settingsForm.reset(settings);
     setSettingsUnsavedDraft(null);
   }, [setSettingsUnsavedDraft, settings, settingsForm]);
 
-  useEffect(() => {
-    const subscription = settingsForm.watch((values) => {
-      const normalized = normalizeSettingsValues(values as SettingsFormValues);
-      const hasChanges = JSON.stringify(normalized) !== JSON.stringify(settings);
-      setSettingsUnsavedDraft(hasChanges ? normalized : null);
-    });
+  const flushSettingsSave = useCallback(async () => {
+    if (saveInFlightRef.current) {
+      return;
+    }
+    const next =
+      pendingSettingsRef.current ??
+      normalizeSettingsValues(settingsForm.getValues() as SettingsFormValues);
+    pendingSettingsRef.current = null;
 
-    return () => {
-      subscription.unsubscribe();
+    if (JSON.stringify(next) === JSON.stringify(settings)) {
       setSettingsUnsavedDraft(null);
-    };
-  }, [setSettingsUnsavedDraft, settings, settingsForm]);
+      return;
+    }
+
+    saveInFlightRef.current = true;
+    try {
+      await saveSettings(next, { silent: true });
+    } finally {
+      saveInFlightRef.current = false;
+      setSettingsUnsavedDraft(null);
+      if (pendingSettingsRef.current) {
+        void flushSettingsSave();
+      }
+    }
+  }, [saveSettings, setSettingsUnsavedDraft, settings, settingsForm]);
+
+  const requestSettingsSave = useCallback(
+    (immediate = false) => {
+      pendingSettingsRef.current = normalizeSettingsValues(settingsForm.getValues() as SettingsFormValues);
+      if (immediate) {
+        void flushSettingsSave();
+      }
+    },
+    [flushSettingsSave, settingsForm],
+  );
 
   useEffect(() => {
     const prompted = localStorage.getItem(uploadPolicyStorageKey);
@@ -237,7 +207,7 @@ export function SettingsPage() {
     if (syncBusy) {
       await handleCancelSync();
     }
-    await saveSettings({ ...settings, selected_auth_server_id: id });
+    await saveSettings({ ...settings, selected_auth_server_id: id }, { silent: true });
   }
 
   async function handleSaveServer() {
@@ -270,11 +240,34 @@ export function SettingsPage() {
     const next = await api.authServersList();
     setAuthServers(next);
     if ((settings.selected_auth_server_id || "default") === id) {
-      await saveSettings({ ...settings, selected_auth_server_id: "default" });
+      await saveSettings({ ...settings, selected_auth_server_id: "default" }, { silent: true });
+    }
+  }
+
+  async function handleDeleteAccount() {
+    const password = deleteCurrentPassword.trim();
+    if (!password) {
+      toast.error(t.settings.security.confirmPasswordRequired);
+      return;
+    }
+
+    setDeleteAccountBusy(true);
+    try {
+      await api.vaultDeleteAccount(password, deleteCloudData && Boolean(loggedUser));
+      setDeleteAccountOpen(false);
+      setDeleteCurrentPassword("");
+      setDeleteCloudData(false);
+      await bootstrap();
+      toast.success(t.settings.security.deleteSuccess);
+    } catch (error) {
+      toast.error(getError(error));
+    } finally {
+      setDeleteAccountBusy(false);
     }
   }
 
   const watchedNewPassword = passwordForm.watch("newPassword");
+  const cloudConnected = Boolean(loggedUser);
 
   const editorOptions = useMemo(
     () => [
@@ -302,9 +295,8 @@ export function SettingsPage() {
   );
 
   function applyUploadPolicy(policy: ModifiedUploadPolicy) {
-    const next = { ...settings, modified_files_upload_policy: policy };
-    settingsForm.setValue("modified_files_upload_policy", policy);
-    void saveSettings(next);
+    settingsForm.setValue("modified_files_upload_policy", policy, { shouldDirty: true });
+    requestSettingsSave(true);
     localStorage.setItem(uploadPolicyStorageKey, "1");
     setShowUploadPolicyModal(false);
   }
@@ -321,479 +313,751 @@ export function SettingsPage() {
     security: t.settings.sections.masterPassword,
   } as const;
 
+  const settingsTabs = useMemo(
+    () => [
+      { id: "general" as const, label: tabLabels.general, icon: Monitor },
+      { id: "sftp" as const, label: tabLabels.sftp, icon: FolderOpen },
+      { id: "terminal" as const, label: tabLabels.terminal, icon: TerminalSquare },
+      { id: "sync" as const, label: tabLabels.sync, icon: RefreshCw },
+      { id: "security" as const, label: tabLabels.security, icon: Shield },
+    ],
+    [tabLabels.general, tabLabels.security, tabLabels.sftp, tabLabels.sync, tabLabels.terminal],
+  );
+
+  const filteredServers = useMemo(() => {
+    const q = serverFilter.trim().toLowerCase();
+    return authServers
+      .filter((server) => {
+        const matchesText =
+          !q ||
+          server.label.toLowerCase().includes(q) ||
+          server.address.toLowerCase().includes(q) ||
+          (server.author?.toLowerCase().includes(q) ?? false);
+        if (!matchesText) {
+          return false;
+        }
+        if (serverFilterStatus === "all") {
+          return true;
+        }
+        const ping = serverPings[server.id];
+        if (serverFilterStatus === "online") {
+          return ping !== undefined && ping !== null;
+        }
+        return ping === null;
+      })
+      .sort((left, right) => {
+        const leftPing = serverPings[left.id];
+        const rightPing = serverPings[right.id];
+        const leftRank = leftPing !== undefined && leftPing !== null ? 0 : leftPing === null ? 2 : 1;
+        const rightRank = rightPing !== undefined && rightPing !== null ? 0 : rightPing === null ? 2 : 1;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        if (leftRank === 0 && rightRank === 0) {
+          return (leftPing ?? Number.POSITIVE_INFINITY) - (rightPing ?? Number.POSITIVE_INFINITY);
+        }
+        return left.label.localeCompare(right.label);
+      });
+  }, [authServers, serverFilter, serverFilterStatus, serverPings]);
+
+  const totalServerPages = Math.max(1, Math.ceil(filteredServers.length / SERVERS_PER_PAGE));
+  const resolvedServerPage = Math.min(serverPage, totalServerPages - 1);
+  const pagedServers = filteredServers.slice(
+    resolvedServerPage * SERVERS_PER_PAGE,
+    (resolvedServerPage + 1) * SERVERS_PER_PAGE,
+  );
+
   return (
-    <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top,#0a1626_0%,#09090b_55%)] px-4 py-4">
-      <form
-        className="mx-auto max-w-7xl"
-        onSubmit={settingsForm.handleSubmit((values) =>
-          void saveSettings(normalizeSettingsValues(values)).then(() => setSettingsUnsavedDraft(null)),
-        )}
-      >
-        <div className="mb-4 rounded-2xl border border-white/10 bg-gradient-to-br from-cyan-500/15 via-zinc-950 to-zinc-950 p-4 shadow-2xl shadow-black/30">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-lg font-semibold text-zinc-100">{t.sidebar.settings}</p>
-              <p className="text-xs text-zinc-400">{tabLabels[settingsTab]}</p>
-            </div>
-            <Button type="submit" disabled={busy}>
-              <Save className="mr-2 h-4 w-4" /> {t.settings.save}
-            </Button>
+    <div className="h-full overflow-auto bg-background px-4 py-4">
+      <div className="mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold text-foreground">{t.sidebar.settings}</h1>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              {tabLabels[settingsTab]}
+            </p>
           </div>
         </div>
 
-        <div className="mb-4 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-zinc-950/70 p-1 text-xs md:grid-cols-5">
-          {[
-            { id: "general", label: tabLabels.general },
-            { id: "sftp", label: tabLabels.sftp },
-            { id: "terminal", label: tabLabels.terminal },
-            { id: "sync", label: tabLabels.sync },
-            { id: "security", label: tabLabels.security },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              className={`rounded-lg px-2 py-2 transition ${
-                settingsTab === tab.id
-                  ? "bg-zinc-800 text-zinc-100 shadow-inner shadow-black/30"
-                  : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
-              }`}
-              onClick={() => setSettingsTab(tab.id as typeof settingsTab)}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <div className="overflow-x-auto border-b border-border/40">
+          <div className="flex min-w-max gap-1">
+            {settingsTabs.map((tab) => {
+              const TabIcon = tab.icon;
+              const active = settingsTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className={`relative flex items-center gap-2 rounded-t-lg px-3 py-2.5 text-sm transition-colors ${active
+                    ? "bg-card text-foreground"
+                    : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground/90"
+                    }`}
+                  onClick={() => setSettingsTab(tab.id)}
+                >
+                  <TabIcon className="h-4 w-4" />
+                  <span className="whitespace-nowrap">{tab.label}</span>
+                  {active ? <span className="absolute inset-x-2 bottom-0 h-[2px] rounded-full bg-primary" /> : null}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {settingsTab === "general" ? (
-        <section className="space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
-          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.application}</h3>
-          <SettingsRow
-            title={t.settings.editor.title}
-            description={t.settings.editor.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="preferred_editor"
-                render={({ field }) => (
-                  <OptionDropdown
-                    value={field.value}
-                    onChange={field.onChange}
-                    options={editorOptions}
-                  />
-                )}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.externalCommand.title}
-            description={t.settings.externalCommand.description}
-            control={<Input placeholder={t.settings.externalCommand.placeholder} {...settingsForm.register("external_editor_command")} />}
-          />
-          <SettingsRow
-            title={t.settings.inactivityLock.title}
-            description={t.settings.inactivityLock.description}
-            control={<Input type="number" min={1} {...settingsForm.register("inactivity_lock_minutes", { valueAsNumber: true })} />}
-          />
-          <SettingsRow
-            title={t.settings.debugLogs.title}
-            description={t.settings.debugLogs.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="debug_logs_enabled"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-        </section>
-        ) : null}
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <SettingsPanel icon={Monitor} title={t.settings.sections.application}>
+              <div className="divide-y divide-border/20">
+                <SettingsRow
+                  title={t.settings.editor.title}
+                  description={t.settings.editor.description}
+                  control={
+                    <Controller
+                      control={settingsForm.control}
+                      name="preferred_editor"
+                      render={({ field }) => (
+                        <OptionDropdown
+                          value={field.value}
+                          onChange={(value) => {
+                            field.onChange(value);
+                            requestSettingsSave(true);
+                          }}
+                          options={editorOptions}
+                        />
+                      )}
+                    />
+                  }
+                />
+                <SettingsRow
+                  title={t.settings.externalCommand.title}
+                  description={t.settings.externalCommand.description}
+                  control={
+                    <Input
+                      placeholder={t.settings.externalCommand.placeholder}
+                      {...settingsForm.register("external_editor_command", {
+                        onBlur: () => requestSettingsSave(true),
+                      })}
+                    />
+                  }
+                />
+                <SettingsRow
+                  title={t.settings.inactivityLock.title}
+                  description={t.settings.inactivityLock.description}
+                  control={
+                    <Input
+                      type="number"
+                      min={1}
+                      {...settingsForm.register("inactivity_lock_minutes", {
+                        valueAsNumber: true,
+                        onBlur: () => requestSettingsSave(true),
+                      })}
+                    />
+                  }
+                />
+                <SettingsRow
+                  title={t.settings.debugLogs.title}
+                  description={t.settings.debugLogs.description}
+                  control={
+                    <Controller
+                      control={settingsForm.control}
+                      name="debug_logs_enabled"
+                      render={({ field }) => (
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={(checked) => {
+                            field.onChange(checked);
+                            requestSettingsSave(true);
+                          }}
+                        />
+                      )}
+                    />
+                  }
+                />
+              </div>
+            </SettingsPanel>
 
-        {settingsTab === "sync" ? (
-        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
-          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.sync}</h3>
-          <SettingsRow
-            title={t.settings.syncAuto.title}
-            description={t.settings.syncAuto.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="sync_auto_enabled"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.syncStartup.title}
-            description={t.settings.syncStartup.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="sync_on_startup"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.syncOnSave.title}
-            description={t.settings.syncOnSave.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="sync_on_settings_change"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.syncInterval.title}
-            description={t.settings.syncInterval.description}
-            control={<Input type="number" min={1} {...settingsForm.register("sync_interval_minutes", { valueAsNumber: true })} />}
-          />
-        </section>
+            <SettingsPanel icon={FolderOpen} title={t.settings.sections.modifiedFiles}>
+              <div className="divide-y divide-border/20">
+                <SettingsRow
+                  title={t.settings.uploadPolicy.title}
+                  description={t.settings.uploadPolicy.description}
+                  control={
+                    <Controller
+                      control={settingsForm.control}
+                      name="modified_files_upload_policy"
+                      render={({ field }) => (
+                        <OptionDropdown
+                          value={field.value}
+                          onChange={(value) => {
+                            field.onChange(value);
+                            requestSettingsSave(true);
+                          }}
+                          options={uploadPolicyOptions}
+                        />
+                      )}
+                    />
+                  }
+                />
+              </div>
+            </SettingsPanel>
+          </div>
         ) : null}
 
         {settingsTab === "sftp" ? (
-        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
-          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.sftp}</h3>
-          <SettingsRow
-            title={t.settings.sftpChunk.title}
-            description={t.settings.sftpChunk.description}
-            control={
-              <Input
-                type="number"
-                min={64}
-                max={8192}
-                {...settingsForm.register("sftp_chunk_size_kb", { valueAsNumber: true })}
+          <SettingsPanel icon={Server} title={t.settings.sections.sftp}>
+            <div className="divide-y divide-border/20">
+              <SettingsRow
+                title={t.settings.sftpChunk.title}
+                description={t.settings.sftpChunk.description}
+                control={
+                  <Input
+                    type="number"
+                    min={64}
+                    max={8192}
+                    {...settingsForm.register("sftp_chunk_size_kb", {
+                      valueAsNumber: true,
+                      onBlur: () => requestSettingsSave(true),
+                    })}
+                  />
+                }
               />
-            }
-          />
-          <SettingsRow
-            title={t.settings.sftpReconnectDelay.title}
-            description={t.settings.sftpReconnectDelay.description}
-            control={
-              <Input
-                type="number"
-                min={1}
-                {...settingsForm.register("sftp_reconnect_delay_seconds", { valueAsNumber: true })}
+              <SettingsRow
+                title={t.settings.sftpReconnectDelay.title}
+                description={t.settings.sftpReconnectDelay.description}
+                control={
+                  <Input
+                    type="number"
+                    min={1}
+                    {...settingsForm.register("sftp_reconnect_delay_seconds", {
+                      valueAsNumber: true,
+                      onBlur: () => requestSettingsSave(true),
+                    })}
+                  />
+                }
               />
-            }
-          />
-        </section>
+            </div>
+          </SettingsPanel>
         ) : null}
 
         {settingsTab === "terminal" ? (
-        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
-          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.terminal}</h3>
-          <SettingsRow
-            title={t.settings.autoReconnect.title}
-            description={t.settings.autoReconnect.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="auto_reconnect_enabled"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.reconnectDelay.title}
-            description={t.settings.reconnectDelay.description}
-            control={<Input type="number" min={1} {...settingsForm.register("reconnect_delay_seconds", { valueAsNumber: true })} />}
-          />
-          <SettingsRow
-            title={t.settings.copyOnSelect.title}
-            description={t.settings.copyOnSelect.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="terminal_copy_on_select"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.rightClickPaste.title}
-            description={t.settings.rightClickPaste.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="terminal_right_click_paste"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.ctrlShiftShortcuts.title}
-            description={t.settings.ctrlShiftShortcuts.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="terminal_ctrl_shift_shortcuts"
-                render={({ field }) => <Switch checked={field.value} onCheckedChange={field.onChange} />}
-              />
-            }
-          />
-          <SettingsRow
-            title={t.settings.knownHosts.title}
-            description={t.settings.knownHosts.description}
-            control={
-              <div className="flex items-center gap-2">
-                <Input className="flex-1" placeholder={t.settings.knownHosts.placeholder} {...settingsForm.register("known_hosts_path")} />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() =>
-                    void open({
-                      title: t.settings.knownHosts.selectDialog,
-                      multiple: false,
-                      directory: false,
-                    }).then((value) => {
-                      if (typeof value === "string") {
-                        settingsForm.setValue("known_hosts_path", value);
-                      }
-                    })
-                  }
-                >
-                  {t.settings.knownHosts.selectButton}
-                </Button>
-              </div>
-            }
-          />
-        </section>
-        ) : null}
-
-        {settingsTab === "general" ? (
-        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
-          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.modifiedFiles}</h3>
-          <SettingsRow
-            title={t.settings.uploadPolicy.title}
-            description={t.settings.uploadPolicy.description}
-            control={
-              <Controller
-                control={settingsForm.control}
-                name="modified_files_upload_policy"
-                render={({ field }) => (
-                  <OptionDropdown
-                    value={field.value}
-                    onChange={field.onChange}
-                    options={uploadPolicyOptions}
+          <SettingsPanel icon={TerminalSquare} title={t.settings.sections.terminal}>
+            <div className="divide-y divide-border/20">
+              <SettingsRow
+                title={t.settings.autoReconnect.title}
+                description={t.settings.autoReconnect.description}
+                control={
+                  <Controller
+                    control={settingsForm.control}
+                    name="auto_reconnect_enabled"
+                    render={({ field }) => (
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={(checked) => {
+                          field.onChange(checked);
+                          requestSettingsSave(true);
+                        }}
+                      />
+                    )}
                   />
-                )}
+                }
               />
-            }
-          />
-        </section>
+              <SettingsRow
+                title={t.settings.reconnectDelay.title}
+                description={t.settings.reconnectDelay.description}
+                control={
+                  <Input
+                    type="number"
+                    min={1}
+                    {...settingsForm.register("reconnect_delay_seconds", {
+                      valueAsNumber: true,
+                      onBlur: () => requestSettingsSave(true),
+                    })}
+                  />
+                }
+              />
+              <SettingsRow
+                title={t.settings.copyOnSelect.title}
+                description={t.settings.copyOnSelect.description}
+                control={
+                  <Controller
+                    control={settingsForm.control}
+                    name="terminal_copy_on_select"
+                    render={({ field }) => (
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={(checked) => {
+                          field.onChange(checked);
+                          requestSettingsSave(true);
+                        }}
+                      />
+                    )}
+                  />
+                }
+              />
+              <SettingsRow
+                title={t.settings.rightClickPaste.title}
+                description={t.settings.rightClickPaste.description}
+                control={
+                  <Controller
+                    control={settingsForm.control}
+                    name="terminal_right_click_paste"
+                    render={({ field }) => (
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={(checked) => {
+                          field.onChange(checked);
+                          requestSettingsSave(true);
+                        }}
+                      />
+                    )}
+                  />
+                }
+              />
+              <SettingsRow
+                title={t.settings.ctrlShiftShortcuts.title}
+                description={t.settings.ctrlShiftShortcuts.description}
+                control={
+                  <Controller
+                    control={settingsForm.control}
+                    name="terminal_ctrl_shift_shortcuts"
+                    render={({ field }) => (
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={(checked) => {
+                          field.onChange(checked);
+                          requestSettingsSave(true);
+                        }}
+                      />
+                    )}
+                  />
+                }
+              />
+              <SettingsRow
+                title={t.settings.knownHosts.title}
+                description={t.settings.knownHosts.description}
+                control={
+                  <div className="flex items-center gap-2">
+                    <Input
+                      className="flex-1"
+                      placeholder={t.settings.knownHosts.placeholder}
+                      {...settingsForm.register("known_hosts_path", {
+                        onBlur: () => requestSettingsSave(true),
+                      })}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() =>
+                        void open({
+                          title: t.settings.knownHosts.selectDialog,
+                          multiple: false,
+                          directory: false,
+                        }).then((value) => {
+                          if (typeof value === "string") {
+                            settingsForm.setValue("known_hosts_path", value, { shouldDirty: true });
+                            requestSettingsSave(true);
+                          }
+                        })
+                      }
+                    >
+                      {t.settings.knownHosts.selectButton}
+                    </Button>
+                  </div>
+                }
+              />
+            </div>
+          </SettingsPanel>
         ) : null}
 
         {settingsTab === "sync" ? (
-        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
-          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.googleDrive}</h3>
-          <div className="py-1">
-            <div className="mb-3 flex gap-1 rounded-lg border border-white/10 bg-zinc-900/50 p-1">
-              <button
-                type="button"
-                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                  driveTab === "account"
-                    ? "bg-zinc-800 text-zinc-100"
-                    : "text-zinc-500 hover:text-zinc-300"
-                }`}
-                onClick={() => setDriveTab("account")}
-              >
-                Conta
-              </button>
-              <button
-                type="button"
-                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                  driveTab === "config"
-                    ? "bg-zinc-800 text-zinc-100"
-                    : "text-zinc-500 hover:text-zinc-300"
-                }`}
-                onClick={() => setDriveTab("config")}
-              >
-                Servidor
-              </button>
-            </div>
-
-            {driveTab === "account" ? (
-              <div>
-                {loggedUser ? (
-                  <div className="mb-2 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20 text-sm font-semibold text-emerald-400">
-                      {loggedUser.name?.[0]?.toUpperCase() || loggedUser.email?.[0]?.toUpperCase() || "?"}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-zinc-100">{loggedUser.name || "Usuario"}</p>
-                      <p className="text-xs text-zinc-500">{loggedUser.email}</p>
-                    </div>
-                    <span className="ml-auto rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-400">
-                      Conectado
-                    </span>
-                  </div>
-                ) : null}
-                <div className="rounded-xl border border-white/10 bg-zinc-950/40 p-3">
-                  <p className={`text-sm ${syncState.status === "error" ? "text-red-400" : syncState.status === "ok" ? "text-emerald-400" : "text-zinc-300"}`}>
-                    {syncState.message}
-                  </p>
-                  {syncState.last_sync_at ? (
-                    <p className="mt-1 text-xs text-zinc-500">
-                      Ultimo sync: {new Date(syncState.last_sync_at).toLocaleString("pt-BR")}
-                    </p>
-                  ) : null}
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Button type="button" onClick={() => void handleRunSync("login")} disabled={syncBusy}>
-                    <Cloud className={`mr-2 h-4 w-4 ${syncBusy ? "animate-pulse" : ""}`} />
-                    {syncBusy && syncAction === "login"
-                      ? "Conectando..."
-                      : loggedUser
-                        ? "Reconectar"
-                        : "Conectar"}
-                  </Button>
-                  {syncBusy ? (
-                    <Button type="button" variant="outline" onClick={() => void handleCancelSync()}>
-                      Cancelar
-                    </Button>
-                  ) : null}
-                  {loggedUser ? (
-                    <>
-                      <Button type="button" variant="outline" onClick={() => void handleRunSync("push")} disabled={syncBusy}>
-                        <CloudUpload className="mr-2 h-4 w-4" /> Push
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void handleRunSync("pull")} disabled={syncBusy}>
-                        <CloudDownload className="mr-2 h-4 w-4" /> Pull
-                      </Button>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            ) : (
-              <div>
-                <div className="mb-3 flex items-center justify-between rounded-xl border border-white/10 bg-zinc-900/35 px-3 py-2">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Local Server</p>
-                    <p className="text-xs text-zinc-500">Adicione ou edite servidores locais em uma modal dedicada.</p>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => {
-                      setServerDraft({ id: "", label: "", address: "", author: "" });
-                      setShowLocalServerModal(true);
-                    }}
-                  >
-                    <Server className="mr-2 h-4 w-4" /> Novo Local Server
-                  </Button>
-                </div>
-
-                <div className="mb-3 flex items-center gap-2">
-                  <Input
-                    placeholder={t.settings.drive.serverSearch}
-                    className="h-9 flex-1 text-xs"
-                    value={serverFilter}
-                    onChange={(e) => { setServerFilter(e.target.value); setServerPage(0); }}
-                  />
-                  <div className="min-w-[180px]">
-                    <OptionDropdown
-                      value={serverFilterStatus}
-                      onChange={(value) => {
-                        setServerFilterStatus(value);
-                        setServerPage(0);
-                      }}
-                      options={serverFilterOptions}
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <SettingsPanel icon={RefreshCw} title={t.settings.sections.sync}>
+              <div className="divide-y divide-border/20">
+                <SettingsRow
+                  title={t.settings.syncAuto.title}
+                  description={t.settings.syncAuto.description}
+                  control={
+                    <Controller
+                      control={settingsForm.control}
+                      name="sync_auto_enabled"
+                      render={({ field }) => (
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={(checked) => {
+                            field.onChange(checked);
+                            requestSettingsSave(true);
+                          }}
+                        />
+                      )}
                     />
-                  </div>
+                  }
+                />
+                <SettingsRow
+                  title={t.settings.syncStartup.title}
+                  description={t.settings.syncStartup.description}
+                  control={
+                    <Controller
+                      control={settingsForm.control}
+                      name="sync_on_startup"
+                      render={({ field }) => (
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={(checked) => {
+                            field.onChange(checked);
+                            requestSettingsSave(true);
+                          }}
+                        />
+                      )}
+                    />
+                  }
+                />
+                <SettingsRow
+                  title={t.settings.syncOnSave.title}
+                  description={t.settings.syncOnSave.description}
+                  control={
+                    <Controller
+                      control={settingsForm.control}
+                      name="sync_on_settings_change"
+                      render={({ field }) => (
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={(checked) => {
+                            field.onChange(checked);
+                            requestSettingsSave(true);
+                          }}
+                        />
+                      )}
+                    />
+                  }
+                />
+                <SettingsRow
+                  title={t.settings.syncInterval.title}
+                  description={t.settings.syncInterval.description}
+                  control={
+                    <Input
+                      type="number"
+                      min={1}
+                      className="h-8 w-24 text-xs font-mono"
+                      {...settingsForm.register("sync_interval_minutes", {
+                        valueAsNumber: true,
+                        onBlur: () => requestSettingsSave(true),
+                      })}
+                    />
+                  }
+                />
+              </div>
+            </SettingsPanel>
+
+            <SettingsPanel
+              icon={Cloud}
+              title={t.settings.sections.googleDrive}
+              description={
+                driveTab === "account"
+                  ? t.settings.drive.tabAccount
+                  : t.settings.drive.tabServer
+              }
+            >
+              <div className="space-y-4 p-4">
+                <div className="grid grid-cols-2 gap-1 rounded-lg border border-border/40 bg-secondary/30 p-1">
+                  <button
+                    type="button"
+                    className={`flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium transition-all duration-200 ${driveTab === "account"
+                        ? "bg-card text-foreground shadow-sm border border-border/40"
+                        : "text-muted-foreground hover:text-foreground/80"
+                      }`}
+                    onClick={() => setDriveTab("account")}
+                  >
+                    <UserRound className="h-3.5 w-3.5" />
+                    {t.settings.drive.tabAccount}
+                  </button>
+                  <button
+                    type="button"
+                    className={`flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium transition-all duration-200 ${driveTab === "config"
+                        ? "bg-card text-foreground shadow-sm border border-border/40"
+                        : "text-muted-foreground hover:text-foreground/80"
+                      }`}
+                    onClick={() => setDriveTab("config")}
+                  >
+                    <Server className="h-3.5 w-3.5" />
+                    {t.settings.drive.tabServer}
+                  </button>
                 </div>
 
-                {(() => {
-                  const q = serverFilter.toLowerCase();
-                  const filtered = authServers
-                    .filter((s) => {
-                      const matchesText = !q || s.label.toLowerCase().includes(q) || s.address.toLowerCase().includes(q) || (s.author?.toLowerCase().includes(q) ?? false);
-                      if (!matchesText) return false;
-                      if (serverFilterStatus === "all") return true;
-                      const ping = serverPings[s.id];
-                      if (serverFilterStatus === "online") return ping !== undefined && ping !== null;
-                      return ping === null;
-                    })
-                    .sort((a, b) => {
-                      const pa = serverPings[a.id];
-                      const pb = serverPings[b.id];
-                      const aOnline = pa !== undefined && pa !== null ? 0 : pa === null ? 2 : 1;
-                      const bOnline = pb !== undefined && pb !== null ? 0 : pb === null ? 2 : 1;
-                      if (aOnline !== bOnline) return aOnline - bOnline;
-                      if (aOnline === 0 && bOnline === 0) return pa! - pb!;
-                      return 0;
-                    });
-                  const totalPages = Math.max(1, Math.ceil(filtered.length / SERVERS_PER_PAGE));
-                  const page = Math.min(serverPage, totalPages - 1);
-                  const paged = filtered.slice(page * SERVERS_PER_PAGE, (page + 1) * SERVERS_PER_PAGE);
+                {driveTab === "account" ? (
+                  <div className="space-y-3 animate-fade-in">
+                    {loggedUser ? (
+                      <div className="flex items-center gap-3 rounded-xl border border-success/25 bg-success/5 px-4 py-3 transition-colors">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-success/15 text-sm font-bold text-success ring-2 ring-success/20">
+                          {loggedUser.name?.[0]?.toUpperCase() ||
+                            loggedUser.email?.[0]?.toUpperCase() ||
+                            "?"}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-foreground">
+                            {loggedUser.name || t.settings.drive.userLabel}
+                          </p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {loggedUser.email}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full bg-success animate-pulse-glow" />
+                          <span className="text-[11px] font-medium text-success">
+                            {t.settings.drive.connected}
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
 
-                  return (
-                    <>
-                      <div className="space-y-2">
-                        {paged.map((server) => {
-                          const isSelected = (settings.selected_auth_server_id || "default") === server.id;
+                    <div className="rounded-lg border border-border/40 bg-card/50 px-4 py-3">
+                      <div className="flex items-start gap-2.5">
+                        <div
+                          className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${syncState.status === "error"
+                              ? "bg-destructive/15"
+                              : syncState.status === "ok"
+                                ? "bg-success/15"
+                                : "bg-muted/30"
+                            }`}
+                        >
+                          {syncState.status === "error" ? (
+                            <AlertCircle className="h-3 w-3 text-destructive" />
+                          ) : syncState.status === "ok" ? (
+                            <CheckCircle2 className="h-3 w-3 text-success" />
+                          ) : (
+                            <Cloud className="h-3 w-3 text-muted-foreground" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <p
+                            className={`text-sm font-medium ${syncState.status === "error"
+                                ? "text-destructive"
+                                : syncState.status === "ok"
+                                  ? "text-success"
+                                  : "text-foreground/90"
+                              }`}
+                          >
+                            {syncState.message}
+                          </p>
+                          {syncState.last_sync_at ? (
+                            <p className="mt-0.5 text-[11px] text-muted-foreground">
+                              {t.settings.drive.lastSync.replace(
+                                "{date}",
+                                new Date(syncState.last_sync_at).toLocaleString()
+                              )}
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => void handleRunSync("login")}
+                        disabled={syncBusy}
+                        className="gap-2"
+                      >
+                        <Cloud
+                          className={`h-3.5 w-3.5 ${syncBusy ? "animate-pulse" : ""}`}
+                        />
+                        {syncBusy && syncAction === "login"
+                          ? t.settings.drive.connecting
+                          : loggedUser
+                            ? t.settings.drive.reconnect
+                            : t.settings.drive.connect}
+                      </Button>
+
+                      {syncBusy ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleCancelSync()}
+                        >
+                          {t.settings.drive.cancel}
+                        </Button>
+                      ) : null}
+
+                      {loggedUser ? (
+                        <div className="flex gap-2 rounded-lg border border-border/30 bg-secondary/20 p-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="gap-2 text-xs"
+                            onClick={() => void handleRunSync("push")}
+                            disabled={syncBusy}
+                          >
+                            <CloudUpload className="h-3.5 w-3.5" />
+                            {t.settings.drive.push}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="gap-2 text-xs"
+                            onClick={() => void handleRunSync("pull")}
+                            disabled={syncBusy}
+                          >
+                            <CloudDownload className="h-3.5 w-3.5" />
+                            {t.settings.drive.pull}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3 animate-fade-in">
+                    <div className="flex items-center justify-between rounded-lg border border-border/30 bg-card/40 px-4 py-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70">
+                          {t.settings.localServer.connectionTitle}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          {t.settings.localServer.connectionDescription}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="gap-1.5"
+                        onClick={() => {
+                          setServerDraft({
+                            id: "",
+                            label: "",
+                            address: "",
+                            author: "",
+                          });
+                          setShowLocalServerModal(true);
+                        }}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        {t.settings.localServer.newTitle}
+                      </Button>
+                    </div>
+
+                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_200px]">
+                      <Input
+                        placeholder={t.settings.drive.serverSearch}
+                        className="h-9 text-xs"
+                        value={serverFilter}
+                        onChange={(event) => {
+                          setServerFilter(event.target.value);
+                          setServerPage(0);
+                        }}
+                      />
+                      <OptionDropdown
+                        value={serverFilterStatus}
+                        onChange={(value) => {
+                          setServerFilterStatus(value);
+                          setServerPage(0);
+                        }}
+                        options={serverFilterOptions}
+                      />
+                    </div>
+
+                    <div className="overflow-hidden rounded-xl border border-border/40 bg-card/30">
+                      {pagedServers.length === 0 ? (
+                        <div className="flex flex-col items-center gap-2 px-4 py-8">
+                          <Server className="h-8 w-8 text-muted-foreground/30" />
+                          <p className="text-xs text-muted-foreground">
+                            {t.settings.drive.serverEmpty}
+                          </p>
+                        </div>
+                      ) : (
+                        pagedServers.map((server, index) => {
+                          const isSelected =
+                            (settings.selected_auth_server_id || "default") === server.id;
                           const ping = serverPings[server.id];
+
                           return (
                             <div
                               key={server.id}
-                              className={`flex items-center justify-between rounded-xl border px-3 py-2 transition-colors cursor-pointer ${
-                                isSelected
-                                  ? "border-emerald-500/50 bg-emerald-500/12"
-                                  : "border-white/10 bg-zinc-900/35 hover:bg-zinc-900/60"
-                              }`}
+                              className={`group flex cursor-pointer items-start gap-3 px-4 py-3 transition-all duration-200 ${index > 0 ? "border-t border-border/15" : ""
+                                } ${isSelected
+                                  ? "bg-primary/8 border-l-2 border-l-primary"
+                                  : "hover:bg-accent/30 border-l-2 border-l-transparent"
+                                }`}
                               onClick={() => void handleSelectServer(server.id)}
-                              onKeyDown={() => {}}
+                              onKeyDown={() => { }}
                               role="button"
                               tabIndex={0}
                             >
+                              <div className="mt-1 flex flex-col items-center gap-1">
+                                <div
+                                  className={`h-2.5 w-2.5 rounded-full ${server.id in serverPings
+                                      ? ping !== null
+                                        ? "bg-success"
+                                        : "bg-destructive"
+                                      : "bg-muted-foreground/30 animate-pulse"
+                                    }`}
+                                />
+                              </div>
+
                               <div className="min-w-0 flex-1">
-                                <p className="text-sm font-medium text-zinc-100">
-                                  {server.label}
+                                <div className="flex items-center gap-2">
+                                  <p className="truncate text-sm font-medium text-foreground">
+                                    {server.label}
+                                  </p>
                                   {server.official ? (
-                                    <span className="ml-1.5 inline-block rounded bg-blue-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold text-blue-400">
-                                      Oficial
+                                    <span className="inline-flex items-center rounded-md bg-info/15 px-1.5 py-0.5 text-[10px] font-semibold text-info">
+                                      {t.settings.drive.official}
                                     </span>
                                   ) : null}
+                                  {isSelected ? (
+                                    <span className="inline-flex items-center rounded-md bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                                      {t.settings.drive.active}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <p className="mt-0.5 truncate text-xs text-muted-foreground font-mono">
+                                  {server.address}
                                 </p>
-                                <p className="truncate text-xs text-zinc-500">{server.address}</p>
                                 {server.author ? (
                                   <a
                                     href={server.author}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="mt-0.5 inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300"
-                                    onClick={(e) => e.stopPropagation()}
+                                    className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors"
+                                    onClick={(event) => event.stopPropagation()}
                                   >
-                                    <ExternalLink className="h-3 w-3" /> {server.author}
+                                    <ExternalLink className="h-3 w-3" />
+                                    {server.author}
                                   </a>
                                 ) : null}
                               </div>
-                              <div className="ml-2 flex items-center gap-2">
+
+                              <div className="ml-2 flex items-center gap-2 shrink-0">
                                 {server.id in serverPings ? (
                                   ping !== null ? (
-                                    <span className={`text-xs font-mono ${
-                                      ping! < 200 ? "text-emerald-400" :
-                                      ping! < 500 ? "text-yellow-400" : "text-orange-400"
-                                    }`}>
+                                    <span
+                                      className={`rounded-md px-2 py-0.5 text-[11px] font-mono font-medium ${ping < 200
+                                          ? "bg-success/10 text-success"
+                                          : ping < 500
+                                            ? "bg-warning/10 text-warning"
+                                            : "bg-destructive/10 text-destructive"
+                                        }`}
+                                    >
                                       {ping}ms
                                     </span>
                                   ) : (
-                                    <span className="text-xs font-mono text-red-400">offline</span>
+                                    <span className="rounded-md bg-destructive/10 px-2 py-0.5 text-[11px] font-mono font-medium text-destructive">
+                                      {t.settings.drive.offline}
+                                    </span>
                                   )
                                 ) : (
-                                  <span className="text-xs text-zinc-600">...</span>
+                                  <span className="text-xs text-muted-foreground animate-pulse">
+                                    •••
+                                  </span>
                                 )}
-                                {isSelected ? (
-                                  <span className="text-xs font-medium text-emerald-400">Ativo</span>
-                                ) : null}
+
                                 {isUserManagedServer(server) ? (
-                                  <>
+                                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                     <Button
                                       type="button"
-                                      variant="outline"
+                                      variant="ghost"
                                       size="sm"
-                                      className="h-6 px-2 text-[11px]"
+                                      className="h-7 w-7 p-0"
                                       onClick={(event) => {
                                         event.stopPropagation();
                                         setServerDraft({
@@ -805,107 +1069,239 @@ export function SettingsPage() {
                                         setShowLocalServerModal(true);
                                       }}
                                     >
-                                      Edit
+                                      <Pencil className="h-3 w-3" />
                                     </Button>
                                     <Button
                                       type="button"
-                                      variant="outline"
+                                      variant="ghost"
                                       size="sm"
-                                      className="h-6 px-2 text-[11px] text-red-300 hover:text-red-200"
+                                      className="h-7 w-7 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
                                       onClick={(event) => {
                                         event.stopPropagation();
                                         void handleDeleteServer(server.id);
                                       }}
                                     >
-                                      Delete
+                                      <Trash2 className="h-3 w-3" />
                                     </Button>
-                                  </>
+                                  </div>
                                 ) : null}
                               </div>
                             </div>
                           );
-                        })}
-                        {paged.length === 0 ? (
-                          <p className="rounded-xl border border-dashed border-white/15 bg-zinc-950/45 py-5 text-center text-xs text-zinc-500">Nenhum servidor encontrado.</p>
-                        ) : null}
-                      </div>
+                        })
+                      )}
+                    </div>
 
-                      {totalPages > 1 ? (
-                        <div className="mt-2 flex items-center justify-between">
-                          <p className="text-xs text-zinc-500">{filtered.length} servidor{filtered.length !== 1 ? "es" : ""}</p>
-                          <div className="flex gap-1">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-6 px-2 text-xs"
-                              disabled={page === 0}
-                              onClick={() => setServerPage(page - 1)}
-                            >
-                              Anterior
-                            </Button>
-                            <span className="flex items-center px-2 text-xs text-zinc-500">
-                              {page + 1}/{totalPages}
-                            </span>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-6 px-2 text-xs"
-                              disabled={page >= totalPages - 1}
-                              onClick={() => setServerPage(page + 1)}
-                            >
-                              Proximo
-                            </Button>
-                          </div>
+                    {totalServerPages > 1 ? (
+                      <div className="flex items-center justify-between pt-1">
+                        <p className="text-[11px] text-muted-foreground">
+                          {t.settings.drive.serverCount.replace(
+                            "{count}",
+                            String(filteredServers.length)
+                          )}
+                        </p>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2.5 text-xs"
+                            disabled={resolvedServerPage === 0}
+                            onClick={() => setServerPage(resolvedServerPage - 1)}
+                          >
+                            {t.settings.drive.serverPrev}
+                          </Button>
+                          <span className="px-3 text-[11px] font-medium text-muted-foreground">
+                            {resolvedServerPage + 1}/{totalServerPages}
+                          </span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2.5 text-xs"
+                            disabled={resolvedServerPage >= totalServerPages - 1}
+                            onClick={() => setServerPage(resolvedServerPage + 1)}
+                          >
+                            {t.settings.drive.serverNext}
+                          </Button>
                         </div>
-                      ) : null}
-                    </>
-                  );
-                })()}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
               </div>
-            )}
+            </SettingsPanel>
           </div>
-        </section>
         ) : null}
 
         {settingsTab === "security" ? (
-        <section className="mt-5 space-y-3 rounded-2xl border border-white/10 bg-zinc-950/70 p-4 shadow-xl shadow-black/20">
-          <h3 className="mb-1 text-sm font-semibold tracking-wide text-zinc-200">{t.settings.sections.masterPassword}</h3>
-          <div className="grid gap-2 py-1 md:grid-cols-3">
-            <Input type="password" placeholder={t.settings.password.currentPlaceholder} {...passwordForm.register("oldPassword")} />
-            <Input type="password" placeholder={t.settings.password.newPlaceholder} {...passwordForm.register("newPassword")} />
-            <Input type="password" placeholder={t.settings.password.confirmPlaceholder} {...passwordForm.register("confirmPassword")} />
-            <div className="md:col-span-3 md:flex md:justify-end">
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy || !watchedNewPassword}
-                onClick={() =>
-                  void passwordForm.handleSubmit((values) =>
-                    changeMasterPassword(values.oldPassword, values.newPassword, values.confirmPassword).then(() =>
-                      passwordForm.reset(),
-                    ),
-                  )()
-                }
-              >
-                <Lock className="mr-2 h-4 w-4" /> {t.settings.password.updateButton}
-              </Button>
-            </div>
-          </div>
-        </section>
-        ) : null}
+          <SettingsPanel icon={Shield} title={t.settings.sections.masterPassword}>
+            <div className="space-y-4 p-4">
+              <div className="rounded-xl border border-destructive/35 bg-destructive/10 p-4">
+                <p className="flex items-center gap-2 text-sm font-semibold text-destructive">
+                  <TriangleAlert className="h-4 w-4" />
+                  {t.settings.security.warningTitle}
+                </p>
+                <p className="mt-2 text-xs text-destructive/90">{t.settings.security.warningDescription}</p>
+              </div>
 
-        <div className="sticky bottom-0 z-10 mt-4 rounded-xl border border-white/10 bg-zinc-950/90 p-3 backdrop-blur">
-          <div className="flex justify-end">
-            <Button type="submit" disabled={busy}>
-              <Save className="mr-2 h-4 w-4" /> {t.settings.save}
+              <div className="space-y-3 rounded-xl border border-border/40 bg-card/40 p-4">
+                <div>
+                  <p className="text-sm font-semibold text-foreground">{t.settings.security.changePasswordTitle}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{t.settings.security.changePasswordDescription}</p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <Input type="password" placeholder={t.settings.password.currentPlaceholder} {...passwordForm.register("oldPassword")} />
+                  <Input type="password" placeholder={t.settings.password.newPlaceholder} {...passwordForm.register("newPassword")} />
+                  <Input type="password" placeholder={t.settings.password.confirmPlaceholder} {...passwordForm.register("confirmPassword")} />
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={busy || !watchedNewPassword}
+                    onClick={() =>
+                      void passwordForm.handleSubmit((values) =>
+                        changeMasterPassword(values.oldPassword, values.newPassword, values.confirmPassword).then(() =>
+                          passwordForm.reset(),
+                        ),
+                      )()
+                    }
+                  >
+                    <Lock className="mr-2 h-4 w-4" /> {t.settings.password.updateButton}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="space-y-3 rounded-xl border border-border/40 bg-card/40 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">{t.settings.security.deleteAccountTitle}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{t.settings.security.deleteAccountDescription}</p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    onClick={() => {
+                      setDeleteCurrentPassword("");
+                      setDeleteCloudData(cloudConnected);
+                      setDeleteAccountOpen(true);
+                    }}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    {t.settings.security.deleteAccountAction}
+                  </Button>
+                </div>
+
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+                    {t.settings.security.totalConnections.replace("{count}", String(connections.length))}
+                  </div>
+                  <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+                    {t.settings.security.totalKeychain.replace("{count}", String(keychainEntries.length))}
+                  </div>
+                  <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+                    {t.settings.security.totalKnownHosts.replace("{count}", String(knownHosts.length))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </SettingsPanel>
+        ) : null}
+      </div>
+
+      <AppDialog
+        open={deleteAccountOpen}
+        title={t.settings.security.deleteModalTitle}
+        description={t.settings.security.deleteModalDescription}
+        onClose={() => {
+          if (deleteAccountBusy) {
+            return;
+          }
+          setDeleteAccountOpen(false);
+          setDeleteCurrentPassword("");
+          setDeleteCloudData(false);
+        }}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={deleteAccountBusy}
+              onClick={() => {
+                setDeleteAccountOpen(false);
+                setDeleteCurrentPassword("");
+                setDeleteCloudData(false);
+              }}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deleteAccountBusy || !deleteCurrentPassword.trim()}
+              onClick={() => void handleDeleteAccount()}
+            >
+              {deleteAccountBusy ? t.settings.security.deletingAction : t.settings.security.deleteConfirmAction}
             </Button>
           </div>
-        </div>
-      </form>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-destructive/35 bg-destructive/10 p-3 text-destructive">
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <TriangleAlert className="h-4 w-4" />
+              {t.settings.security.deleteModalWarningTitle}
+            </p>
+            <p className="mt-2 text-xs text-destructive/90">{t.settings.security.deleteModalWarningDescription}</p>
+          </div>
 
-      <Dialog
+          <div className="grid gap-2 sm:grid-cols-3">
+            <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+              {t.settings.security.totalConnections.replace("{count}", String(connections.length))}
+            </div>
+            <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+              {t.settings.security.totalKeychain.replace("{count}", String(keychainEntries.length))}
+            </div>
+            <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+              {t.settings.security.totalKnownHosts.replace("{count}", String(knownHosts.length))}
+            </div>
+          </div>
+
+          {cloudConnected ? (
+            <div className="rounded-lg border border-border/40 bg-card/40 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-foreground">{t.settings.security.deleteCloudLabel}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{t.settings.security.deleteCloudDescription}</p>
+                </div>
+                <Switch
+                  checked={deleteCloudData}
+                  disabled={deleteAccountBusy}
+                  onCheckedChange={setDeleteCloudData}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+              {t.settings.security.deleteCloudUnavailable}
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <label className="text-xs text-muted-foreground">{t.settings.security.confirmPasswordLabel}</label>
+            <Input
+              type="password"
+              placeholder={t.settings.security.confirmPasswordPlaceholder}
+              value={deleteCurrentPassword}
+              disabled={deleteAccountBusy}
+              onChange={(event) => setDeleteCurrentPassword(event.target.value)}
+            />
+          </div>
+        </div>
+      </AppDialog>
+
+      <AppDialog
         open={showLocalServerModal}
         title={serverDraft.id ? t.settings.localServer.editTitle : t.settings.localServer.newTitle}
         description={t.settings.localServer.modalDescription}
@@ -959,24 +1355,22 @@ export function SettingsPage() {
             }
           />
         </div>
-      </Dialog>
+      </AppDialog>
 
       {showUploadPolicyModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <div className="w-full max-w-lg rounded-xl border border-white/10 bg-zinc-950 p-4 shadow-2xl">
-            <h3 className="text-sm font-semibold text-zinc-100">Upload de arquivos modificados</h3>
-            <p className="mt-2 text-sm text-zinc-300">
-              Como o TermOpen deve tratar arquivos modificados no workspace remoto?
-            </p>
+          <div className="w-full max-w-lg rounded-xl border border-border/40 bg-background p-4 shadow-2xl">
+            <h3 className="text-sm font-semibold text-foreground">{t.settings.uploadPolicy.modalTitle}</h3>
+            <p className="mt-2 text-sm text-foreground/90">{t.settings.uploadPolicy.modalDescription}</p>
             <div className="mt-4 flex flex-col gap-2">
               <Button type="button" onClick={() => applyUploadPolicy("auto")}>
-                Enviar automaticamente
+                {t.settings.uploadPolicy.auto}
               </Button>
               <Button type="button" variant="outline" onClick={() => applyUploadPolicy("ask")}>
-                Perguntar sempre
+                {t.settings.uploadPolicy.ask}
               </Button>
               <Button type="button" variant="outline" onClick={() => applyUploadPolicy("manual")}>
-                Somente manual
+                {t.settings.uploadPolicy.manual}
               </Button>
             </div>
           </div>
@@ -985,3 +1379,5 @@ export function SettingsPage() {
     </div>
   );
 }
+
+

@@ -1,17 +1,28 @@
 import * as React from "react";
+import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 
-interface IconTooltipProps {
-  label: string;
-  children: React.ReactNode;
-}
+import { cn } from "@/lib/utils";
 
-export function IconTooltip({ label, children }: IconTooltipProps) {
-  return (
-    <div className="z-10 group relative flex items-center justify-center">
-      {children}
-      <span className="pointer-events-none absolute left-[calc(100%+10px)] hidden whitespace-nowrap rounded-md border border-white/15 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 shadow-lg group-hover:block">
-        {label}
-      </span>
-    </div>
-  );
-}
+const TooltipProvider = TooltipPrimitive.Provider;
+
+const Tooltip = TooltipPrimitive.Root;
+
+const TooltipTrigger = TooltipPrimitive.Trigger;
+
+const TooltipContent = React.forwardRef<
+  React.ElementRef<typeof TooltipPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
+>(({ className, sideOffset = 4, ...props }, ref) => (
+  <TooltipPrimitive.Content
+    ref={ref}
+    sideOffset={sideOffset}
+    className={cn(
+      "z-50 overflow-hidden rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+      className,
+    )}
+    {...props}
+  />
+));
+TooltipContent.displayName = TooltipPrimitive.Content.displayName;
+
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider };

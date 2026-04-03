@@ -1,13 +1,32 @@
 import type { AppDictionary } from "../types";
 
 export const workspace: AppDictionary["workspace"] = {
+  tabTitle: "Workspace",
   modeFree: "Livre",
   modeGrid: "Grid",
   addBlock: "Novo Bloco",
   newBlockTitle: "Novo Bloco",
   newBlockDescription: "Escolha qual bloco deseja abrir neste workspace.",
+  createLocalTitle: "Locais",
+  createRemoteTitle: "Conexões Remotas",
+  localTerminal: "Terminal Local",
+  localSftp: "SFTP Local",
+  localEditor: "Editor Local",
+  remoteTerminal: "Terminal Remoto",
+  remoteFiles: "Arquivos Remotos",
+  remoteRdp: "RDP Remoto",
+  sourceLabel: "Conexão",
+  sourceHelpTerminal: "Escolha uma conexão SSH para abrir o terminal remoto.",
+  sourceHelpFiles: "Escolha uma conexão remota para abrir arquivos (SFTP/FTP/FTPS/SMB).",
+  sourceHelpRdp: "Escolha uma conexão RDP para abrir o desktop remoto.",
+  accessConnection: "Acessar Conexão",
+  selectConnectionTitle: "Abrir Conexão",
+  selectConnectionDescription: "Selecione uma conexão salva para abrir neste workspace.",
+  selectConnectionSearchPlaceholder: "Buscar conexão...",
+  selectConnectionEmpty: "Nenhuma conexão encontrada.",
   blockSftp: "Bloco SFTP",
   blockTerminal: "Bloco Terminal",
+  allMinimizedHint: "Todos os blocos estão minimizados. Use a barra superior para restaurar.",
   transfer: "transferencia(s)",
   transferFolder: "Transferencia de pastas ainda esta em rollout. Por enquanto mova arquivos.",
   transferSuccess: "Transferido para {destination}",
@@ -38,3 +57,4 @@ export const workspace: AppDictionary["workspace"] = {
     applyPassword: "Aplicar senha e reconectar",
   },
 };
+
