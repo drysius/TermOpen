@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/utils";
 
@@ -16,8 +17,8 @@ export function AppDialog({ open, title, description, onClose, children, footer 
     return null;
   }
 
-  return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 p-4" onMouseDown={onClose}>
+  return createPortal(
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/65 p-4" onMouseDown={onClose}>
       <div
         className="w-full max-w-2xl rounded-xl border border-border/60 bg-card/95 shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}
@@ -29,7 +30,8 @@ export function AppDialog({ open, title, description, onClose, children, footer 
         <div className="max-h-[65vh] overflow-auto px-5 py-4">{children}</div>
         {footer ? <div className="border-t border-border/60 px-5 py-4">{footer}</div> : null}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

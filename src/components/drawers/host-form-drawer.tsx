@@ -363,6 +363,13 @@ export function HostFormDrawer() {
     void saveHost(profile);
   }
 
+  const submitCurrentConnection = handleSubmit((values) => {
+    if (step !== 2) {
+      return;
+    }
+    submitConnection(values);
+  });
+
   return (
     <Dialog
       open={openState}
@@ -374,16 +381,20 @@ export function HostFormDrawer() {
     >
       <DialogContent className="sm:max-w-[620px] bg-card border-border/60 gap-0 p-0 overflow-hidden">
         <form
-          onSubmit={handleSubmit((values) => {
-            if (step !== 2) {
+          onSubmit={(event) => {
+            event.preventDefault();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") {
               return;
             }
-            submitConnection(values);
-          })}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && step < 2) {
-              event.preventDefault();
+
+            if (event.target instanceof HTMLTextAreaElement) {
+              return;
             }
+
+            // Prevent implicit form submit; saving must happen only via explicit "Criar".
+            event.preventDefault();
           }}
         >
           <div className="flex items-center gap-2 px-6 pt-5 pb-3">
@@ -642,7 +653,12 @@ export function HostFormDrawer() {
                   {t.hostDrawer.wizard.next}
                 </Button>
               ) : (
-                <Button type="submit" size="sm" disabled={busy || !canSubmit || (authMethod === "key" && !watchedPrivateKey.trim() && !watchedKeychainId)}>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void submitCurrentConnection()}
+                  disabled={busy || !canSubmit || (authMethod === "key" && !watchedPrivateKey.trim() && !watchedKeychainId)}
+                >
                   {t.hostDrawer.wizard.create}
                 </Button>
               )}
