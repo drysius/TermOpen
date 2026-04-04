@@ -1,9 +1,9 @@
 import type { AppDictionary } from "../types";
 
 export const settings: AppDictionary["settings"] = {
-  save: "Salvar Configuracoes",
+  save: "Salvar Configurações",
   sections: {
-    application: "Aplicacao",
+    application: "Aplicação",
     sync: "Sync e Conectividade",
     sftp: "SFTP",
     terminal: "Terminal",
@@ -12,7 +12,7 @@ export const settings: AppDictionary["settings"] = {
     masterPassword: "Segurança",
   },
   editor: {
-    title: "Editor padrao",
+    title: "Editor padrão",
     description: "Defina se o arquivo abre no editor interno, VS Code ou no sistema.",
     internal: "Interno (Monaco)",
     vscode: "VS Code",
@@ -28,7 +28,7 @@ export const settings: AppDictionary["settings"] = {
     description: "Tempo em minutos para bloquear o vault automaticamente.",
   },
   syncAuto: {
-    title: "Sync automatico",
+    title: "Sync automático",
     description: "Sincroniza periodicamente quando conectado ao Google Drive.",
   },
   syncStartup: {
@@ -36,26 +36,26 @@ export const settings: AppDictionary["settings"] = {
     description: "Executa pull automaticamente ao desbloquear o vault.",
   },
   syncOnSave: {
-    title: "Sync ao salvar configuracoes",
-    description: "Quando configuracoes mudarem, executa push automaticamente.",
+    title: "Sync ao salvar configurações",
+    description: "Quando configurações mudarem, executa push automaticamente.",
   },
   syncInterval: {
     title: "Intervalo de sync",
-    description: "Frequencia em minutos da sincronizacao automatica.",
+    description: "Frequência em minutos da sincronização automática.",
   },
   sftpChunk: {
     title: "Chunk SFTP (KB)",
-    description: "Tamanho do bloco usado em leituras/escritas e transferencias SFTP.",
+    description: "Tamanho do bloco usado em leituras/escritas e transferências SFTP.",
   },
   sftpReconnectDelay: {
     title: "Delay de reconnect SFTP",
-    description: "Tempo em segundos para tentar novamente em timeout de conexao/listagem inicial.",
+    description: "Tempo em segundos para tentar novamente em timeout de conexão/listagem inicial.",
   },
   localServer: {
     editTitle: "Editar Local Server",
     newTitle: "Novo Local Server",
-    modalDescription: "Configure label, endereco e autor para o servidor local.",
-    saveChanges: "Salvar alteracoes",
+    modalDescription: "Configure label, endereço e autor para o servidor local.",
+    saveChanges: "Salvar alterações",
     addServer: "Adicionar servidor",
     connectionTitle: "Connection",
     connectionDescription: "Gerenciamento de servidores de autenticação.",
@@ -64,7 +64,7 @@ export const settings: AppDictionary["settings"] = {
   },
   autoReconnect: {
     title: "Auto reconnect SSH",
-    description: "Tenta reconectar sessoes SSH desconectadas automaticamente.",
+    description: "Tenta reconectar sessões SSH desconectadas automaticamente.",
   },
   reconnectDelay: {
     title: "Delay de reconnect",
@@ -76,7 +76,7 @@ export const settings: AppDictionary["settings"] = {
   },
   rightClickPaste: {
     title: "Paste no clique direito",
-    description: "Permite colar com botao direito dentro do bloco de terminal.",
+    description: "Permite colar com botão direito dentro do bloco de terminal.",
   },
   ctrlShiftShortcuts: {
     title: "Atalhos Ctrl+Shift",
@@ -94,7 +94,7 @@ export const settings: AppDictionary["settings"] = {
     selectDialog: "Selecionar arquivo known_hosts",
   },
   uploadPolicy: {
-    title: "Upload de alteracoes",
+    title: "Upload de alterações",
     description: "Define como arquivos alterados no editor interno devem ser enviados.",
     auto: "Enviar automaticamente",
     ask: "Perguntar sempre",
@@ -106,8 +106,8 @@ export const settings: AppDictionary["settings"] = {
     tabAccount: "Conta",
     tabServer: "Servidor",
     connected: "Conectado",
-    userLabel: "Usuario",
-    lastSync: "Ultimo sync: {date}",
+    userLabel: "Usuário",
+    lastSync: "Último sync: {date}",
     connecting: "Conectando...",
     reconnect: "Reconectar",
     connect: "Conectar",
@@ -121,7 +121,7 @@ export const settings: AppDictionary["settings"] = {
     serverEmpty: "Nenhum servidor encontrado.",
     serverCount: "{count} servidor(es)",
     serverPrev: "Anterior",
-    serverNext: "Proximo",
+    serverNext: "Próximo",
     official: "Oficial",
     active: "Ativo",
     offline: "offline",
@@ -164,12 +164,12 @@ export const settings: AppDictionary["settings"] = {
     deleteSuccess: "Conta removida com sucesso.",
   },
   unsaved: {
-    title: "Alteracoes nao salvas",
-    description: "Deseja salvar as alteracoes feitas antes de sair das configuracoes?",
+    title: "Alterações não salvas",
+    description: "Deseja salvar as alterações feitas antes de sair das configurações?",
     saveAndLeave: "Salvar e sair",
     discardAndLeave: "Descartar e sair",
     stay: "Continuar editando",
-    preview: "Preview das alteracoes",
-    emptyPreview: "Nenhuma alteracao detectada.",
+    preview: "Preview das alterações",
+    emptyPreview: "Nenhuma alteração detectada.",
   },
 };

@@ -1,11 +1,11 @@
 import type { AppDictionary } from "../types";
 
 export const conflicts: AppDictionary["conflicts"] = {
-  title: "Conflitos de Sincronizacao",
+  title: "Conflitos de Sincronização",
   description:
-    "Foram detectadas diferencas entre cliente e servidor. Escolha qual lado manter para cada item.",
+    "Foram detectadas diferenças entre cliente e servidor. Escolha qual lado manter para cada item.",
   applying: "Aplicando...",
-  applyButton: "Aplicar Resolucao",
+  applyButton: "Aplicar Resolução",
   keepClient: "Manter Cliente",
   keepServer: "Manter Servidor",
   local: "Local",
