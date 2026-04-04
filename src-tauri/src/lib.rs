@@ -1,4 +1,4 @@
-﻿#[cfg(windows)]
+#[cfg(windows)]
 use std::collections::HashSet;
 use std::{
     collections::{HashMap, VecDeque},
@@ -23,12 +23,14 @@ use libs::key_actions::{KeyActionsActiveTargetInput, KeyActionsService};
 use libs::models::{
     AppSettings, BackendMessage, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol,
     KeychainEntry, KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry,
-    SshConnectPurpose,
-    SshConnectResult,
-    SshSessionInfo, SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState,
-    VaultStatus, WindowState,
+    SshConnectPurpose, SshConnectResult, SshSessionInfo, SyncConflictDecision, SyncConflictPreview,
+    SyncLoggedUser, SyncState, VaultStatus, WindowState,
 };
 use libs::shared_fs::{SharedFsBridge, SharedFsJob, SharedFsProtocol, TransferEndpoint};
+use libs::sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
+use libs::task::TaskManager;
+use libs::transfer::TransferJobConfig;
+use libs::vault::VaultManager;
 use protocols::rdp::{
     RdpInputBatch, RdpSessionControlEvent, RdpSessionFocusInput, RdpSessionManager,
     RdpSessionOptions, RdpSessionStartResult,
@@ -37,14 +39,15 @@ use protocols::ssh::{
     known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager,
 };
 use protocols::{ftp, smb};
-use libs::sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
-use libs::task::TaskManager;
-use libs::transfer::TransferJobConfig;
+use russh::keys::ssh_key::private::RsaKeypair as SshRsaKeypair;
+use russh::keys::ssh_key::{
+    rand_core::OsRng, Algorithm as SshKeyAlgorithm, EcdsaCurve as SshKeyEcdsaCurve,
+    HashAlg as SshKeyHashAlg, LineEnding as SshKeyLineEnding, PrivateKey as SshPrivateKey,
+};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
-use libs::vault::VaultManager;
 
 mod commands;
 mod constants;
@@ -182,12 +185,7 @@ fn normalize_debug_level(level: &str) -> &'static str {
 fn app_error(error: impl std::fmt::Display) -> String {
     let concise = error.to_string();
     let message = format!("{:#}", error);
-    push_debug_log(
-        "error",
-        "backend",
-        "backend_error",
-        Some(message.clone()),
-    );
+    push_debug_log("error", "backend", "backend_error", Some(message.clone()));
     if is_backend_message_key(&concise) {
         concise
     } else {
@@ -1220,9 +1218,7 @@ async fn sftp_list(
     path: String,
 ) -> Result<Vec<SftpEntry>, String> {
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_list(&session_id, &path)
-        .await
-        .map_err(app_error)
+    ssh.sftp_list(&session_id, &path).await.map_err(app_error)
 }
 
 #[tauri::command]
@@ -1307,9 +1303,7 @@ async fn sftp_mkdir(
     path: String,
 ) -> Result<(), String> {
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_mkdir(&session_id, &path)
-        .await
-        .map_err(app_error)
+    ssh.sftp_mkdir(&session_id, &path).await.map_err(app_error)
 }
 
 #[tauri::command]
@@ -1665,25 +1659,25 @@ async fn remote_transfer(
                 let app_for_download = app_for_download.clone();
                 async move {
                     let mut spool = fs::File::create(&spool_path).map_err(app_error)?;
-                endpoint_download_to_writer(
-                    state_ref,
-                    &from_endpoint,
-                    from_path.as_str(),
-                    &mut spool,
-                    chunk_size,
-                    |bytes| {
-                        if let Ok(mut total) = transferred_for_download.lock() {
-                            *total = total.saturating_add(bytes);
-                            emit_transfer_progress(
-                                &app_for_download,
-                                &progress_event_for_download,
-                                *total,
-                                progress_total,
-                            );
-                        }
-                    },
-                )
-                .await?;
+                    endpoint_download_to_writer(
+                        state_ref,
+                        &from_endpoint,
+                        from_path.as_str(),
+                        &mut spool,
+                        chunk_size,
+                        |bytes| {
+                            if let Ok(mut total) = transferred_for_download.lock() {
+                                *total = total.saturating_add(bytes);
+                                emit_transfer_progress(
+                                    &app_for_download,
+                                    &progress_event_for_download,
+                                    *total,
+                                    progress_total,
+                                );
+                            }
+                        },
+                    )
+                    .await?;
 
                     let file_size = fs::metadata(&spool_path).map_err(app_error)?.len();
                     Ok(file_size)
@@ -1698,25 +1692,25 @@ async fn remote_transfer(
                 let app_for_upload = app_for_upload.clone();
                 async move {
                     let mut reader = fs::File::open(&spool_path).map_err(app_error)?;
-                endpoint_upload_from_reader(
-                    state_ref,
-                    &to_endpoint,
-                    to_path.as_str(),
-                    &mut reader,
-                    chunk_size,
-                    |bytes| {
-                        if let Ok(mut total) = transferred_for_upload.lock() {
-                            *total = total.saturating_add(bytes);
-                            emit_transfer_progress(
-                                &app_for_upload,
-                                &progress_event_for_upload,
-                                *total,
-                                progress_total,
-                            );
-                        }
-                    },
-                )
-                .await?;
+                    endpoint_upload_from_reader(
+                        state_ref,
+                        &to_endpoint,
+                        to_path.as_str(),
+                        &mut reader,
+                        chunk_size,
+                        |bytes| {
+                            if let Ok(mut total) = transferred_for_upload.lock() {
+                                *total = total.saturating_add(bytes);
+                                emit_transfer_progress(
+                                    &app_for_upload,
+                                    &progress_event_for_upload,
+                                    *total,
+                                    progress_total,
+                                );
+                            }
+                        },
+                    )
+                    .await?;
 
                     let file_size = fs::metadata(&spool_path).map_err(app_error)?.len();
                     Ok(file_size)
@@ -2253,7 +2247,9 @@ async fn sync_cancel(app: tauri::AppHandle) -> Result<SyncState, String> {
     Ok(state)
 }
 
-fn resolve_server_addresses(vault: &libs::vault::VaultManager) -> Result<(String, Vec<String>), String> {
+fn resolve_server_addresses(
+    vault: &libs::vault::VaultManager,
+) -> Result<(String, Vec<String>), String> {
     let primary = vault.selected_auth_server().map_err(app_error)?.address;
     let fallbacks: Vec<String> = vault
         .auth_servers_list()
@@ -2443,15 +2439,6 @@ fn sanitize_key_name_fragment(input: &str) -> String {
     }
 }
 
-fn parse_ssh_keygen_fingerprint(line: &str) -> String {
-    let mut parts = line.split_whitespace();
-    let _bits = parts.next();
-    parts
-        .next()
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| line.trim().to_string())
-}
-
 #[tauri::command]
 async fn ssh_key_generate(input: SshKeyGenerateInput) -> Result<SshKeyGenerateResult, String> {
     let algorithm = input.algorithm.trim().to_ascii_lowercase();
@@ -2459,11 +2446,17 @@ async fn ssh_key_generate(input: SshKeyGenerateInput) -> Result<SshKeyGenerateRe
     let normalized_comment = normalize_optional_input(input.comment)
         .unwrap_or_else(|| DEFAULT_SSH_KEY_COMMENT.to_string());
 
-    let (key_type, bits, name_prefix) = match algorithm.as_str() {
-        "ed25519" => ("ed25519", None, "id_ed25519"),
-        "rsa4096" => ("rsa", Some("4096"), "id_rsa"),
-        "rsa2048" => ("rsa", Some("2048"), "id_rsa"),
-        "ecdsa521" => ("ecdsa", Some("521"), "id_ecdsa"),
+    let (ssh_algorithm, bits, name_prefix) = match algorithm.as_str() {
+        "ed25519" => (SshKeyAlgorithm::Ed25519, None, "id_ed25519"),
+        "rsa4096" => (SshKeyAlgorithm::Rsa { hash: None }, Some(4096), "id_rsa"),
+        "rsa2048" => (SshKeyAlgorithm::Rsa { hash: None }, Some(2048), "id_rsa"),
+        "ecdsa521" => (
+            SshKeyAlgorithm::Ecdsa {
+                curve: SshKeyEcdsaCurve::NistP521,
+            },
+            None,
+            "id_ecdsa",
+        ),
         other => {
             return Err(format!(
                 "Algoritmo de chave SSH nao suportado: {}. Use ed25519, rsa4096, rsa2048 ou ecdsa521.",
@@ -2478,66 +2471,32 @@ async fn ssh_key_generate(input: SshKeyGenerateInput) -> Result<SshKeyGenerateRe
         sanitize_key_name_fragment(&normalized_comment)
     );
 
-    let temp_dir = tempfile::tempdir().map_err(app_error)?;
-    let key_path = temp_dir.path().join(&base_name);
-
-    let mut generate = Command::new("ssh-keygen");
-    generate
-        .arg("-t")
-        .arg(key_type)
-        .arg("-N")
-        .arg(&normalized_passphrase)
-        .arg("-C")
-        .arg(&normalized_comment)
-        .arg("-f")
-        .arg(&key_path)
-        .arg("-q");
-    if let Some(bits_value) = bits {
-        generate.arg("-b").arg(bits_value);
-    }
-
-    let output = generate.output().map_err(|error| {
-        app_error(format!(
-            "Falha ao executar ssh-keygen. Verifique se OpenSSH esta instalado ({})",
-            error
-        ))
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let reason = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            "erro desconhecido".to_string()
-        };
-        return Err(app_error(format!("ssh-keygen retornou erro: {}", reason)));
-    }
-
-    let private_key = fs::read_to_string(&key_path)
-        .map_err(|error| app_error(format!("Falha ao ler chave privada gerada ({})", error)))?;
-    let public_key_path = PathBuf::from(format!("{}.pub", key_path.to_string_lossy()));
-    let public_key = fs::read_to_string(&public_key_path)
-        .map_err(|error| app_error(format!("Falha ao ler chave publica gerada ({})", error)))?;
-
-    let fingerprint_output = Command::new("ssh-keygen")
-        .arg("-lf")
-        .arg(&public_key_path)
-        .output()
-        .map_err(|error| {
-            app_error(format!(
-                "Falha ao calcular fingerprint da chave gerada ({})",
-                error
-            ))
-        })?;
-
-    let fingerprint = if fingerprint_output.status.success() {
-        parse_ssh_keygen_fingerprint(&String::from_utf8_lossy(&fingerprint_output.stdout))
+    let mut rng = OsRng;
+    let mut key = if let Some(bits_value) = bits {
+        let rsa_keypair = SshRsaKeypair::random(&mut rng, bits_value)
+            .map_err(|error| app_error(format!("Falha ao gerar chave RSA ({}).", error)))?;
+        SshPrivateKey::from(rsa_keypair)
     } else {
-        "N/A".to_string()
+        SshPrivateKey::random(&mut rng, ssh_algorithm)
+            .map_err(|error| app_error(format!("Falha ao gerar chave SSH ({}).", error)))?
     };
+    key.set_comment(normalized_comment);
+
+    if !normalized_passphrase.is_empty() {
+        key = key
+            .encrypt(&mut rng, normalized_passphrase.as_bytes())
+            .map_err(|error| app_error(format!("Falha ao criptografar chave SSH ({}).", error)))?;
+    }
+
+    let private_key = key
+        .to_openssh(SshKeyLineEnding::LF)
+        .map_err(|error| app_error(format!("Falha ao codificar chave privada SSH ({}).", error)))?
+        .to_string();
+    let public_key = key
+        .public_key()
+        .to_openssh()
+        .map_err(|error| app_error(format!("Falha ao codificar chave publica SSH ({}).", error)))?;
+    let fingerprint = key.fingerprint(SshKeyHashAlg::Sha256).to_string();
 
     Ok(SshKeyGenerateResult {
         private_key,
@@ -3043,4 +3002,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

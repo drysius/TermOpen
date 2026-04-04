@@ -37,7 +37,8 @@ open = "5"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
-suppaftp = { version = "8.0.2", features = ["native-tls"] }
+suppaftp = { version = "8.0.2", features = ["rustls-ring"] }
+rustls-native-certs = "0.8"
 smb = "0.11.1"
 futures-util = "0.3"
 russh = "0.52.0"

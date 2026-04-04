@@ -1,8 +1,10 @@
 use std::io::{Read, Write};
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use suppaftp::{native_tls::TlsConnector, NativeTlsConnector, NativeTlsFtpStream};
+use suppaftp::rustls::ClientConfig;
+use suppaftp::{rustls, RustlsConnector, RustlsFtpStream};
 
 use crate::constants::FTP_DEFAULT_PORT;
 use crate::libs::models::{ConnectionProfile, SftpEntry};
@@ -52,7 +54,27 @@ fn join_ftp_child(base_path: &str, name: &str) -> String {
     }
 }
 
-fn connect_ftp(profile: &ConnectionProfile, secure: bool) -> Result<NativeTlsFtpStream> {
+fn build_ftps_connector() -> Result<RustlsConnector> {
+    let cert_result = rustls_native_certs::load_native_certs();
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in cert_result.certs {
+        let _ = root_store.add(cert);
+    }
+
+    if root_store.is_empty() {
+        return Err(anyhow!(
+            "Nao foi possivel carregar certificados raiz para FTPS."
+        ));
+    }
+
+    let config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    Ok(RustlsConnector::from(Arc::new(config)))
+}
+
+fn connect_ftp(profile: &ConnectionProfile, secure: bool) -> Result<RustlsFtpStream> {
     let host = require_profile_host(profile)?;
     let username = profile.username.trim().to_string();
     let password = require_profile_password(profile)?;
@@ -63,7 +85,7 @@ fn connect_ftp(profile: &ConnectionProfile, secure: bool) -> Result<NativeTlsFtp
     };
     let address = format!("{}:{}", host, port);
 
-    let mut ftp = NativeTlsFtpStream::connect(address.as_str())
+    let mut ftp = RustlsFtpStream::connect(address.as_str())
         .with_context(|| format!("Falha ao conectar FTP em {}", address))?;
     ftp.get_ref()
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -73,9 +95,9 @@ fn connect_ftp(profile: &ConnectionProfile, secure: bool) -> Result<NativeTlsFtp
         .ok();
 
     if secure {
-        let connector = TlsConnector::new().context("Falha ao inicializar TLS para FTPS.")?;
+        let connector = build_ftps_connector().context("Falha ao inicializar TLS para FTPS.")?;
         ftp = ftp
-            .into_secure(NativeTlsConnector::from(connector), host.as_str())
+            .into_secure(connector, host.as_str())
             .context("Falha ao negociar canal TLS FTPS.")?;
     }
 
@@ -218,14 +240,7 @@ pub fn read(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<Str
 
 fn read_bytes(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    download_to_writer(
-        profile,
-        path,
-        &mut bytes,
-        64 * 1024,
-        secure,
-        |_| {},
-    )?;
+    download_to_writer(profile, path, &mut bytes, 64 * 1024, secure, |_| {})?;
     Ok(bytes)
 }
 
