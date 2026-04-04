@@ -137,7 +137,7 @@ export const useAppStore = create<AppStore>()(
       };
     },
     {
-      name: "termopen.app.session",
+      name: "openptl.app.session",
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
         tabs: state.tabs,

@@ -31,13 +31,13 @@ import { getError } from "@/functions/common";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
 import { api } from "@/lib/tauri";
-import type { AppSettings, AuthServer, ModifiedUploadPolicy, SyncLoggedUser } from "@/types/termopen";
+import type { AppSettings, AuthServer, ModifiedUploadPolicy, SyncLoggedUser } from "@/types/openptl";
 import { OptionDropdown } from "@/pages/sections/settings/option-dropdown";
 import { SettingsPanel } from "@/pages/sections/settings/settings-panel";
 import { SettingsRow } from "@/pages/sections/settings/settings-row";
 import type { PasswordFormValues, SettingsFormValues } from "@/pages/sections/settings/types";
 
-const uploadPolicyStorageKey = "termopen.upload-policy.prompted";
+const uploadPolicyStorageKey = "openptl.upload-policy.prompted";
 
 function normalizeSettingsValues(values: SettingsFormValues): AppSettings {
   return {

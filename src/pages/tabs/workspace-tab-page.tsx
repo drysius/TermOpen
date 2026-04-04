@@ -1,5 +1,6 @@
 import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   FileText,
@@ -44,7 +45,7 @@ import type {
   RdpSessionControlEvent,
   SurfaceRect,
   SftpEntry,
-} from "@/types/termopen";
+} from "@/types/openptl";
 import editorWorkspace from "@/pages/tabs/workspace/editor";
 import rdpWorkspace from "@/pages/tabs/workspace/rdp";
 import sftpWorkspace from "@/pages/tabs/workspace/sftp";
@@ -91,6 +92,39 @@ const workspaceModules = {
   rdp: rdpWorkspace,
   editor: editorWorkspace,
 } as const;
+const SFTP_DROP_TARGET_SELECTOR = "[data-openptl-drop-target='sftp']";
+
+type SftpCreateDialogMode = "mkdir" | "mkfile";
+
+type SftpCreateDialogState = {
+  mode: SftpCreateDialogMode;
+  blockId: string;
+  sourceId: string;
+  basePath: string;
+  value: string;
+  busy: boolean;
+};
+
+type ExternalDropKind = "file" | "folder" | "mixed" | "unknown";
+
+type ExternalDropPreview = {
+  mode: "external" | "internal";
+  blockId: string;
+  targetPath: string;
+  kind: ExternalDropKind;
+  count: number;
+};
+
+type InternalEntryDragState = {
+  payload: DragPayload;
+  startX: number;
+  startY: number;
+  cursorX: number;
+  cursorY: number;
+  active: boolean;
+  targetBlockId: string | null;
+  targetPath: string | null;
+};
 
 type TerminalCaptureContext = {
   surface_rect: SurfaceRect;
@@ -277,6 +311,9 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
   const [snapPreview, setSnapPreview] = useState<WorkspaceBlockLayout | null>(null);
   const [keyActionsStatus, setKeyActionsStatus] = useState<KeyActionsStatusPayload | null>(null);
   const [captureContextVersion, setCaptureContextVersion] = useState(0);
+  const [sftpCreateDialog, setSftpCreateDialog] = useState<SftpCreateDialogState | null>(null);
+  const [externalDropPreview, setExternalDropPreview] = useState<ExternalDropPreview | null>(null);
+  const [internalEntryDrag, setInternalEntryDrag] = useState<InternalEntryDragState | null>(null);
   const connectRetryTimersRef = useRef<Record<string, { retryTimer: number; countdownTimer: number }>>({});
   const rdpStreamSessionByBlockRef = useRef<Map<string, string>>(new Map());
   const rdpStreamTokenByBlockRef = useRef<Map<string, string>>(new Map());
@@ -284,6 +321,16 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
   const rdpSurfaceRectByBlockRef = useRef<Map<string, SurfaceRect>>(new Map());
   const terminalCaptureByBlockRef = useRef<Map<string, TerminalCaptureContext>>(new Map());
   const lastPublishedKeyActionsTargetRef = useRef<string | null>(null);
+  const lastExternalFileDropSignatureRef = useRef<{ signature: string; at: number } | null>(null);
+  const lastExternalDropTargetRef = useRef<{ blockId: string; targetPath: string; at: number } | null>(null);
+  const lastExternalDropPathsRef = useRef<string[]>([]);
+  const lastExternalDropKindRef = useRef<{
+    signature: string;
+    kind: ExternalDropKind;
+    count: number;
+    at: number;
+  } | null>(null);
+  const internalEntryDragRef = useRef<InternalEntryDragState | null>(null);
 
   const clearBlockRetryTimers = useCallback((blockId: string) => {
     const active = connectRetryTimersRef.current[blockId];
@@ -373,6 +420,10 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
   useEffect(() => {
     blocksRef.current = blocks;
   }, [blocks]);
+
+  useEffect(() => {
+    internalEntryDragRef.current = internalEntryDrag;
+  }, [internalEntryDrag]);
 
   useEffect(() => {
     if (blocks.length === 0) {
@@ -1602,6 +1653,108 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
     ],
   );
 
+  const resolveSftpDropTargetFromElement = useCallback(
+    (element: Element | null): { blockId: string; targetPath: string } | null => {
+      const dropTarget = element?.closest<HTMLElement>(SFTP_DROP_TARGET_SELECTOR);
+      const blockId = dropTarget?.dataset.openptlBlockId?.trim();
+      if (!blockId) {
+        return null;
+      }
+      return {
+        blockId,
+        targetPath: dropTarget?.dataset.openptlTargetPath ?? "",
+      };
+    },
+    [],
+  );
+
+  const resolveSftpDropTargetFromPosition = useCallback(
+    (position: { x: number; y: number } | null): { blockId: string; targetPath: string } | null => {
+      if (!position) {
+        return null;
+      }
+      const x = Number(position.x);
+      const y = Number(position.y);
+      const scale = window.devicePixelRatio || 1;
+      const candidates: Array<[number, number]> = [
+        [x, y],
+        [x / scale, y / scale],
+        [x - window.screenX, y - window.screenY],
+        [(x - window.screenX) / scale, (y - window.screenY) / scale],
+      ];
+      for (const [cx, cy] of candidates) {
+        if (!Number.isFinite(cx) || !Number.isFinite(cy)) {
+          continue;
+        }
+        const resolved = resolveSftpDropTargetFromElement(document.elementFromPoint(cx, cy));
+        if (resolved) {
+          return resolved;
+        }
+      }
+      return null;
+    },
+    [resolveSftpDropTargetFromElement],
+  );
+
+  const resolveSftpDropTargetWithFallback = useCallback(
+    (
+      position: { x: number; y: number } | null,
+      fallbackToFocused: boolean,
+    ): { blockId: string; targetPath: string } | null => {
+      const now = Date.now();
+      const lastTarget = lastExternalDropTargetRef.current;
+      if (lastTarget && now - lastTarget.at < 3000) {
+        return { blockId: lastTarget.blockId, targetPath: lastTarget.targetPath };
+      }
+
+      const fromPosition = resolveSftpDropTargetFromPosition(position);
+      if (fromPosition) {
+        return fromPosition;
+      }
+
+      if (!fallbackToFocused) {
+        return null;
+      }
+
+      if (focusedBlockId) {
+        const focused = blocksRef.current.find(
+          (item): item is SftpBlock =>
+            item.id === focusedBlockId &&
+            item.kind === "sftp" &&
+            item.connectStage === "ready",
+        );
+        if (focused) {
+          return { blockId: focused.id, targetPath: focused.path };
+        }
+      }
+
+      const firstReady = blocksRef.current.find(
+        (item): item is SftpBlock => item.kind === "sftp" && item.connectStage === "ready",
+      );
+      if (firstReady) {
+        return { blockId: firstReady.id, targetPath: firstReady.path };
+      }
+      return null;
+    },
+    [focusedBlockId, resolveSftpDropTargetFromPosition],
+  );
+
+  const startInternalEntryDrag = useCallback(
+    (payload: DragPayload, pointer: { x: number; y: number }) => {
+      setInternalEntryDrag({
+        payload,
+        startX: pointer.x,
+        startY: pointer.y,
+        cursorX: pointer.x,
+        cursorY: pointer.y,
+        active: false,
+        targetBlockId: null,
+        targetPath: null,
+      });
+    },
+    [],
+  );
+
   const pasteClipboardFilesIntoSftpBlock = useCallback(
     async (targetBlockId: string) => {
       const target = blocksRef.current.find(
@@ -1658,6 +1811,13 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
             .filter((value) => value.length > 0),
         ),
       );
+      const signature = `${targetBlockId}|${targetPath}|${[...unique].sort().join("\n")}`;
+      const now = Date.now();
+      const last = lastExternalFileDropSignatureRef.current;
+      if (last && last.signature === signature && now - last.at < 700) {
+        return;
+      }
+      lastExternalFileDropSignatureRef.current = { signature, at: now };
 
       for (const localPath of unique) {
         try {
@@ -1676,6 +1836,272 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
     },
     [transferBetweenBlocks],
   );
+
+  const inferExternalDropKind = useCallback(async (paths: string[]): Promise<{ kind: ExternalDropKind; count: number }> => {
+    const unique = Array.from(
+      new Set(
+        paths
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0),
+      ),
+    );
+    const count = unique.length;
+    if (count === 0) {
+      return { kind: "unknown", count: 0 };
+    }
+
+    const signature = [...unique].sort().join("\n");
+    const cached = lastExternalDropKindRef.current;
+    if (cached && cached.signature === signature && Date.now() - cached.at < 5000) {
+      return { kind: cached.kind, count: cached.count };
+    }
+
+    let folderCount = 0;
+    let fileCount = 0;
+    const inspect = unique.slice(0, 16);
+    for (const path of inspect) {
+      try {
+        const stat = await api.localStat(path);
+        if (stat.is_dir) {
+          folderCount += 1;
+        } else {
+          fileCount += 1;
+        }
+      } catch {
+        // Ignore invalid paths during drag preview resolution.
+      }
+    }
+
+    let kind: ExternalDropKind = "unknown";
+    if (folderCount > 0 && fileCount === 0) {
+      kind = "folder";
+    } else if (fileCount > 0 && folderCount === 0) {
+      kind = "file";
+    } else if (fileCount > 0 && folderCount > 0) {
+      kind = "mixed";
+    }
+
+    lastExternalDropKindRef.current = {
+      signature,
+      kind,
+      count,
+      at: Date.now(),
+    };
+    return { kind, count };
+  }, []);
+
+  useEffect(() => {
+    if (!internalEntryDrag) {
+      return;
+    }
+
+    const DRAG_THRESHOLD = 6;
+    const onMouseMove = (event: MouseEvent) => {
+      const current = internalEntryDragRef.current;
+      if (!current) {
+        return;
+      }
+
+      const movedEnough =
+        Math.abs(event.clientX - current.startX) >= DRAG_THRESHOLD ||
+        Math.abs(event.clientY - current.startY) >= DRAG_THRESHOLD;
+      const isActive = current.active || movedEnough;
+      const target = isActive
+        ? resolveSftpDropTargetFromPosition({ x: event.clientX, y: event.clientY })
+        : null;
+
+      if (target?.blockId) {
+        setFocusedBlockId(target.blockId);
+      }
+
+      setInternalEntryDrag((previous) => {
+        if (!previous) {
+          return previous;
+        }
+        return {
+          ...previous,
+          active: isActive,
+          cursorX: event.clientX,
+          cursorY: event.clientY,
+          targetBlockId: target?.blockId ?? null,
+          targetPath: target?.targetPath ?? null,
+        };
+      });
+    };
+
+    const finishDrag = () => {
+      const snapshot = internalEntryDragRef.current;
+      setInternalEntryDrag(null);
+      if (!snapshot || !snapshot.active || !snapshot.targetBlockId) {
+        return;
+      }
+      const targetPath = snapshot.targetPath ?? "";
+      void transferBetweenBlocks(snapshot.payload, snapshot.targetBlockId, targetPath);
+    };
+
+    window.addEventListener("mousemove", onMouseMove, true);
+    window.addEventListener("mouseup", finishDrag, true);
+    window.addEventListener("blur", finishDrag);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove, true);
+      window.removeEventListener("mouseup", finishDrag, true);
+      window.removeEventListener("blur", finishDrag);
+    };
+  }, [internalEntryDrag, resolveSftpDropTargetFromPosition, transferBetweenBlocks]);
+
+  useEffect(() => {
+    const isExternalFileDrag = (event: DragEvent): boolean => {
+      const dataTransfer = event.dataTransfer;
+      if (!dataTransfer) {
+        return false;
+      }
+      return Array.from(dataTransfer.types ?? []).includes("Files");
+    };
+
+    const onDragOverCapture = (event: DragEvent) => {
+      if (!isExternalFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+
+      const filePaths = Array.from(event.dataTransfer?.files ?? [])
+        .map((file) => (file as File & { path?: string }).path?.trim() ?? "")
+        .filter((value) => value.length > 0);
+      if (filePaths.length > 0) {
+        lastExternalDropPathsRef.current = filePaths;
+      }
+
+      const hovered = event.target as HTMLElement | null;
+      const dropTarget = hovered?.closest<HTMLElement>(SFTP_DROP_TARGET_SELECTOR);
+      const blockId = dropTarget?.dataset.openptlBlockId?.trim();
+      if (!blockId) {
+        return;
+      }
+      const targetPath = dropTarget?.dataset.openptlTargetPath ?? "";
+
+      lastExternalDropTargetRef.current = {
+        blockId,
+        targetPath,
+        at: Date.now(),
+      };
+    };
+
+    const onDropCapture = (event: DragEvent) => {
+      if (!isExternalFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+    };
+
+    window.addEventListener("dragover", onDragOverCapture, true);
+    window.addEventListener("drop", onDropCapture, true);
+    return () => {
+      window.removeEventListener("dragover", onDragOverCapture, true);
+      window.removeEventListener("drop", onDropCapture, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    const appWindow = getCurrentWindow();
+
+    const updateDropPreview = (target: { blockId: string; targetPath: string }, paths: string[]) => {
+      void inferExternalDropKind(paths).then((meta) => {
+        if (disposed) {
+          return;
+        }
+        setExternalDropPreview({
+          mode: "external",
+          blockId: target.blockId,
+          targetPath: target.targetPath,
+          kind: meta.kind,
+          count: meta.count,
+        });
+      });
+    };
+
+    void appWindow
+      .onDragDropEvent((event) => {
+        if (disposed) {
+          return;
+        }
+
+        const payload = event.payload;
+        if (payload.type === "leave") {
+          setExternalDropPreview(null);
+          lastExternalDropPathsRef.current = [];
+          return;
+        }
+
+        const payloadPaths =
+          "paths" in payload
+            ? payload.paths.map((value) => value.trim()).filter((value) => value.length > 0)
+            : [];
+        if (payloadPaths.length > 0) {
+          lastExternalDropPathsRef.current = payloadPaths;
+        }
+
+        const paths = payloadPaths.length > 0 ? payloadPaths : lastExternalDropPathsRef.current;
+        const position = "position" in payload ? payload.position : null;
+
+        if (payload.type === "enter" || payload.type === "over") {
+          const target = resolveSftpDropTargetWithFallback(position, false);
+          if (!target) {
+            setExternalDropPreview(null);
+            return;
+          }
+          setFocusedBlockId(target.blockId);
+
+          if (paths.length > 0) {
+            updateDropPreview(target, paths);
+          } else {
+            setExternalDropPreview({
+              mode: "external",
+              blockId: target.blockId,
+              targetPath: target.targetPath,
+              kind: "unknown",
+              count: 0,
+            });
+          }
+          return;
+        }
+
+        if (payload.type !== "drop") {
+          return;
+        }
+
+        if (paths.length === 0) {
+          setExternalDropPreview(null);
+          return;
+        }
+
+        const resolvedTarget = resolveSftpDropTargetWithFallback(position, true);
+        if (!resolvedTarget) {
+          toast.error("Abra um bloco de arquivos conectado para receber o drop.");
+          setExternalDropPreview(null);
+          return;
+        }
+
+        setFocusedBlockId(resolvedTarget.blockId);
+        void dropLocalPathsIntoSftpBlock(resolvedTarget.blockId, resolvedTarget.targetPath, paths);
+        setExternalDropPreview(null);
+        lastExternalDropPathsRef.current = [];
+      })
+      .then((off) => {
+        if (disposed) {
+          off();
+          return;
+        }
+        unlisten = off;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dropLocalPathsIntoSftpBlock, inferExternalDropKind, resolveSftpDropTargetWithFallback]);
 
   const addSftpBlock = useCallback(
     (sourceId?: string) => {
@@ -3176,6 +3602,50 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
     [addTerminalBlock, connectLocalTerminal, ensureSessionListeners, localSessionIds, sshWrite],
   );
 
+  const closeSftpCreateDialog = useCallback(() => {
+    setSftpCreateDialog((current) => (current?.busy ? current : null));
+  }, []);
+
+  const submitSftpCreateDialog = useCallback(async () => {
+    const snapshot = sftpCreateDialog;
+    if (!snapshot || snapshot.busy) {
+      return;
+    }
+
+    const name = snapshot.value.trim();
+    if (!name) {
+      toast.error("Informe um nome valido.");
+      return;
+    }
+
+    setSftpCreateDialog((current) => (current ? { ...current, busy: true } : current));
+    try {
+      const target =
+        snapshot.sourceId === "local"
+          ? joinPath(snapshot.basePath, name)
+          : joinRemotePath(snapshot.basePath, name);
+
+      if (snapshot.mode === "mkdir") {
+        await createSourceFolder(snapshot.sourceId, target);
+      } else {
+        await createSourceFile(snapshot.sourceId, target);
+      }
+
+      const currentBlock = blocksRef.current.find(
+        (item): item is SftpBlock => item.id === snapshot.blockId && item.kind === "sftp",
+      );
+      await refreshSftpBlock(
+        snapshot.blockId,
+        currentBlock?.path ?? snapshot.basePath,
+        currentBlock?.sourceId ?? snapshot.sourceId,
+      );
+      setSftpCreateDialog(null);
+    } catch (error) {
+      toast.error(getError(error));
+      setSftpCreateDialog((current) => (current ? { ...current, busy: false } : current));
+    }
+  }, [refreshSftpBlock, sftpCreateDialog]);
+
   const handleSftpContextAction = useCallback(
     async (block: SftpBlock, action: SftpContextAction, entry: SftpEntry | null) => {
       try {
@@ -3225,29 +3695,25 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
           return;
         }
         if (action === "mkdir") {
-          const folderName = window.prompt("Nome da pasta:", "");
-          if (!folderName?.trim()) {
-            return;
-          }
-          const target =
-            block.sourceId === "local"
-              ? joinPath(block.path, folderName.trim())
-              : joinRemotePath(block.path, folderName.trim());
-          await createSourceFolder(block.sourceId, target);
-          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          setSftpCreateDialog({
+            mode: "mkdir",
+            blockId: block.id,
+            sourceId: block.sourceId,
+            basePath: block.path,
+            value: "",
+            busy: false,
+          });
           return;
         }
         if (action === "mkfile") {
-          const fileName = window.prompt("Nome do arquivo:", "");
-          if (!fileName?.trim()) {
-            return;
-          }
-          const target =
-            block.sourceId === "local"
-              ? joinPath(block.path, fileName.trim())
-              : joinRemotePath(block.path, fileName.trim());
-          await createSourceFile(block.sourceId, target);
-          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          setSftpCreateDialog({
+            mode: "mkfile",
+            blockId: block.id,
+            sourceId: block.sourceId,
+            basePath: block.path,
+            value: "",
+            busy: false,
+          });
           return;
         }
         if (!entry) {
@@ -3715,9 +4181,29 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
                   block,
                   sourceOptions,
                   transferItems: transferItemsByBlock.get(block.id) ?? [],
+                  externalDropPreview:
+                    externalDropPreview?.blockId === block.id
+                      ? {
+                          mode: "external" as const,
+                          kind: externalDropPreview.kind,
+                          count: externalDropPreview.count,
+                          targetPath: externalDropPreview.targetPath,
+                        }
+                      : internalEntryDrag?.active &&
+                          internalEntryDrag.targetBlockId === block.id
+                        ? {
+                            mode: "internal" as const,
+                            kind: internalEntryDrag.payload.isDir ? "folder" : "file",
+                            count: 1,
+                            targetPath: internalEntryDrag.targetPath ?? block.path,
+                          }
+                      : null,
                   onFocus: () => focusBlock(block.id),
                   onPasteClipboardFiles: () => {
                     void pasteClipboardFilesIntoSftpBlock(block.id);
+                  },
+                  onEntryDragStart: (payload, pointer) => {
+                    startInternalEntryDrag(payload, pointer);
                   },
                   onRefresh: (path, sourceId) => {
                     if (sourceId !== block.sourceId) {
@@ -3760,10 +4246,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
                       return;
                     }
                     void openFile(block.sourceId, entry.path);
-                  },
-                  onDropTransfer: (payload, targetPath) => void transferBetweenBlocks(payload, block.id, targetPath),
-                  onDropLocalPaths: (paths, targetPath) => {
-                    void dropLocalPathsIntoSftpBlock(block.id, targetPath, paths);
                   },
                   onContextAction: (action, entry) => void handleSftpContextAction(block, action, entry),
                   onTrustHost: () => {
@@ -3953,6 +4435,62 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
           </WorkspaceBlockController>
         ))}
       </div>
+
+      <AppDialog
+        open={!!sftpCreateDialog}
+        title={sftpCreateDialog?.mode === "mkdir" ? "Criar pasta" : "Criar arquivo"}
+        description={
+          sftpCreateDialog
+            ? `Destino: ${sftpCreateDialog.basePath || (sftpCreateDialog.sourceId === "local" ? "." : "/")}`
+            : undefined
+        }
+        onClose={closeSftpCreateDialog}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-foreground/90 transition hover:bg-secondary disabled:opacity-60"
+              disabled={!!sftpCreateDialog?.busy}
+              onClick={closeSftpCreateDialog}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-60"
+              disabled={!!sftpCreateDialog?.busy}
+              onClick={() => void submitSftpCreateDialog()}
+            >
+              {sftpCreateDialog?.mode === "mkdir" ? "Criar pasta" : "Criar arquivo"}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            {sftpCreateDialog?.mode === "mkdir"
+              ? "Informe o nome da nova pasta."
+              : "Informe o nome do novo arquivo."}
+          </p>
+          <input
+            autoFocus
+            value={sftpCreateDialog?.value ?? ""}
+            onChange={(event) =>
+              setSftpCreateDialog((current) =>
+                current ? { ...current, value: event.target.value } : current,
+              )
+            }
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void submitSftpCreateDialog();
+              }
+            }}
+            placeholder={sftpCreateDialog?.mode === "mkdir" ? "ex: docs" : "ex: notes.txt"}
+            className="h-9 w-full rounded-lg border border-border/60 bg-secondary/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+      </AppDialog>
 
       <AppDialog
         open={selectConnectionDialogOpen}

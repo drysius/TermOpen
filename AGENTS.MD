@@ -1,7 +1,7 @@
-﻿# AGENTS
+# AGENTS
 
 ## Product Summary
-TermOpen is a desktop SSH/SFTP workspace (Tauri + React) with:
+OpenPtl is a desktop SSH/SFTP workspace (Tauri + React) with:
 - encrypted vault state,
 - SSH terminal blocks (xterm),
 - SFTP explorer/editor blocks,
@@ -95,7 +95,7 @@ Backend (Rust/Tauri):
   4. `src/langs/*`
 
 ## Notes from Legacy Docs (consolidated)
-- Deep link auth target protocol is `termopen://auth`.
+- Deep link auth target protocol is `openptl://auth`.
 - PTY-backed SSH channel is required for interactive remote shell.
 - Transfer progress events follow `transfer:progress:{id}` naming.
 - Workspace close must close associated sessions; if no workspace remains, close all active sessions.

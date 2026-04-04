@@ -7,7 +7,7 @@ use rdev::{Button, Event, EventType, Key};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
-use crate::rdp::{RdpInputBatch, RdpInputEvent, RdpMouseButton};
+use crate::protocols::rdp::{RdpInputBatch, RdpInputEvent, RdpMouseButton};
 
 const STATUS_EVENT: &str = "key_actions:status";
 const MAX_MOVE_RATE: Duration = Duration::from_millis(16);
@@ -293,7 +293,8 @@ fn parse_active_target(input: KeyActionsActiveTargetInput) -> Result<ActiveTarge
             remote_width,
             remote_height,
         } => {
-            let common = parse_target_common(session_id, tab_id, block_id, surface_rect, dpi_scale)?;
+            let common =
+                parse_target_common(session_id, tab_id, block_id, surface_rect, dpi_scale)?;
             if remote_width == 0 || remote_height == 0 {
                 return Err("Resolucao remota RDP invalida para captura.".to_string());
             }
@@ -312,7 +313,8 @@ fn parse_active_target(input: KeyActionsActiveTargetInput) -> Result<ActiveTarge
             cols,
             rows,
         } => {
-            let common = parse_target_common(session_id, tab_id, block_id, surface_rect, dpi_scale)?;
+            let common =
+                parse_target_common(session_id, tab_id, block_id, surface_rect, dpi_scale)?;
             if cols == 0 || rows == 0 {
                 return Err("Grade do terminal invalida para captura.".to_string());
             }
@@ -619,7 +621,8 @@ fn map_rdp_pointer(
     screen_y: f64,
     window_origin: (f64, f64),
 ) -> Option<(u16, u16)> {
-    let (local_x, local_y, width, height) = map_surface_pointer(common, screen_x, screen_y, window_origin)?;
+    let (local_x, local_y, width, height) =
+        map_surface_pointer(common, screen_x, screen_y, window_origin)?;
     let x = ((local_x / width) * f64::from(remote_width.saturating_sub(1)))
         .round()
         .clamp(0.0, f64::from(remote_width.saturating_sub(1))) as u16;
@@ -637,9 +640,12 @@ fn map_ssh_pointer(
     screen_y: f64,
     window_origin: (f64, f64),
 ) -> Option<(u16, u16)> {
-    let (local_x, local_y, width, height) = map_surface_pointer(common, screen_x, screen_y, window_origin)?;
-    let col = (((local_x / width) * f64::from(cols)).floor() + 1.0).clamp(1.0, f64::from(cols)) as u16;
-    let row = (((local_y / height) * f64::from(rows)).floor() + 1.0).clamp(1.0, f64::from(rows)) as u16;
+    let (local_x, local_y, width, height) =
+        map_surface_pointer(common, screen_x, screen_y, window_origin)?;
+    let col =
+        (((local_x / width) * f64::from(cols)).floor() + 1.0).clamp(1.0, f64::from(cols)) as u16;
+    let row =
+        (((local_y / height) * f64::from(rows)).floor() + 1.0).clamp(1.0, f64::from(rows)) as u16;
     Some((col, row))
 }
 
@@ -902,7 +908,12 @@ async fn handle_dispatch_event(app: &AppHandle, event: DispatchEvent) {
         DispatchEvent::Rdp { session_id, event } => {
             let state = app.state::<crate::AppState>();
             let mut manager = state.rdp_sessions.lock().await;
-            let _ = manager.input_batch(session_id.as_str(), RdpInputBatch { events: vec![event] });
+            let _ = manager.input_batch(
+                session_id.as_str(),
+                RdpInputBatch {
+                    events: vec![event],
+                },
+            );
         }
         DispatchEvent::Ssh {
             session_id,
@@ -1018,7 +1029,7 @@ mod tests {
             Some(DispatchEvent::Rdp { session_id, event }) => {
                 assert_eq!(session_id, "session");
                 match event {
-                    crate::rdp::RdpInputEvent::KeyPress { code, text, .. } => {
+                    crate::protocols::rdp::RdpInputEvent::KeyPress { code, text, .. } => {
                         assert_eq!(code, "KeyA");
                         assert_eq!(text.as_deref(), Some("a"));
                     }
@@ -1037,7 +1048,10 @@ mod tests {
             shift: false,
             meta: false,
         };
-        assert_eq!(ssh_bytes_from_key(Key::Return, None, modifiers), Some(b"\r".to_vec()));
+        assert_eq!(
+            ssh_bytes_from_key(Key::Return, None, modifiers),
+            Some(b"\r".to_vec())
+        );
     }
 
     #[test]

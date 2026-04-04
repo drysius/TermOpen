@@ -1,6 +1,6 @@
 import { HardDrive, Monitor, Server, User } from "lucide-react";
 
-import type { ConnectionProtocol } from "@/types/termopen";
+import type { ConnectionProtocol } from "@/types/openptl";
 
 interface ConnectionCardProps {
   name: string;

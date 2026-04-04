@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useT } from "@/langs";
-import type { ConnectionProfile, ConnectionProtocol } from "@/types/termopen";
+import type { ConnectionProfile, ConnectionProtocol } from "@/types/openptl";
 
 interface ConnectionDetailDialogProps {
   open: boolean;

@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::HashMap,
     env, fs,
     io::{ErrorKind, Read, Seek, SeekFrom, Write},
@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use ssh2::{Channel, CheckResult, ExtendedData, KnownHostFileKind, Session};
 use tempfile::NamedTempFile;
 
-use crate::models::{
+use crate::libs::models::{
     ConnectionProfile, KnownHostEntry, SftpEntry, SshConnectResult, SshSessionInfo,
 };
 
@@ -1294,3 +1294,4 @@ mod tests {
         assert!(enabled);
     }
 }
+

@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
-import type { KeychainEntry, KeychainEntryType } from "@/types/termopen";
+import type { KeychainEntry, KeychainEntryType } from "@/types/openptl";
 
 interface KeychainFormValues {
   id: string;

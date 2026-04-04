@@ -32,8 +32,8 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio_rustls::rustls;
 use uuid::Uuid;
 
-use crate::keyboard::{pressed_modifier_scan_codes, web_code_to_scan_code};
-use crate::mouse::{interpolate_pointer_route, WheelAccumulator};
+use crate::utils::keyboard::{pressed_modifier_scan_codes, web_code_to_scan_code};
+use crate::utils::mouse::{interpolate_pointer_route, WheelAccumulator};
 
 #[derive(Debug, Clone)]
 pub struct RdpSessionOptions {
@@ -1418,7 +1418,7 @@ fn build_config(
         desktop_size: connector::DesktopSize { width, height },
         bitmap: None,
         client_build: 0,
-        client_name: "termopen-rdp".to_owned(),
+        client_name: "openptl-rdp".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
         #[cfg(windows)]
         platform: MajorPlatformType::WINDOWS,

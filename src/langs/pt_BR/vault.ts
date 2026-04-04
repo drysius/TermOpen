@@ -2,7 +2,7 @@ import type { AppDictionary } from "../types";
 
 export const vault: AppDictionary["vault"] = {
   intro: {
-    title: "Bem-vindo ao ConnectHub",
+    title: "Bem-vindo ao OpenPtl",
     description: "Antes de começar, confira como o app organiza conexões e mantém seu vault protegido.",
     pointOne: "Workspaces com SSH, SFTP, FTP/FTPS, SMB e RDP no mesmo lugar.",
     pointTwo: "Dados sensíveis ficam criptografados localmente com sua senha mestre.",
@@ -12,7 +12,7 @@ export const vault: AppDictionary["vault"] = {
     back: "Voltar",
     next: "Próximo",
     start: "Começar",
-    stepWelcomeTitle: "Bem-vindo ao ConnectHub",
+    stepWelcomeTitle: "Bem-vindo ao OpenPtl",
     stepWelcomeDescription:
       "Um painel de terminal que permite usar múltiplos protocolos — SSH, SFTP, FTP, FTPS, SMB e RDP — com foco em organização e confiança.",
     stepWelcomePointOne: "Gerencie todas as suas conexões em um só lugar.",
@@ -32,7 +32,7 @@ export const vault: AppDictionary["vault"] = {
     stepAuthPointThree: "Nenhum dado de conexão trafega pelo servidor.",
     stepSecurityTitle: "Criptografia com Senha Mestre",
     stepSecurityDescription:
-      "Todo o ConnectHub é criptografado a partir de uma Senha Mestre. Essa senha desbloqueia o Vault e descriptografa suas informações de conexões e acessos.",
+      "Todo o OpenPtl é criptografado a partir de uma Senha Mestre. Essa senha desbloqueia o Vault e descriptografa suas informações de conexões e acessos.",
     stepSecurityPointOne: "Vault criptografado end-to-end.",
     stepSecurityPointTwo: "Senha mestre nunca é armazenada.",
     stepSecurityPointThree: "Keychain protegido localmente.",
@@ -60,7 +60,7 @@ export const vault: AppDictionary["vault"] = {
     description: "Sem a senha mestre não existe recuperação possível.",
     warning: "Não é possível recuperar dados sem a senha mestre.",
     explanation:
-      "Todos os dados do ConnectHub são criptografados localmente. Se você perdeu a senha, a única opção é apagar os dados atuais e iniciar uma conta zerada.",
+      "Todos os dados do OpenPtl são criptografados localmente. Se você perdeu a senha, a única opção é apagar os dados atuais e iniciar uma conta zerada.",
     confirmLabel: "Digite 'DELETAR DADOS' para continuar",
     confirmPlaceholder: 'Digite "DELETAR DADOS"',
     confirmPhrase: "DELETAR DADOS",

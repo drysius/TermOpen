@@ -10,9 +10,9 @@ const CURSOR_PACKET_HEADER_SIZE = 28;
 const AUDIO_PACKET_HEADER_SIZE = 24;
 const COMPRESSION_NONE = 0;
 const COMPRESSION_LZ4 = 1;
-const RDP_VIDEO_RECTS_EVENT = "termopen:rdp-video-rects";
-const RDP_CURSOR_EVENT = "termopen:rdp-cursor";
-const RDP_AUDIO_EVENT = "termopen:rdp-audio";
+const RDP_VIDEO_RECTS_EVENT = "openptl:rdp-video-rects";
+const RDP_CURSOR_EVENT = "openptl:rdp-cursor";
+const RDP_AUDIO_EVENT = "openptl:rdp-audio";
 
 function readU64(view: DataView, offset: number): number {
   const low = view.getUint32(offset, true);

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { useAppStore } from "@/store/app-store";
-import type { DebugLogEntry } from "@/types/termopen";
+import type { DebugLogEntry } from "@/types/openptl";
 
 function levelClass(level: string): string {
   const normalized = level.toLowerCase();

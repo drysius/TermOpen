@@ -1,7 +1,7 @@
 import type { AppDictionary } from "../types";
 
 export const about: AppDictionary["about"] = {
-  title: "Sobre o ConnectHub",
+  title: "Sobre o OpenPtl",
   description: "Gerenciador de conexões remotas seguro e moderno.",
   protocolsLabel: "Protocolos",
   frameworkLabel: "Framework",
@@ -10,14 +10,14 @@ export const about: AppDictionary["about"] = {
   docsButton: "Ver site",
   dependenciesButton: "Ver Dependências",
   dependenciesTitle: "Dependências do projeto",
-  dependenciesDescription: "Pacotes do frontend e backend (Rust) usados no ConnectHub.",
+  dependenciesDescription: "Pacotes do frontend e backend (Rust) usados no OpenPtl.",
   dependenciesIntro: "Este projeto não seria possível sem os pacotes abaixo.",
   frontendPackagesTitle: "Pacotes do frontend",
   backendPackagesTitle: "Pacotes do backend (Rust)",
   projectSection: "Projeto",
-  projectVisionSection: "Como o ConnectHub funciona",
+  projectVisionSection: "Como o OpenPtl funciona",
   projectVisionP1:
-    "O ConnectHub é um painel desktop para conexões remotas com foco em produtividade e confiabilidade.",
+    "O OpenPtl é um painel desktop para conexões remotas com foco em produtividade e confiabilidade.",
   projectVisionP2:
     "Os dados de conexão e keychain permanecem no vault local criptografado, com opção de sincronização no Google Drive.",
   projectVisionP3:

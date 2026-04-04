@@ -1,7 +1,7 @@
 export interface PaneState {
   sourceId: string;
   path: string;
-  entries: import("@/types/termopen").SftpEntry[];
+  entries: import("@/types/openptl").SftpEntry[];
   loading: boolean;
   selectedFile: string | null;
 }

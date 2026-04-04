@@ -17,7 +17,7 @@ export function AppDrawer({
   description,
   onClose,
   children,
-  widthClassName = "w-[380px]",
+  widthClassName = "w-[480px]",
 }: DrawerProps) {
   return (
     <div

@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useT } from "@/langs";
 import { formatProfileSourceId } from "@/pages/tabs/workspace/natives/runtime";
 import { useAppStore } from "@/store/app-store";
-import type { ConnectionProfile, ConnectionProtocol } from "@/types/termopen";
+import type { ConnectionProfile, ConnectionProtocol } from "@/types/openptl";
 
 function normalizeProtocols(profile: ConnectionProfile): string[] {
   if (profile.protocols?.length) {

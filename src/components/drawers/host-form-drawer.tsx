@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { api } from "@/lib/tauri";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
-import type { ConnectionProfile, ConnectionProtocol, KeychainEntry } from "@/types/termopen";
+import type { ConnectionProfile, ConnectionProtocol, KeychainEntry } from "@/types/openptl";
 
 interface HostFormValues {
   id: string;

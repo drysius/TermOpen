@@ -14,7 +14,7 @@ import type {
   SshSessionInfo,
   SyncState,
   VaultStatus,
-} from "@/types/termopen";
+} from "@/types/openptl";
 import type { SidebarSection, WorkTab, WorkspaceSnapshot } from "@/types/workspace";
 
 export type PaneSide = "left" | "right";

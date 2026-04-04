@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+﻿use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use keyring::Entry;
 use reqwest::Client;
@@ -16,26 +16,17 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
 use crate::{
-    models::{
+    constants::{
+        APP_KEYRING_SERVICE, AUTH_DEEPLINK_TIMEOUT, DRIVE_FOLDER_MIME_TYPE, DRIVE_ROOT_FOLDER_NAME,
+        DRIVE_TOP_PARENT_ID, KEYRING_REFRESH_TOKEN, KEYRING_USER_EMAIL, KEYRING_USER_NAME,
+        KEYRING_USER_PICTURE, MANIFEST_FILE_NAME, OPENPTL_FILE_NAME, PROFILE_FILE_NAME,
+    },
+    libs::models::{
         RecoveryProbeResult, SyncConflictDecision, SyncConflictItem, SyncConflictKind,
         SyncConflictPreview, SyncKeepSide, SyncLoggedUser, SyncState, VaultStatus,
     },
-    vault::VaultManager,
+    libs::vault::VaultManager,
 };
-
-const KEYRING_SERVICE: &str = "com.urubucode.termopen";
-const KEYRING_REFRESH_TOKEN: &str = "google-drive-refresh-token";
-const KEYRING_USER_EMAIL: &str = "google-user-email";
-const KEYRING_USER_NAME: &str = "google-user-name";
-const KEYRING_USER_PICTURE: &str = "google-user-picture";
-const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
-const DRIVE_ROOT_FOLDER_NAME: &str = "TermOpen";
-const DRIVE_TOP_PARENT_ID: &str = "root";
-const AUTH_DEEPLINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-const TERM_OPEN_FILE_NAME: &str = "term-open.bin";
-const PROFILE_FILE_NAME: &str = "profile.bin";
-const MANIFEST_FILE_NAME: &str = "manifest.bin";
 
 struct AuthCallbackQueue {
     queue: StdMutex<VecDeque<CallbackAuthData>>,
@@ -141,7 +132,7 @@ impl SyncManager {
             access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
 
-        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+        let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
             return Ok(());
         };
 
@@ -255,9 +246,9 @@ impl SyncManager {
         }
 
         let client = Client::new();
-        let folder_id = ensure_termopen_folder(&client, &access_token, true)
+        let folder_id = ensure_openptl_folder(&client, &access_token, true)
             .await?
-            .ok_or_else(|| anyhow!("Falha ao preparar pasta TermOpen no Google Drive"))?;
+            .ok_or_else(|| anyhow!("Falha ao preparar pasta OpenPtl no Google Drive"))?;
         let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
 
         let local_files = vault.list_local_bin_files()?;
@@ -337,14 +328,14 @@ impl SyncManager {
         }
 
         let client = Client::new();
-        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+        let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
             let state = SyncState::idle("Nenhum backup encontrado no Google Drive.");
             app.emit("sync:status", &state).ok();
             return Ok(state);
         };
 
         let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
-        if !remote_files.contains_key(TERM_OPEN_FILE_NAME)
+        if !remote_files.contains_key(OPENPTL_FILE_NAME)
             || !remote_files.contains_key(PROFILE_FILE_NAME)
             || !remote_files.contains_key(MANIFEST_FILE_NAME)
         {
@@ -398,7 +389,7 @@ impl SyncManager {
             access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
 
-        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+        let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
             return Ok(SyncConflictPreview::default());
         };
 
@@ -477,9 +468,9 @@ impl SyncManager {
         let access_token =
             access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
-        let folder_id = ensure_termopen_folder(&client, &access_token, true)
+        let folder_id = ensure_openptl_folder(&client, &access_token, true)
             .await?
-            .ok_or_else(|| anyhow!("Falha ao preparar pasta TermOpen no Google Drive"))?;
+            .ok_or_else(|| anyhow!("Falha ao preparar pasta OpenPtl no Google Drive"))?;
 
         let remote_files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
 
@@ -557,15 +548,15 @@ impl SyncManager {
             access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
 
-        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
+        let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
             return Ok(RecoveryProbeResult {
                 found: false,
-                message: "Pasta TermOpen nao encontrada no Google Drive.".to_string(),
+                message: "Pasta OpenPtl nao encontrada no Google Drive.".to_string(),
             });
         };
 
         let files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
-        if files.contains_key(TERM_OPEN_FILE_NAME) {
+        if files.contains_key(OPENPTL_FILE_NAME) {
             Ok(RecoveryProbeResult {
                 found: true,
                 message: "Backup encontrado no Google Drive.".to_string(),
@@ -591,18 +582,17 @@ impl SyncManager {
             access_token_from_refresh_with_fallback(server_address, fallback_addresses).await?;
         let client = Client::new();
 
-        let Some(folder_id) = ensure_termopen_folder(&client, &access_token, false).await? else {
-            return Err(anyhow!("Pasta TermOpen nao encontrada no Google Drive"));
+        let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
+            return Err(anyhow!("Pasta OpenPtl nao encontrada no Google Drive"));
         };
 
         let files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
-        let term_open_meta = files
-            .get(TERM_OPEN_FILE_NAME)
-            .ok_or_else(|| anyhow!("term-open.bin nao encontrado na nuvem"))?;
-        let term_open_bytes =
-            download_file_bytes(&client, &access_token, &term_open_meta.id).await?;
+        let openptl_meta = files
+            .get(OPENPTL_FILE_NAME)
+            .ok_or_else(|| anyhow!("openptl.bin nao encontrado na nuvem"))?;
+        let openptl_bytes = download_file_bytes(&client, &access_token, &openptl_meta.id).await?;
 
-        if !vault.validate_password_for_term_open_bytes(&term_open_bytes, password.trim())? {
+        if !vault.validate_password_for_openptl_bytes(&openptl_bytes, password.trim())? {
             return Err(anyhow!("Senha mestre invalida"));
         }
 
@@ -622,7 +612,7 @@ impl SyncManager {
             snapshot.insert(name, bytes);
         }
 
-        if !snapshot.contains_key(TERM_OPEN_FILE_NAME)
+        if !snapshot.contains_key(OPENPTL_FILE_NAME)
             || !snapshot.contains_key(PROFILE_FILE_NAME)
             || !snapshot.contains_key(MANIFEST_FILE_NAME)
         {
@@ -729,7 +719,7 @@ async fn wait_for_auth_callback() -> Result<CallbackAuthData> {
 
 fn parse_auth_callback_from_deeplink(raw_url: &str) -> Result<Option<CallbackAuthData>> {
     let cleaned = raw_url.trim().trim_matches('"');
-    let Some(path_query) = cleaned.strip_prefix("termopen://") else {
+    let Some(path_query) = cleaned.strip_prefix("openptl://") else {
         return Ok(None);
     };
 
@@ -917,7 +907,7 @@ async fn try_refresh_token(server_address: &str) -> Result<String> {
     Ok(data.access_token)
 }
 
-async fn ensure_termopen_folder(
+async fn ensure_openptl_folder(
     client: &Client,
     access_token: &str,
     create_if_missing: bool,
@@ -1190,35 +1180,35 @@ async fn delete_drive_file(client: &Client, access_token: &str, file_id: &str) -
 }
 
 fn store_refresh_token(token: &str) -> Result<()> {
-    let entry =
-        Entry::new(KEYRING_SERVICE, KEYRING_REFRESH_TOKEN).context("Falha ao preparar keychain")?;
+    let entry = Entry::new(APP_KEYRING_SERVICE, KEYRING_REFRESH_TOKEN)
+        .context("Falha ao preparar keychain")?;
     entry
         .set_password(token)
         .context("Falha ao salvar refresh token no keychain")
 }
 
 fn load_refresh_token() -> Result<String> {
-    let entry =
-        Entry::new(KEYRING_SERVICE, KEYRING_REFRESH_TOKEN).context("Falha ao preparar keychain")?;
+    let entry = Entry::new(APP_KEYRING_SERVICE, KEYRING_REFRESH_TOKEN)
+        .context("Falha ao preparar keychain")?;
     entry
         .get_password()
         .context("Refresh token ausente. Faca login primeiro.")
 }
 
 fn store_user_field(key: &str, value: &str) -> Result<()> {
-    let entry = Entry::new(KEYRING_SERVICE, key).context("Falha ao preparar keychain")?;
+    let entry = Entry::new(APP_KEYRING_SERVICE, key).context("Falha ao preparar keychain")?;
     entry
         .set_password(value)
         .context("Falha ao salvar dado no keychain")
 }
 
 fn load_user_field(key: &str) -> Result<String> {
-    let entry = Entry::new(KEYRING_SERVICE, key).context("Falha ao preparar keychain")?;
+    let entry = Entry::new(APP_KEYRING_SERVICE, key).context("Falha ao preparar keychain")?;
     entry.get_password().context("Campo ausente no keychain")
 }
 
 fn delete_keyring_field(key: &str) {
-    if let Ok(entry) = Entry::new(KEYRING_SERVICE, key) {
+    if let Ok(entry) = Entry::new(APP_KEYRING_SERVICE, key) {
         let _ = entry.delete_password();
     }
 }
@@ -1242,3 +1232,5 @@ struct DriveFileMetadata {
     #[serde(rename = "modifiedTime")]
     modified_time: Option<String>,
 }
+
+

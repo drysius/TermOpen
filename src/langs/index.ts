@@ -22,7 +22,7 @@ interface I18nState {
 }
 
 function loadLocale(): Locale {
-  const saved = localStorage.getItem("termopen.locale");
+  const saved = localStorage.getItem("openptl.locale");
   if (saved && saved in dictionaries) return saved as Locale;
   const browserLang = navigator.language;
   if (browserLang.startsWith("pt")) return "pt_BR";
@@ -35,7 +35,7 @@ export const useI18n = create<I18nState>((set) => {
     locale: initial,
     t: dictionaries[initial],
     setLocale: (locale) => {
-      localStorage.setItem("termopen.locale", locale);
+      localStorage.setItem("openptl.locale", locale);
       set({ locale, t: dictionaries[locale] });
     },
   };

@@ -67,7 +67,7 @@ export function AppSidebar({ current, onSelect }: AppSidebarProps) {
       <SidebarHeader className={collapsed ? "p-2 flex items-center justify-center" : "p-4"}>
         <div className={`flex items-center ${collapsed ? "justify-center" : "gap-3"}`}>
           <div className="h-8 w-8 shrink-0 rounded-lg bg-primary/20 border border-primary/40 flex items-center justify-center">
-            <span className="text-xs font-semibold text-primary">CH</span>
+            <span className="text-xs font-semibold text-primary">OP</span>
           </div>
           {!collapsed ? (
             <div className="flex flex-col">

@@ -136,7 +136,7 @@ export function AboutPage() {
             variant="outline"
             size="sm"
             className="gap-2"
-            onClick={() => void api.openExternalUrl("https://github.com/UrubuCode/TermOpen").catch(() => undefined)}
+            onClick={() => void api.openExternalUrl("https://github.com/urubucode/OpenPtl").catch(() => undefined)}
           >
             <Github className="h-4 w-4" />
             {t.about.githubButton}
@@ -145,7 +145,7 @@ export function AboutPage() {
             variant="outline"
             size="sm"
             className="gap-2"
-            onClick={() => void api.openExternalUrl("https://termopen.urubucode.top").catch(() => undefined)}
+            onClick={() => void api.openExternalUrl("https://openptl.example.com").catch(() => undefined)}
           >
             <ExternalLink className="h-4 w-4" />
             {t.about.docsButton}

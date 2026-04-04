@@ -100,7 +100,7 @@ export const settings: AppDictionary["settings"] = {
     ask: "Perguntar sempre",
     manual: "Somente manual",
     modalTitle: "Upload de arquivos modificados",
-    modalDescription: "Como o ConnectHub deve tratar arquivos modificados no workspace remoto?",
+    modalDescription: "Como o OpenPtl deve tratar arquivos modificados no workspace remoto?",
   },
   drive: {
     tabAccount: "Conta",
@@ -135,23 +135,23 @@ export const settings: AppDictionary["settings"] = {
   security: {
     warningTitle: "Aviso crítico de criptografia",
     warningDescription:
-      "A senha mestre controla toda a criptografia local do ConnectHub. Alterar essa senha recriptografa os dados atuais do aplicativo.",
+      "A senha mestre controla toda a criptografia local do OpenPtl. Alterar essa senha recriptografa os dados atuais do aplicativo.",
     changePasswordTitle: "Trocar senha mestre",
     changePasswordDescription:
       "Defina uma nova senha forte. A senha atual é obrigatória para confirmar a alteração.",
     deleteAccountTitle: "Deletar conta",
     deleteAccountDescription:
-      "Remove permanentemente todos os dados locais do ConnectHub, incluindo conexões, keychain e configurações.",
+      "Remove permanentemente todos os dados locais do OpenPtl, incluindo conexões, keychain e configurações.",
     deleteAccountAction: "Deletar conta",
     totalConnections: "Conexões: {count}",
     totalKeychain: "Keychain: {count}",
     totalKnownHosts: "Known hosts: {count}",
     deleteModalTitle: "Confirmar exclusão da conta",
     deleteModalDescription:
-      "Esta ação é irreversível e removerá os dados conectados ao ConnectHub neste dispositivo.",
+      "Esta ação é irreversível e removerá os dados conectados ao OpenPtl neste dispositivo.",
     deleteModalWarningTitle: "Todos os dados serão removidos",
     deleteModalWarningDescription:
-      "Ao continuar, todas as conexões, keychain, configurações e dados relacionados ao ConnectHub serão apagados.",
+      "Ao continuar, todas as conexões, keychain, configurações e dados relacionados ao OpenPtl serão apagados.",
     deleteCloudLabel: "Excluir também os dados na cloud",
     deleteCloudDescription:
       "Quando ativo, remove o backup remoto conectado ao Google Drive antes de apagar os dados locais.",

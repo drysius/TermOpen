@@ -1,4 +1,4 @@
-#[cfg(windows)]
+﻿#[cfg(windows)]
 use std::collections::HashSet;
 use std::{
     collections::VecDeque,
@@ -6,41 +6,51 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Mutex as StdMutex, OnceLock},
+    sync::{Arc, Mutex as StdMutex, OnceLock},
     time::UNIX_EPOCH,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use key_actions::{KeyActionsActiveTargetInput, KeyActionsService};
-use models::{
-    AppSettings, AuthServer, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol,
-    KeychainEntry, KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry,
-    SshConnectResult, SshSessionInfo,
-    SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState, VaultStatus, WindowState,
+use constants::{
+    DEBUG_LOG_CAPACITY, DEFAULT_BINARY_PREVIEW_LIMIT_BYTES, DEFAULT_EXTERNAL_FILE_NAME,
+    DEFAULT_RDP_HEIGHT, DEFAULT_RDP_PORT, DEFAULT_RDP_WIDTH, DEFAULT_SFTP_CHUNK_SIZE_KB,
+    DEFAULT_SSH_KEY_COMMENT, DEFAULT_WORKSPACE_HEIGHT, DEFAULT_WORKSPACE_WIDTH,
+    EXTERNAL_EDITOR_TEMP_DIR, LEGACY_COMPACT_HEIGHT, LEGACY_COMPACT_WIDTH, MAX_RDP_DIMENSION,
+    MAX_SFTP_CHUNK_SIZE_KB, MIN_RDP_DIMENSION, MIN_SFTP_CHUNK_SIZE_KB, MIN_WORKSPACE_HEIGHT,
+    MIN_WORKSPACE_WIDTH, OPENPTL_SCHEME, RELEASES_LATEST_URL, RELEASE_CHECK_USER_AGENT,
 };
-use rdp::{
+use libs::key_actions::{KeyActionsActiveTargetInput, KeyActionsService};
+use libs::models::{
+    AppSettings, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol, KeychainEntry,
+    KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult,
+    SshSessionInfo, SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState,
+    VaultStatus, WindowState,
+};
+use libs::shared_fs::{SharedFsBridge, SharedFsJob, SharedFsProtocol, TransferEndpoint};
+use protocols::rdp::{
     RdpInputBatch, RdpSessionControlEvent, RdpSessionFocusInput, RdpSessionManager,
     RdpSessionOptions, RdpSessionStartResult,
 };
-use ssh::{known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager};
-use sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
+use protocols::ssh::{
+    known_hosts_add, known_hosts_ensure, known_hosts_list, known_hosts_remove, SshManager,
+};
+use protocols::{ftp, smb};
+use libs::sync::{handle_auth_callback_deeplink, request_sync_cancel, SyncManager};
+use libs::task::TaskManager;
+use libs::transfer::TransferJobConfig;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
-use vault::VaultManager;
+use libs::vault::VaultManager;
 
-mod keyboard;
-mod key_actions;
-mod models;
-mod mouse;
-mod rdp;
-mod remote_fs;
-mod ssh;
-mod sync;
+mod commands;
+mod constants;
+mod libs;
+mod protocols;
 #[cfg(test)]
 mod tests;
-mod vault;
+mod utils;
 
 struct AppState {
     vault: Mutex<VaultManager>,
@@ -50,25 +60,6 @@ struct AppState {
     sync: Mutex<SyncManager>,
     deeplink_queue: StdMutex<Vec<String>>,
 }
-
-const DEFAULT_SFTP_CHUNK_SIZE_KB: u32 = 1024;
-const MIN_SFTP_CHUNK_SIZE_KB: u32 = 64;
-const MAX_SFTP_CHUNK_SIZE_KB: u32 = 8192;
-const DEFAULT_RDP_PORT: u16 = 3389;
-const DEFAULT_RDP_WIDTH: u16 = 1280;
-const DEFAULT_RDP_HEIGHT: u16 = 720;
-const MIN_RDP_DIMENSION: u16 = 320;
-const MAX_RDP_DIMENSION: u16 = 3840;
-const DEFAULT_BINARY_PREVIEW_LIMIT_BYTES: u64 = 25 * 1024 * 1024;
-const RELEASES_LATEST_URL: &str =
-    "https://api.github.com/repos/MarcosBrendonDePaula/TermOpen/releases/latest";
-const DEFAULT_WORKSPACE_WIDTH: f64 = 1440.0;
-const DEFAULT_WORKSPACE_HEIGHT: f64 = 900.0;
-const MIN_WORKSPACE_WIDTH: u32 = 350;
-const MIN_WORKSPACE_HEIGHT: u32 = 600;
-const LEGACY_COMPACT_WIDTH: u32 = 380;
-const LEGACY_COMPACT_HEIGHT: u32 = 600;
-const DEBUG_LOG_CAPACITY: usize = 2000;
 
 #[derive(serde::Serialize)]
 struct TextReadChunkPayload {
@@ -111,7 +102,9 @@ struct SshKeyGenerateResult {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum RemoteTransferEndpointInput {
     Local,
-    SftpSession { session_id: String },
+    SftpSession {
+        session_id: String,
+    },
     Profile {
         profile_id: String,
         protocol: ConnectionProtocol,
@@ -446,8 +439,29 @@ fn emit_transfer_progress(
     }
 }
 
-fn endpoint_is_local(endpoint: &RemoteTransferEndpointInput) -> bool {
-    matches!(endpoint, RemoteTransferEndpointInput::Local)
+fn endpoint_to_shared_fs_protocol(endpoint: &RemoteTransferEndpointInput) -> SharedFsProtocol {
+    match endpoint {
+        RemoteTransferEndpointInput::Local => SharedFsProtocol::Local,
+        RemoteTransferEndpointInput::SftpSession { .. } => SharedFsProtocol::Sftp,
+        RemoteTransferEndpointInput::Profile { protocol, .. } => match protocol {
+            ConnectionProtocol::Ftp => SharedFsProtocol::Ftp,
+            ConnectionProtocol::Ftps => SharedFsProtocol::Ftps,
+            ConnectionProtocol::Smb => SharedFsProtocol::Smb,
+            ConnectionProtocol::Rdp => SharedFsProtocol::RdpUpload,
+            _ => SharedFsProtocol::Local,
+        },
+    }
+}
+
+fn endpoint_to_shared_fs_label(endpoint: &RemoteTransferEndpointInput) -> String {
+    match endpoint {
+        RemoteTransferEndpointInput::Local => "local".to_string(),
+        RemoteTransferEndpointInput::SftpSession { session_id } => format!("sftp:{}", session_id),
+        RemoteTransferEndpointInput::Profile {
+            profile_id,
+            protocol,
+        } => format!("profile:{}:{:?}", profile_id, protocol),
+    }
 }
 
 async fn endpoint_file_size(
@@ -477,13 +491,9 @@ async fn endpoint_file_size(
         } => {
             let profile = resolve_profile_for_file_protocol(state, profile_id, protocol).await?;
             match protocol {
-                ConnectionProtocol::Ftp => remote_fs::ftp_file_size(&profile, path, false)
-                    .map_err(app_error),
-                ConnectionProtocol::Ftps => remote_fs::ftp_file_size(&profile, path, true)
-                    .map_err(app_error),
-                ConnectionProtocol::Smb => remote_fs::smb_file_size(&profile, path)
-                    .await
-                    .map_err(app_error),
+                ConnectionProtocol::Ftp => ftp::file_size(&profile, path, false).map_err(app_error),
+                ConnectionProtocol::Ftps => ftp::file_size(&profile, path, true).map_err(app_error),
+                ConnectionProtocol::Smb => smb::file_size(&profile, path).await.map_err(app_error),
                 _ => Err(format!(
                     "Protocolo {} nao suportado para leitura remota.",
                     protocol_label(protocol)
@@ -528,9 +538,11 @@ where
         }
         RemoteTransferEndpointInput::SftpSession { session_id } => {
             let mut ssh = state.ssh.lock().await;
-            ssh.sftp_download_to_writer(session_id, path, writer, chunk_size, |bytes| on_chunk(bytes))
-                .map_err(app_error)
-                .map(|_| ())
+            ssh.sftp_download_to_writer(session_id, path, writer, chunk_size, |bytes| {
+                on_chunk(bytes as u64)
+            })
+            .map_err(app_error)
+            .map(|_| ())
         }
         RemoteTransferEndpointInput::Profile {
             profile_id,
@@ -538,36 +550,28 @@ where
         } => {
             let profile = resolve_profile_for_file_protocol(state, profile_id, protocol).await?;
             match protocol {
-                ConnectionProtocol::Ftp => remote_fs::ftp_download_to_writer(
-                    &profile,
-                    path,
-                    writer,
-                    chunk_size,
-                    false,
-                    |bytes| on_chunk(bytes),
-                )
-                .map_err(app_error)
-                .map(|_| ()),
-                ConnectionProtocol::Ftps => remote_fs::ftp_download_to_writer(
-                    &profile,
-                    path,
-                    writer,
-                    chunk_size,
-                    true,
-                    |bytes| on_chunk(bytes),
-                )
-                .map_err(app_error)
-                .map(|_| ()),
-                ConnectionProtocol::Smb => remote_fs::smb_download_to_writer(
-                    &profile,
-                    path,
-                    writer,
-                    chunk_size,
-                    |bytes| on_chunk(bytes),
-                )
-                .await
-                .map_err(app_error)
-                .map(|_| ()),
+                ConnectionProtocol::Ftp => {
+                    ftp::download_to_writer(&profile, path, writer, chunk_size, false, |bytes| {
+                        on_chunk(bytes)
+                    })
+                    .map_err(app_error)
+                    .map(|_| ())
+                }
+                ConnectionProtocol::Ftps => {
+                    ftp::download_to_writer(&profile, path, writer, chunk_size, true, |bytes| {
+                        on_chunk(bytes)
+                    })
+                    .map_err(app_error)
+                    .map(|_| ())
+                }
+                ConnectionProtocol::Smb => {
+                    smb::download_to_writer(&profile, path, writer, chunk_size, |bytes| {
+                        on_chunk(bytes)
+                    })
+                    .await
+                    .map_err(app_error)
+                    .map(|_| ())
+                }
                 _ => Err(format!(
                     "Protocolo {} nao suportado para download remoto.",
                     protocol_label(protocol)
@@ -615,9 +619,11 @@ where
         }
         RemoteTransferEndpointInput::SftpSession { session_id } => {
             let mut ssh = state.ssh.lock().await;
-            ssh.sftp_upload_from_reader(session_id, path, reader, chunk_size, |bytes| on_chunk(bytes))
-                .map_err(app_error)
-                .map(|_| ())
+            ssh.sftp_upload_from_reader(session_id, path, reader, chunk_size, |bytes| {
+                on_chunk(bytes as u64)
+            })
+            .map_err(app_error)
+            .map(|_| ())
         }
         RemoteTransferEndpointInput::Profile {
             profile_id,
@@ -625,36 +631,28 @@ where
         } => {
             let profile = resolve_profile_for_file_protocol(state, profile_id, protocol).await?;
             match protocol {
-                ConnectionProtocol::Ftp => remote_fs::ftp_upload_from_reader(
-                    &profile,
-                    path,
-                    reader,
-                    chunk_size,
-                    false,
-                    |bytes| on_chunk(bytes),
-                )
-                .map_err(app_error)
-                .map(|_| ()),
-                ConnectionProtocol::Ftps => remote_fs::ftp_upload_from_reader(
-                    &profile,
-                    path,
-                    reader,
-                    chunk_size,
-                    true,
-                    |bytes| on_chunk(bytes),
-                )
-                .map_err(app_error)
-                .map(|_| ()),
-                ConnectionProtocol::Smb => remote_fs::smb_upload_from_reader(
-                    &profile,
-                    path,
-                    reader,
-                    chunk_size,
-                    |bytes| on_chunk(bytes),
-                )
-                .await
-                .map_err(app_error)
-                .map(|_| ()),
+                ConnectionProtocol::Ftp => {
+                    ftp::upload_from_reader(&profile, path, reader, chunk_size, false, |bytes| {
+                        on_chunk(bytes)
+                    })
+                    .map_err(app_error)
+                    .map(|_| ())
+                }
+                ConnectionProtocol::Ftps => {
+                    ftp::upload_from_reader(&profile, path, reader, chunk_size, true, |bytes| {
+                        on_chunk(bytes)
+                    })
+                    .map_err(app_error)
+                    .map(|_| ())
+                }
+                ConnectionProtocol::Smb => {
+                    smb::upload_from_reader(&profile, path, reader, chunk_size, |bytes| {
+                        on_chunk(bytes)
+                    })
+                    .await
+                    .map_err(app_error)
+                    .map(|_| ())
+                }
                 _ => Err(format!(
                     "Protocolo {} nao suportado para upload remoto.",
                     protocol_label(protocol)
@@ -1049,7 +1047,10 @@ fn key_actions_set_active_workspace(
     state: State<'_, AppState>,
     target: Option<KeyActionsActiveTargetInput>,
 ) -> Result<(), String> {
-    state.key_actions.set_active_target(target).map_err(app_error)?;
+    state
+        .key_actions
+        .set_active_target(target)
+        .map_err(app_error)?;
     Ok(())
 }
 
@@ -1294,9 +1295,9 @@ async fn remote_profile_list(
 ) -> Result<Vec<SftpEntry>, String> {
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     match protocol {
-        ConnectionProtocol::Ftp => remote_fs::ftp_list(&profile, &path, false).map_err(app_error),
-        ConnectionProtocol::Ftps => remote_fs::ftp_list(&profile, &path, true).map_err(app_error),
-        ConnectionProtocol::Smb => remote_fs::smb_list(&profile, &path).await.map_err(app_error),
+        ConnectionProtocol::Ftp => ftp::list(&profile, &path, false).map_err(app_error),
+        ConnectionProtocol::Ftps => ftp::list(&profile, &path, true).map_err(app_error),
+        ConnectionProtocol::Smb => smb::list(&profile, &path).await.map_err(app_error),
         _ => Err(format!(
             "Protocolo {} nao suportado para listagem remota.",
             protocol_label(&protocol)
@@ -1314,9 +1315,9 @@ async fn remote_profile_read(
     let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     match protocol {
-        ConnectionProtocol::Ftp => remote_fs::ftp_read(&profile, &path, false).map_err(app_error),
-        ConnectionProtocol::Ftps => remote_fs::ftp_read(&profile, &path, true).map_err(app_error),
-        ConnectionProtocol::Smb => remote_fs::smb_read(&profile, &path, chunk_size)
+        ConnectionProtocol::Ftp => ftp::read(&profile, &path, false).map_err(app_error),
+        ConnectionProtocol::Ftps => ftp::read(&profile, &path, true).map_err(app_error),
+        ConnectionProtocol::Smb => smb::read(&profile, &path, chunk_size)
             .await
             .map_err(app_error),
         _ => Err(format!(
@@ -1338,12 +1339,12 @@ async fn remote_profile_read_chunk(
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     let (chunk, total, eof) = match protocol {
         ConnectionProtocol::Ftp => {
-            remote_fs::ftp_read_chunk(&profile, &path, offset, chunk_size, false).map_err(app_error)?
+            ftp::read_chunk(&profile, &path, offset, chunk_size, false).map_err(app_error)?
         }
         ConnectionProtocol::Ftps => {
-            remote_fs::ftp_read_chunk(&profile, &path, offset, chunk_size, true).map_err(app_error)?
+            ftp::read_chunk(&profile, &path, offset, chunk_size, true).map_err(app_error)?
         }
-        ConnectionProtocol::Smb => remote_fs::smb_read_chunk(&profile, &path, offset, chunk_size)
+        ConnectionProtocol::Smb => smb::read_chunk(&profile, &path, offset, chunk_size)
             .await
             .map_err(app_error)?,
         _ => {
@@ -1374,12 +1375,12 @@ async fn remote_profile_write(
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     match protocol {
         ConnectionProtocol::Ftp => {
-            remote_fs::ftp_write(&profile, &path, &content, chunk_size, false).map_err(app_error)
+            ftp::write(&profile, &path, &content, chunk_size, false).map_err(app_error)
         }
         ConnectionProtocol::Ftps => {
-            remote_fs::ftp_write(&profile, &path, &content, chunk_size, true).map_err(app_error)
+            ftp::write(&profile, &path, &content, chunk_size, true).map_err(app_error)
         }
-        ConnectionProtocol::Smb => remote_fs::smb_write(&profile, &path, &content, chunk_size)
+        ConnectionProtocol::Smb => smb::write(&profile, &path, &content, chunk_size)
             .await
             .map_err(app_error),
         _ => Err(format!(
@@ -1400,12 +1401,12 @@ async fn remote_profile_rename(
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     match protocol {
         ConnectionProtocol::Ftp => {
-            remote_fs::ftp_rename(&profile, &from_path, &to_path, false).map_err(app_error)
+            ftp::rename(&profile, &from_path, &to_path, false).map_err(app_error)
         }
         ConnectionProtocol::Ftps => {
-            remote_fs::ftp_rename(&profile, &from_path, &to_path, true).map_err(app_error)
+            ftp::rename(&profile, &from_path, &to_path, true).map_err(app_error)
         }
-        ConnectionProtocol::Smb => remote_fs::smb_rename(&profile, &from_path, &to_path)
+        ConnectionProtocol::Smb => smb::rename(&profile, &from_path, &to_path)
             .await
             .map_err(app_error),
         _ => Err(format!(
@@ -1425,13 +1426,9 @@ async fn remote_profile_delete(
 ) -> Result<(), String> {
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     match protocol {
-        ConnectionProtocol::Ftp => {
-            remote_fs::ftp_delete(&profile, &path, is_dir, false).map_err(app_error)
-        }
-        ConnectionProtocol::Ftps => {
-            remote_fs::ftp_delete(&profile, &path, is_dir, true).map_err(app_error)
-        }
-        ConnectionProtocol::Smb => remote_fs::smb_delete(&profile, &path).await.map_err(app_error),
+        ConnectionProtocol::Ftp => ftp::delete(&profile, &path, is_dir, false).map_err(app_error),
+        ConnectionProtocol::Ftps => ftp::delete(&profile, &path, is_dir, true).map_err(app_error),
+        ConnectionProtocol::Smb => smb::delete(&profile, &path).await.map_err(app_error),
         _ => Err(format!(
             "Protocolo {} nao suportado para remocao remota.",
             protocol_label(&protocol)
@@ -1448,9 +1445,9 @@ async fn remote_profile_mkdir(
 ) -> Result<(), String> {
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     match protocol {
-        ConnectionProtocol::Ftp => remote_fs::ftp_mkdir(&profile, &path, false).map_err(app_error),
-        ConnectionProtocol::Ftps => remote_fs::ftp_mkdir(&profile, &path, true).map_err(app_error),
-        ConnectionProtocol::Smb => remote_fs::smb_mkdir(&profile, &path).await.map_err(app_error),
+        ConnectionProtocol::Ftp => ftp::mkdir(&profile, &path, false).map_err(app_error),
+        ConnectionProtocol::Ftps => ftp::mkdir(&profile, &path, true).map_err(app_error),
+        ConnectionProtocol::Smb => smb::mkdir(&profile, &path).await.map_err(app_error),
         _ => Err(format!(
             "Protocolo {} nao suportado para criacao de pasta remota.",
             protocol_label(&protocol)
@@ -1467,15 +1464,9 @@ async fn remote_profile_create_file(
 ) -> Result<(), String> {
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
     match protocol {
-        ConnectionProtocol::Ftp => {
-            remote_fs::ftp_create_file(&profile, &path, false).map_err(app_error)
-        }
-        ConnectionProtocol::Ftps => {
-            remote_fs::ftp_create_file(&profile, &path, true).map_err(app_error)
-        }
-        ConnectionProtocol::Smb => remote_fs::smb_create_file(&profile, &path)
-            .await
-            .map_err(app_error),
+        ConnectionProtocol::Ftp => ftp::create_file(&profile, &path, false).map_err(app_error),
+        ConnectionProtocol::Ftps => ftp::create_file(&profile, &path, true).map_err(app_error),
+        ConnectionProtocol::Smb => smb::create_file(&profile, &path).await.map_err(app_error),
         _ => Err(format!(
             "Protocolo {} nao suportado para criacao de arquivo remoto.",
             protocol_label(&protocol)
@@ -1496,9 +1487,9 @@ async fn remote_profile_read_binary_preview(
     let profile = resolve_profile_for_file_protocol(&state, &profile_id, &protocol).await?;
 
     let remote_size = match protocol {
-        ConnectionProtocol::Ftp => remote_fs::ftp_file_size(&profile, &path, false).map_err(app_error)?,
-        ConnectionProtocol::Ftps => remote_fs::ftp_file_size(&profile, &path, true).map_err(app_error)?,
-        ConnectionProtocol::Smb => remote_fs::smb_file_size(&profile, &path).await.map_err(app_error)?,
+        ConnectionProtocol::Ftp => ftp::file_size(&profile, &path, false).map_err(app_error)?,
+        ConnectionProtocol::Ftps => ftp::file_size(&profile, &path, true).map_err(app_error)?,
+        ConnectionProtocol::Smb => smb::file_size(&profile, &path).await.map_err(app_error)?,
         _ => {
             return Err(format!(
                 "Protocolo {} nao suportado para preview remoto.",
@@ -1513,12 +1504,12 @@ async fn remote_profile_read_binary_preview(
 
     let content = match protocol {
         ConnectionProtocol::Ftp => {
-            remote_fs::ftp_read_bytes_with_limit(&profile, &path, limit, false).map_err(app_error)?
+            ftp::read_bytes_with_limit(&profile, &path, limit, false).map_err(app_error)?
         }
         ConnectionProtocol::Ftps => {
-            remote_fs::ftp_read_bytes_with_limit(&profile, &path, limit, true).map_err(app_error)?
+            ftp::read_bytes_with_limit(&profile, &path, limit, true).map_err(app_error)?
         }
-        ConnectionProtocol::Smb => remote_fs::smb_read_bytes_with_limit(&profile, &path, chunk_size, limit)
+        ConnectionProtocol::Smb => smb::read_bytes_with_limit(&profile, &path, chunk_size, limit)
             .await
             .map_err(app_error)?,
         _ => None,
@@ -1556,127 +1547,144 @@ async fn remote_transfer(
     let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
 
     let source_size = endpoint_file_size(&state, &from_endpoint, &from_path).await?;
-    let progress_total = if !endpoint_is_local(&from_endpoint) && !endpoint_is_local(&to_endpoint) {
-        source_size.map(|size| size.saturating_mul(2))
-    } else {
-        source_size
-    };
-    let mut transferred = 0u64;
+    // `remote_transfer` always runs through OpenPtl staging (download + upload),
+    // so the same bytes are processed in two phases.
+    let progress_total = source_size.map(|size| size.saturating_mul(2));
+    let transferred = Arc::new(StdMutex::new(0u64));
     let _ = app.emit(&state_event, "running");
 
-    match (&from_endpoint, &to_endpoint) {
-        (
-            RemoteTransferEndpointInput::SftpSession { session_id: from_session },
-            RemoteTransferEndpointInput::SftpSession { session_id: to_session },
-        ) => {
-            let should_try_remote_copy = {
-                let ssh = state.ssh.lock().await;
-                from_session == to_session || ssh.sessions_share_profile(from_session, to_session)
+    if let (
+        RemoteTransferEndpointInput::SftpSession {
+            session_id: from_session,
+        },
+        RemoteTransferEndpointInput::SftpSession {
+            session_id: to_session,
+        },
+    ) = (&from_endpoint, &to_endpoint)
+    {
+        let should_try_remote_copy = {
+            let ssh = state.ssh.lock().await;
+            from_session == to_session || ssh.sessions_share_profile(from_session, to_session)
+        };
+
+        if should_try_remote_copy {
+            let remote_copy = {
+                let mut ssh = state.ssh.lock().await;
+                ssh.sftp_copy_between_sessions(from_session, to_session, &from_path, &to_path)
             };
 
-            if should_try_remote_copy {
-                let remote_copy = {
-                    let mut ssh = state.ssh.lock().await;
-                    ssh.sftp_copy_between_sessions(from_session, to_session, &from_path, &to_path)
-                };
-
-                if remote_copy.is_ok() {
-                    let _ = app.emit(&progress_event, 100u8);
-                    let _ = app.emit(&state_event, "completed");
-                    return Ok(());
-                }
+            if remote_copy.is_ok() {
+                let _ = app.emit(&progress_event, 100u8);
+                let _ = app.emit(&state_event, "completed");
+                return Ok(());
             }
-
-            let mut temp_file = NamedTempFile::new().map_err(app_error)?;
-            endpoint_download_to_writer(
-                &state,
-                &from_endpoint,
-                &from_path,
-                temp_file.as_file_mut(),
-                chunk_size,
-                |bytes| {
-                    transferred = transferred.saturating_add(bytes);
-                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
-                },
-            )
-            .await?;
-
-            let mut reader = temp_file.reopen().map_err(app_error)?;
-            reader.seek(SeekFrom::Start(0)).map_err(app_error)?;
-            endpoint_upload_from_reader(
-                &state,
-                &to_endpoint,
-                &to_path,
-                &mut reader,
-                chunk_size,
-                |bytes| {
-                    transferred = transferred.saturating_add(bytes);
-                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
-                },
-            )
-            .await?;
-        }
-        _ if !endpoint_is_local(&from_endpoint) && !endpoint_is_local(&to_endpoint) => {
-            let mut temp_file = NamedTempFile::new().map_err(app_error)?;
-            endpoint_download_to_writer(
-                &state,
-                &from_endpoint,
-                &from_path,
-                temp_file.as_file_mut(),
-                chunk_size,
-                |bytes| {
-                    transferred = transferred.saturating_add(bytes);
-                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
-                },
-            )
-            .await?;
-
-            let mut reader = temp_file.reopen().map_err(app_error)?;
-            reader.seek(SeekFrom::Start(0)).map_err(app_error)?;
-            endpoint_upload_from_reader(
-                &state,
-                &to_endpoint,
-                &to_path,
-                &mut reader,
-                chunk_size,
-                |bytes| {
-                    transferred = transferred.saturating_add(bytes);
-                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
-                },
-            )
-            .await?;
-        }
-        _ => {
-            let mut temp_file = NamedTempFile::new().map_err(app_error)?;
-            endpoint_download_to_writer(
-                &state,
-                &from_endpoint,
-                &from_path,
-                temp_file.as_file_mut(),
-                chunk_size,
-                |bytes| {
-                    transferred = transferred.saturating_add(bytes);
-                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
-                },
-            )
-            .await?;
-
-            let mut reader = temp_file.reopen().map_err(app_error)?;
-            reader.seek(SeekFrom::Start(0)).map_err(app_error)?;
-            endpoint_upload_from_reader(
-                &state,
-                &to_endpoint,
-                &to_path,
-                &mut reader,
-                chunk_size,
-                |bytes| {
-                    transferred = transferred.saturating_add(bytes);
-                    emit_transfer_progress(&app, &progress_event, transferred, progress_total);
-                },
-            )
-            .await?;
         }
     }
+
+    let bridge = SharedFsBridge::new(
+        TaskManager::default(),
+        TransferJobConfig {
+            initial_chunk_size: chunk_size,
+            ..TransferJobConfig::default()
+        },
+    );
+    let job = SharedFsJob {
+        task_id: transfer_id.clone(),
+        source: TransferEndpoint::new(
+            endpoint_to_shared_fs_protocol(&from_endpoint),
+            endpoint_to_shared_fs_label(&from_endpoint),
+        ),
+        target: TransferEndpoint::new(
+            endpoint_to_shared_fs_protocol(&to_endpoint),
+            endpoint_to_shared_fs_label(&to_endpoint),
+        ),
+        source_path: from_path.clone(),
+        target_path: to_path.clone(),
+    };
+
+    let progress_event_for_download = progress_event.clone();
+    let progress_event_for_upload = progress_event.clone();
+    let transferred_for_download = transferred.clone();
+    let transferred_for_upload = transferred.clone();
+    let app_for_download = app.clone();
+    let app_for_upload = app.clone();
+    let from_endpoint_for_download = from_endpoint.clone();
+    let to_endpoint_for_upload = to_endpoint.clone();
+    let from_path_for_download = from_path.clone();
+    let to_path_for_upload = to_path.clone();
+    let state_ref = &state;
+
+    bridge
+        .copy_via_openptl_staging_async(
+            job,
+            move |spool_path, _chunk_size| {
+                let spool_path = spool_path.to_path_buf();
+                let from_endpoint = from_endpoint_for_download.clone();
+                let from_path = from_path_for_download.clone();
+                let transferred_for_download = transferred_for_download.clone();
+                let progress_event_for_download = progress_event_for_download.clone();
+                let app_for_download = app_for_download.clone();
+                async move {
+                    let mut spool = fs::File::create(&spool_path).map_err(app_error)?;
+                endpoint_download_to_writer(
+                    state_ref,
+                    &from_endpoint,
+                    from_path.as_str(),
+                    &mut spool,
+                    chunk_size,
+                    |bytes| {
+                        if let Ok(mut total) = transferred_for_download.lock() {
+                            *total = total.saturating_add(bytes);
+                            emit_transfer_progress(
+                                &app_for_download,
+                                &progress_event_for_download,
+                                *total,
+                                progress_total,
+                            );
+                        }
+                    },
+                )
+                .await?;
+
+                    let file_size = fs::metadata(&spool_path).map_err(app_error)?.len();
+                    Ok(file_size)
+                }
+            },
+            move |spool_path, _chunk_size| {
+                let spool_path = spool_path.to_path_buf();
+                let to_endpoint = to_endpoint_for_upload.clone();
+                let to_path = to_path_for_upload.clone();
+                let transferred_for_upload = transferred_for_upload.clone();
+                let progress_event_for_upload = progress_event_for_upload.clone();
+                let app_for_upload = app_for_upload.clone();
+                async move {
+                    let mut reader = fs::File::open(&spool_path).map_err(app_error)?;
+                endpoint_upload_from_reader(
+                    state_ref,
+                    &to_endpoint,
+                    to_path.as_str(),
+                    &mut reader,
+                    chunk_size,
+                    |bytes| {
+                        if let Ok(mut total) = transferred_for_upload.lock() {
+                            *total = total.saturating_add(bytes);
+                            emit_transfer_progress(
+                                &app_for_upload,
+                                &progress_event_for_upload,
+                                *total,
+                                progress_total,
+                            );
+                        }
+                    },
+                )
+                .await?;
+
+                    let file_size = fs::metadata(&spool_path).map_err(app_error)?.len();
+                    Ok(file_size)
+                }
+            },
+        )
+        .await?;
 
     let _ = app.emit(&progress_event, 100u8);
     let _ = app.emit(&state_event, "completed");
@@ -2163,75 +2171,6 @@ async fn clipboard_local_items() -> Result<Vec<ClipboardLocalItemPayload>, Strin
 }
 
 #[tauri::command]
-async fn auth_servers_list(state: State<'_, AppState>) -> Result<Vec<AuthServer>, String> {
-    let vault = state.vault.lock().await;
-    vault.auth_servers_list().map_err(app_error)
-}
-
-const AUTH_SERVERS_RAW_URL: &str =
-    "https://raw.githubusercontent.com/urubucode/TermOpen/main/auth-servers.json";
-
-#[tauri::command]
-async fn auth_server_save(
-    state: State<'_, AppState>,
-    server: AuthServer,
-) -> Result<AuthServer, String> {
-    let mut vault = state.vault.lock().await;
-    vault.auth_server_save(server).map_err(app_error)
-}
-
-#[tauri::command]
-async fn auth_server_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut vault = state.vault.lock().await;
-    vault.auth_server_delete(&id).map_err(app_error)
-}
-
-const AUTH_SERVERS_LOCAL_FALLBACK: &str = include_str!("../../auth-servers.json");
-
-#[tauri::command]
-async fn auth_servers_fetch_remote(state: State<'_, AppState>) -> Result<Vec<AuthServer>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    // Sempre carregar local
-    let local = load_local_servers();
-
-    // Tentar buscar do GitHub
-    let remote: Vec<AuthServer> = match client.get(AUTH_SERVERS_RAW_URL).send().await {
-        Ok(response) if response.status().is_success() => response.json().await.unwrap_or_default(),
-        _ => vec![],
-    };
-
-    // Merge: remote + local (remote tem prioridade, local complementa)
-    let mut merged = remote;
-    for server in local {
-        if !merged.iter().any(|s| s.id == server.id) {
-            merged.push(server);
-        }
-    }
-    if !merged.iter().any(|server| server.id == "default") {
-        merged.push(models::AuthServer::default_server());
-    }
-    merged.sort_by(|a, b| a.label.cmp(&b.label));
-
-    let mut vault = state.vault.lock().await;
-    if vault.merge_remote_servers(merged.clone()).is_ok() {
-        if let Ok(list) = vault.auth_servers_list() {
-            return Ok(list);
-        }
-    }
-
-    Ok(merged)
-}
-
-fn load_local_servers() -> Vec<AuthServer> {
-    serde_json::from_str(AUTH_SERVERS_LOCAL_FALLBACK)
-        .unwrap_or_else(|_| vec![models::AuthServer::default_server()])
-}
-
-#[tauri::command]
 async fn sync_google_login(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -2265,7 +2204,7 @@ async fn sync_cancel(app: tauri::AppHandle) -> Result<SyncState, String> {
     Ok(state)
 }
 
-fn resolve_server_addresses(vault: &vault::VaultManager) -> Result<(String, Vec<String>), String> {
+fn resolve_server_addresses(vault: &libs::vault::VaultManager) -> Result<(String, Vec<String>), String> {
     let primary = vault.selected_auth_server().map_err(app_error)?.address;
     let fallbacks: Vec<String> = vault
         .auth_servers_list()
@@ -2278,7 +2217,7 @@ fn resolve_server_addresses(vault: &vault::VaultManager) -> Result<(String, Vec<
 }
 
 fn resolve_server_addresses_with_override(
-    vault: &vault::VaultManager,
+    vault: &libs::vault::VaultManager,
     override_address: Option<String>,
 ) -> Result<(String, Vec<String>), String> {
     if let Some(primary) = override_address
@@ -2412,7 +2351,7 @@ async fn open_external_editor(
     command: Option<String>,
 ) -> Result<(), String> {
     let safe_name = sanitize_filename(&filename);
-    let dir = std::env::temp_dir().join("termopen-editor");
+    let dir = std::env::temp_dir().join(EXTERNAL_EDITOR_TEMP_DIR);
     fs::create_dir_all(&dir).map_err(app_error)?;
 
     let file_path = dir.join(safe_name);
@@ -2469,7 +2408,7 @@ async fn ssh_key_generate(input: SshKeyGenerateInput) -> Result<SshKeyGenerateRe
     let algorithm = input.algorithm.trim().to_ascii_lowercase();
     let normalized_passphrase = normalize_optional_input(input.passphrase).unwrap_or_default();
     let normalized_comment = normalize_optional_input(input.comment)
-        .unwrap_or_else(|| "connecthub-generated".to_string());
+        .unwrap_or_else(|| DEFAULT_SSH_KEY_COMMENT.to_string());
 
     let (key_type, bits, name_prefix) = match algorithm.as_str() {
         "ed25519" => ("ed25519", None, "id_ed25519"),
@@ -2528,19 +2467,11 @@ async fn ssh_key_generate(input: SshKeyGenerateInput) -> Result<SshKeyGenerateRe
         return Err(app_error(format!("ssh-keygen retornou erro: {}", reason)));
     }
 
-    let private_key = fs::read_to_string(&key_path).map_err(|error| {
-        app_error(format!(
-            "Falha ao ler chave privada gerada ({})",
-            error
-        ))
-    })?;
+    let private_key = fs::read_to_string(&key_path)
+        .map_err(|error| app_error(format!("Falha ao ler chave privada gerada ({})", error)))?;
     let public_key_path = PathBuf::from(format!("{}.pub", key_path.to_string_lossy()));
-    let public_key = fs::read_to_string(&public_key_path).map_err(|error| {
-        app_error(format!(
-            "Falha ao ler chave publica gerada ({})",
-            error
-        ))
-    })?;
+    let public_key = fs::read_to_string(&public_key_path)
+        .map_err(|error| app_error(format!("Falha ao ler chave publica gerada ({})", error)))?;
 
     let fingerprint_output = Command::new("ssh-keygen")
         .arg("-lf")
@@ -2646,7 +2577,7 @@ async fn release_check_latest() -> Result<ReleaseCheckResult, String> {
 
     let response = match client
         .get(RELEASES_LATEST_URL)
-        .header("User-Agent", "TermOpen-Updater")
+        .header("User-Agent", RELEASE_CHECK_USER_AGENT)
         .send()
         .await
     {
@@ -2731,7 +2662,7 @@ fn sanitize_filename(filename: &str) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "termopen-file.txt".to_string())
+        .unwrap_or_else(|| DEFAULT_EXTERNAL_FILE_NAME.to_string())
 }
 
 fn run_custom_editor_command(command_template: &str, file_path: &Path) -> Result<(), String> {
@@ -2805,11 +2736,12 @@ fn focus_main_window(app: &tauri::AppHandle) {
 }
 
 fn sanitize_deep_link_input(input: &str) -> String {
+    let malformed_scheme = format!("{OPENPTL_SCHEME}:://");
+    let normalized_scheme = format!("{OPENPTL_SCHEME}://");
     input
         .trim()
         .trim_matches('"')
-        .replace("termopen:://", "termopen://")
-        .replace("openterm:://", "openterm://")
+        .replace(malformed_scheme.as_str(), normalized_scheme.as_str())
 }
 
 fn deep_link_scheme(payload: &str) -> Option<&str> {
@@ -2822,7 +2754,7 @@ fn is_supported_deep_link(payload: &str) -> bool {
     };
     matches!(
         scheme.to_ascii_lowercase().as_str(),
-        "termopen" | "openterm" | "ssh" | "sftp" | "rdp"
+        OPENPTL_SCHEME | "ssh" | "sftp" | "rdp"
     )
 }
 
@@ -3028,10 +2960,10 @@ pub fn run() {
             local_read_binary_preview,
             local_stat,
             clipboard_local_items,
-            auth_servers_list,
-            auth_server_save,
-            auth_server_delete,
-            auth_servers_fetch_remote,
+            commands::auth::auth_servers_list,
+            commands::auth::auth_server_save,
+            commands::auth::auth_server_delete,
+            commands::auth::auth_servers_fetch_remote,
             sync_google_login,
             sync_logged_user,
             sync_cancel,
@@ -3054,3 +2986,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

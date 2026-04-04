@@ -1,7 +1,7 @@
 use std::{
     io::{Read, Write},
     sync::Arc,
-    time::{Duration, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -9,17 +9,12 @@ use futures_util::StreamExt;
 use smb::binrw_util::prelude::SizedWideString;
 use smb::{
     Client, ClientConfig, CreateOptions, DirAccessMask, Directory, FileAccessMask, FileAttributes,
-    FileCreateArgs, FileDispositionInformation, FileIdBothDirectoryInformation, FileRenameInformation,
-    GetLen, ReadAt, Resource, UncPath, WriteAt,
-};
-use suppaftp::{
-    NativeTlsConnector, NativeTlsFtpStream, native_tls::TlsConnector,
+    FileCreateArgs, FileDispositionInformation, FileIdBothDirectoryInformation,
+    FileRenameInformation, GetLen, ReadAt, Resource, UncPath, WriteAt,
 };
 
-use crate::models::{ConnectionProfile, SftpEntry};
-
-const FTP_DEFAULT_PORT: u16 = 21;
-const SMB_DEFAULT_PORT: u16 = 445;
+use crate::constants::SMB_DEFAULT_PORT;
+use crate::libs::models::{ConnectionProfile, SftpEntry};
 
 fn normalize_chunk_size(chunk_size: usize) -> usize {
     chunk_size.max(32 * 1024).min(8 * 1024 * 1024)
@@ -41,313 +36,6 @@ fn require_profile_password(profile: &ConnectionProfile) -> Result<String> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("Senha obrigatoria para autenticar no host remoto."))?;
     Ok(password)
-}
-
-fn normalize_ftp_path(path: &str) -> String {
-    let normalized = path.trim().replace('\\', "/");
-    if normalized.is_empty() {
-        "/".to_string()
-    } else if normalized.starts_with('/') {
-        normalized
-    } else {
-        format!("/{}", normalized)
-    }
-}
-
-fn join_ftp_child(base_path: &str, name: &str) -> String {
-    if base_path == "/" {
-        format!("/{}", name.trim_start_matches('/'))
-    } else {
-        format!(
-            "{}/{}",
-            base_path.trim_end_matches('/'),
-            name.trim_start_matches('/')
-        )
-    }
-}
-
-fn connect_ftp(profile: &ConnectionProfile, secure: bool) -> Result<NativeTlsFtpStream> {
-    let host = require_profile_host(profile)?;
-    let username = profile.username.trim().to_string();
-    let password = require_profile_password(profile)?;
-    let port = if profile.port == 0 {
-        FTP_DEFAULT_PORT
-    } else {
-        profile.port
-    };
-    let address = format!("{}:{}", host, port);
-
-    let mut ftp = NativeTlsFtpStream::connect(address.as_str())
-        .with_context(|| format!("Falha ao conectar FTP em {}", address))?;
-    ftp.get_ref().set_read_timeout(Some(Duration::from_secs(30))).ok();
-    ftp.get_ref()
-        .set_write_timeout(Some(Duration::from_secs(30)))
-        .ok();
-
-    if secure {
-        let connector = TlsConnector::new().context("Falha ao inicializar TLS para FTPS.")?;
-        ftp = ftp
-            .into_secure(NativeTlsConnector::from(connector), host.as_str())
-            .context("Falha ao negociar canal TLS FTPS.")?;
-    }
-
-    ftp.login(username.as_str(), password.as_str())
-        .with_context(|| format!("Falha de autenticacao FTP para {}", username))?;
-
-    Ok(ftp)
-}
-
-pub fn ftp_list(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<Vec<SftpEntry>> {
-    let mut ftp = connect_ftp(profile, secure)?;
-    let normalized_path = normalize_ftp_path(path);
-
-    let raw_entries = ftp
-        .mlsd(Some(normalized_path.as_str()))
-        .or_else(|_| ftp.list(Some(normalized_path.as_str())))
-        .with_context(|| format!("Falha ao listar diretorio FTP {}", normalized_path))?;
-
-    let mut entries = Vec::new();
-    for line in raw_entries {
-        let parsed = suppaftp::list::File::try_from(line.as_str());
-        if let Ok(file) = parsed {
-            let name = file.name().trim().to_string();
-            if name.is_empty() || name == "." || name == ".." {
-                continue;
-            }
-
-            let modified_at = file
-                .modified()
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .map(|duration| duration.as_secs() as i64);
-
-            entries.push(SftpEntry {
-                name: name.clone(),
-                path: join_ftp_child(normalized_path.as_str(), name.as_str()),
-                is_dir: file.is_directory(),
-                size: file.size() as u64,
-                permissions: None,
-                modified_at,
-            });
-        }
-    }
-
-    entries.sort_by(|left, right| left.name.cmp(&right.name));
-    let _ = ftp.quit();
-    Ok(entries)
-}
-
-pub fn ftp_download_to_writer<W, F>(
-    profile: &ConnectionProfile,
-    path: &str,
-    writer: &mut W,
-    chunk_size: usize,
-    secure: bool,
-    mut on_chunk: F,
-) -> Result<u64>
-where
-    W: Write,
-    F: FnMut(u64),
-{
-    let mut ftp = connect_ftp(profile, secure)?;
-    let normalized_path = normalize_ftp_path(path);
-    let mut stream = ftp
-        .retr_as_stream(normalized_path.as_str())
-        .with_context(|| format!("Falha ao iniciar download FTP: {}", normalized_path))?;
-
-    let mut transferred = 0u64;
-    let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
-    loop {
-        let size = stream
-            .read(&mut buffer)
-            .with_context(|| format!("Falha ao ler stream FTP: {}", normalized_path))?;
-        if size == 0 {
-            break;
-        }
-        writer
-            .write_all(&buffer[..size])
-            .with_context(|| format!("Falha ao escrever dados FTP em destino local: {}", normalized_path))?;
-        transferred = transferred.saturating_add(size as u64);
-        on_chunk(size as u64);
-    }
-
-    ftp.finalize_retr_stream(stream)
-        .with_context(|| format!("Falha ao finalizar download FTP: {}", normalized_path))?;
-    let _ = ftp.quit();
-
-    Ok(transferred)
-}
-
-pub fn ftp_upload_from_reader<R, F>(
-    profile: &ConnectionProfile,
-    path: &str,
-    reader: &mut R,
-    chunk_size: usize,
-    secure: bool,
-    mut on_chunk: F,
-) -> Result<u64>
-where
-    R: Read,
-    F: FnMut(u64),
-{
-    let mut ftp = connect_ftp(profile, secure)?;
-    let normalized_path = normalize_ftp_path(path);
-    let mut stream = ftp
-        .put_with_stream(normalized_path.as_str())
-        .with_context(|| format!("Falha ao iniciar upload FTP: {}", normalized_path))?;
-
-    let mut transferred = 0u64;
-    let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
-    loop {
-        let size = reader
-            .read(&mut buffer)
-            .with_context(|| format!("Falha ao ler origem para upload FTP: {}", normalized_path))?;
-        if size == 0 {
-            break;
-        }
-
-        stream
-            .write_all(&buffer[..size])
-            .with_context(|| format!("Falha ao escrever stream FTP: {}", normalized_path))?;
-        transferred = transferred.saturating_add(size as u64);
-        on_chunk(size as u64);
-    }
-
-    ftp.finalize_put_stream(stream)
-        .with_context(|| format!("Falha ao finalizar upload FTP: {}", normalized_path))?;
-    let _ = ftp.quit();
-
-    Ok(transferred)
-}
-
-pub fn ftp_read(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<String> {
-    let bytes = ftp_read_bytes(profile, path, secure)?;
-    Ok(String::from_utf8_lossy(&bytes).to_string())
-}
-
-pub fn ftp_read_bytes(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<Vec<u8>> {
-    let mut ftp = connect_ftp(profile, secure)?;
-    let normalized_path = normalize_ftp_path(path);
-    let bytes = ftp
-        .retr_as_buffer(normalized_path.as_str())
-        .with_context(|| format!("Falha ao ler arquivo FTP {}", normalized_path))?
-        .into_inner();
-    let _ = ftp.quit();
-    Ok(bytes)
-}
-
-pub fn ftp_read_bytes_with_limit(
-    profile: &ConnectionProfile,
-    path: &str,
-    max_bytes: u64,
-    secure: bool,
-) -> Result<Option<Vec<u8>>> {
-    let normalized_path = normalize_ftp_path(path);
-    if let Some(size) = ftp_file_size(profile, normalized_path.as_str(), secure)? {
-        if size > max_bytes {
-            return Ok(None);
-        }
-    }
-
-    let bytes = ftp_read_bytes(profile, normalized_path.as_str(), secure)?;
-    if (bytes.len() as u64) > max_bytes {
-        return Ok(None);
-    }
-    Ok(Some(bytes))
-}
-
-pub fn ftp_read_chunk(
-    profile: &ConnectionProfile,
-    path: &str,
-    offset: u64,
-    chunk_size: usize,
-    secure: bool,
-) -> Result<(Vec<u8>, u64, bool)> {
-    let bytes = ftp_read_bytes(profile, path, secure)?;
-    let total = bytes.len() as u64;
-    let start = offset.min(total) as usize;
-    let end = (offset.saturating_add(normalize_chunk_size(chunk_size) as u64)).min(total) as usize;
-    let chunk = bytes[start..end].to_vec();
-    let eof = end as u64 >= total;
-    Ok((chunk, total, eof))
-}
-
-pub fn ftp_write(
-    profile: &ConnectionProfile,
-    path: &str,
-    content: &str,
-    chunk_size: usize,
-    secure: bool,
-) -> Result<()> {
-    ftp_write_bytes(profile, path, content.as_bytes(), chunk_size, secure)
-}
-
-pub fn ftp_write_bytes(
-    profile: &ConnectionProfile,
-    path: &str,
-    content: &[u8],
-    chunk_size: usize,
-    secure: bool,
-) -> Result<()> {
-    let mut cursor = std::io::Cursor::new(content);
-    ftp_upload_from_reader(profile, path, &mut cursor, chunk_size, secure, |_| {})?;
-    Ok(())
-}
-
-pub fn ftp_rename(
-    profile: &ConnectionProfile,
-    from_path: &str,
-    to_path: &str,
-    secure: bool,
-) -> Result<()> {
-    let mut ftp = connect_ftp(profile, secure)?;
-    let from = normalize_ftp_path(from_path);
-    let to = normalize_ftp_path(to_path);
-    ftp.rename(from.as_str(), to.as_str())
-        .with_context(|| format!("Falha ao renomear FTP de {} para {}", from, to))?;
-    let _ = ftp.quit();
-    Ok(())
-}
-
-pub fn ftp_delete(profile: &ConnectionProfile, path: &str, is_dir: bool, secure: bool) -> Result<()> {
-    let mut ftp = connect_ftp(profile, secure)?;
-    let target = normalize_ftp_path(path);
-    if is_dir {
-        ftp.rmdir(target.as_str())
-            .with_context(|| format!("Falha ao remover pasta FTP {}", target))?;
-    } else {
-        ftp.rm(target.as_str())
-            .with_context(|| format!("Falha ao remover arquivo FTP {}", target))?;
-    }
-    let _ = ftp.quit();
-    Ok(())
-}
-
-pub fn ftp_mkdir(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<()> {
-    let mut ftp = connect_ftp(profile, secure)?;
-    let target = normalize_ftp_path(path);
-    ftp.mkdir(target.as_str())
-        .with_context(|| format!("Falha ao criar pasta FTP {}", target))?;
-    let _ = ftp.quit();
-    Ok(())
-}
-
-pub fn ftp_create_file(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<()> {
-    let mut ftp = connect_ftp(profile, secure)?;
-    let target = normalize_ftp_path(path);
-    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
-    ftp.put_file(target.as_str(), &mut cursor)
-        .with_context(|| format!("Falha ao criar arquivo FTP {}", target))?;
-    let _ = ftp.quit();
-    Ok(())
-}
-
-pub fn ftp_file_size(profile: &ConnectionProfile, path: &str, secure: bool) -> Result<Option<u64>> {
-    let mut ftp = connect_ftp(profile, secure)?;
-    let target = normalize_ftp_path(path);
-    let size = ftp.size(target.as_str()).ok().map(|value| value as u64);
-    let _ = ftp.quit();
-    Ok(size)
 }
 
 fn normalize_smb_virtual_path(path: &str) -> String {
@@ -842,4 +530,87 @@ pub async fn smb_create_file(profile: &ConnectionProfile, path: &str) -> Result<
     file.close().await.ok();
     client.close().await.ok();
     Ok(())
+}
+
+pub async fn list(profile: &ConnectionProfile, path: &str) -> Result<Vec<SftpEntry>> {
+    smb_list(profile, path).await
+}
+
+pub async fn read(profile: &ConnectionProfile, path: &str, chunk_size: usize) -> Result<String> {
+    smb_read(profile, path, chunk_size).await
+}
+
+pub async fn read_chunk(
+    profile: &ConnectionProfile,
+    path: &str,
+    offset: u64,
+    chunk_size: usize,
+) -> Result<(Vec<u8>, u64, bool)> {
+    smb_read_chunk(profile, path, offset, chunk_size).await
+}
+
+pub async fn read_bytes_with_limit(
+    profile: &ConnectionProfile,
+    path: &str,
+    chunk_size: usize,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>> {
+    smb_read_bytes_with_limit(profile, path, chunk_size, max_bytes).await
+}
+
+pub async fn write(
+    profile: &ConnectionProfile,
+    path: &str,
+    content: &str,
+    chunk_size: usize,
+) -> Result<()> {
+    smb_write(profile, path, content, chunk_size).await
+}
+
+pub async fn rename(profile: &ConnectionProfile, from_path: &str, to_path: &str) -> Result<()> {
+    smb_rename(profile, from_path, to_path).await
+}
+
+pub async fn delete(profile: &ConnectionProfile, path: &str) -> Result<()> {
+    smb_delete(profile, path).await
+}
+
+pub async fn mkdir(profile: &ConnectionProfile, path: &str) -> Result<()> {
+    smb_mkdir(profile, path).await
+}
+
+pub async fn create_file(profile: &ConnectionProfile, path: &str) -> Result<()> {
+    smb_create_file(profile, path).await
+}
+
+pub async fn file_size(profile: &ConnectionProfile, path: &str) -> Result<Option<u64>> {
+    smb_file_size(profile, path).await
+}
+
+pub async fn download_to_writer<W, F>(
+    profile: &ConnectionProfile,
+    path: &str,
+    writer: &mut W,
+    chunk_size: usize,
+    on_chunk: F,
+) -> Result<u64>
+where
+    W: Write,
+    F: FnMut(u64),
+{
+    smb_download_to_writer(profile, path, writer, chunk_size, on_chunk).await
+}
+
+pub async fn upload_from_reader<R, F>(
+    profile: &ConnectionProfile,
+    path: &str,
+    reader: &mut R,
+    chunk_size: usize,
+    on_chunk: F,
+) -> Result<u64>
+where
+    R: Read,
+    F: FnMut(u64),
+{
+    smb_upload_from_reader(profile, path, reader, chunk_size, on_chunk).await
 }

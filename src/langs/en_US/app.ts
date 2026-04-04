@@ -1,9 +1,9 @@
 import type { AppDictionary } from "../types";
 
 export const app: AppDictionary["app"] = {
-  name: "ConnectHub",
+  name: "OpenPtl",
   boot: {
-    starting: "Starting ConnectHub...",
+    starting: "Starting OpenPtl...",
     checkingUpdates: "Checking for updates...",
     loadingData: "Loading local data...",
   },

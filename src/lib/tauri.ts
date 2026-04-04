@@ -29,7 +29,7 @@ import type {
   SyncState,
   TextReadChunk,
   VaultStatus,
-} from "@/types/termopen";
+} from "@/types/openptl";
 
 export const api = {
   vaultStatus: () => invoke<VaultStatus>("vault_status"),

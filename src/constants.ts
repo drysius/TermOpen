@@ -1,4 +1,4 @@
-import type { AppSettings, ConnectionProfile, KeychainEntry, SyncState } from "@/types/termopen";
+import type { AppSettings, ConnectionProfile, KeychainEntry, SyncState } from "@/types/openptl";
 import type { PaneState } from "@/types/app-state";
 
 export const BLANK_PROFILE: ConnectionProfile = {

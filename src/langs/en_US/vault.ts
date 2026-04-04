@@ -2,7 +2,7 @@ import type { AppDictionary } from "../types";
 
 export const vault: AppDictionary["vault"] = {
   intro: {
-    title: "Welcome to ConnectHub",
+    title: "Welcome to OpenPtl",
     description: "Before you start, here is how the app handles connections and protects your vault.",
     pointOne: "Workspaces with SSH, SFTP, FTP/FTPS, SMB and RDP in one place.",
     pointTwo: "Sensitive data is encrypted locally using your master password.",
@@ -12,7 +12,7 @@ export const vault: AppDictionary["vault"] = {
     back: "Back",
     next: "Next",
     start: "Start",
-    stepWelcomeTitle: "Welcome to ConnectHub",
+    stepWelcomeTitle: "Welcome to OpenPtl",
     stepWelcomeDescription:
       "A terminal control panel that lets you use multiple protocols — SSH, SFTP, FTP, FTPS, SMB and RDP — focused on organization and trust.",
     stepWelcomePointOne: "Manage all your connections in one place.",
@@ -32,7 +32,7 @@ export const vault: AppDictionary["vault"] = {
     stepAuthPointThree: "No connection data passes through the server.",
     stepSecurityTitle: "Master Password Encryption",
     stepSecurityDescription:
-      "All ConnectHub data is encrypted from your Master Password. This password unlocks the Vault and decrypts your connection and access information.",
+      "All OpenPtl data is encrypted from your Master Password. This password unlocks the Vault and decrypts your connection and access information.",
     stepSecurityPointOne: "End-to-end encrypted vault.",
     stepSecurityPointTwo: "Master password is never stored.",
     stepSecurityPointThree: "Locally protected keychain.",
@@ -60,7 +60,7 @@ export const vault: AppDictionary["vault"] = {
     description: "Without the master password, recovery is not possible.",
     warning: "Data cannot be recovered without the master password.",
     explanation:
-      "All ConnectHub data is encrypted locally. If you lost your password, the only option is to delete current data and start fresh.",
+      "All OpenPtl data is encrypted locally. If you lost your password, the only option is to delete current data and start fresh.",
     confirmLabel: "Type 'DELETE DATA' to continue",
     confirmPlaceholder: 'Type "DELETE DATA"',
     confirmPhrase: "DELETE DATA",

@@ -1,6 +1,6 @@
 import type { WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
 import type { EditorViewMode } from "@/functions/editor-file-utils";
-import type { SftpEntry } from "@/types/termopen";
+import type { SftpEntry } from "@/types/openptl";
 
 export type WorkspaceKind = "terminal" | "sftp" | "rdp" | "editor";
 export type WorkspaceMode = "free";

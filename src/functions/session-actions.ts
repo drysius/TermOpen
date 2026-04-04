@@ -6,7 +6,7 @@ import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions } from "@/store/app-store.types";
-import type { ConnectionProfile } from "@/types/termopen";
+import type { ConnectionProfile } from "@/types/openptl";
 import type { WorkTab } from "@/types/workspace";
 
 const listenersBySession: Record<string, UnlistenFn[]> = {};

@@ -294,9 +294,9 @@ impl AuthServer {
     pub fn default_server() -> Self {
         Self {
             id: "default".to_string(),
-            label: "TermOpen Official (Cloudflare Worker)".to_string(),
-            address: "https://small-band-2a72.marcosbrendonaz.workers.dev".to_string(),
-            author: Some("https://github.com/MarcosBrendonDePaula".to_string()),
+            label: "OpenPtl Official (Cloudflare Worker)".to_string(),
+            address: "https://openptl-auth.example.workers.dev".to_string(),
+            author: Some("https://github.com/urubucode".to_string()),
             official: true,
         }
     }

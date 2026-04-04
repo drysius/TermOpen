@@ -6,7 +6,7 @@ import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions } from "@/store/app-store.types";
-import type { SyncConflictDecision } from "@/types/termopen";
+import type { SyncConflictDecision } from "@/types/openptl";
 
 export function createVaultActions(
   set: StoreSet,

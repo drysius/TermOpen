@@ -10,7 +10,7 @@ import { useAppStore } from "@/store/app-store";
 
 import type { TerminalBlock } from "./types";
 import type { WorkspaceBlockModule } from "./block-module";
-import type { SurfaceRect } from "@/types/termopen";
+import type { SurfaceRect } from "@/types/openptl";
 
 function terminalDisconnectedLabel(sessionId: string | null): string {
   if (!sessionId) {

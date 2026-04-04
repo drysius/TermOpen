@@ -33,7 +33,7 @@ import type {
   SyncKeepSide,
   SyncProgressState,
   SyncState,
-} from "@/types/termopen";
+} from "@/types/openptl";
 import type { SidebarSection } from "@/types/workspace";
 
 function sectionFromPath(pathname: string): SidebarSection {
@@ -100,8 +100,7 @@ function normalizeDeepLinkInput(raw: string): string {
   return raw
     .trim()
     .replace(/^"+|"+$/g, "")
-    .replace("termopen:://", "termopen://")
-    .replace("openterm:://", "openterm://");
+    .replace("openptl:://", "openptl://");
 }
 
 function parseDirectConnectionUrl(url: URL): ParsedConnectionDeepLink | null {
@@ -152,7 +151,7 @@ function parseConnectionDeepLink(raw: string): ParsedConnectionDeepLink | null {
   }
 
   const protocol = parsed.protocol.replace(":", "").toLowerCase();
-  if (protocol !== "termopen" && protocol !== "openterm") {
+  if (protocol !== "openptl") {
     return null;
   }
 

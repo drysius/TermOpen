@@ -1,4 +1,4 @@
-import type { AppSettings } from "@/types/termopen";
+import type { AppSettings } from "@/types/openptl";
 
 export interface SettingsFormValues extends AppSettings {}
 

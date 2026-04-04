@@ -10,7 +10,7 @@ import { getError } from "@/functions/common";
 import { LOCALE_LABELS, useI18n, useT, type Locale } from "@/langs";
 import { api } from "@/lib/tauri";
 import { useAppStore } from "@/store/app-store";
-import type { AuthServer } from "@/types/termopen";
+import type { AuthServer } from "@/types/openptl";
 
 interface InitFormValues {
   password: string;
@@ -426,7 +426,7 @@ export function VaultGatePage() {
         <div className="w-full max-w-md rounded-2xl border border-border/50 bg-card/95 p-6 shadow-xl">
           <div className="mb-6 text-center">
             <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10">
-              <span className="text-lg font-semibold text-primary">CH</span>
+              <span className="text-lg font-semibold text-primary">OP</span>
             </div>
             <h1 className="text-2xl font-semibold text-foreground">{t.app.name}</h1>
           </div>

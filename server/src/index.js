@@ -1,5 +1,5 @@
 /**
- * ConnectHub Auth Worker — Google OAuth broker
+ * OpenPtl Auth Worker — Google OAuth broker
  *
  * Variáveis de ambiente (Cloudflare Dashboard → Settings → Variables):
  *   GOOGLE_CLIENT_ID     — obrigatório
@@ -422,7 +422,7 @@ async function handleGoogleCallback(request, env) {
   });
 }
 
-// ─── Callback HTML (ConnectHub Design System) ────────────────────────
+// ─── Callback HTML (OpenPtl Design System) ────────────────────────
 
 function renderCallbackHTML({ tokens, user, error }) {
   const checkIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`;
@@ -436,7 +436,7 @@ function renderCallbackHTML({ tokens, user, error }) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ConnectHub — Erro</title>
+  <title>OpenPtl — Erro</title>
   ${BASE_STYLE}
 </head>
 <body>
@@ -453,7 +453,7 @@ function renderCallbackHTML({ tokens, user, error }) {
     </div>
 
     <div class="info-block animate-fade-in delay-3">
-      <p>Esta janela será fechada automaticamente em alguns segundos. Tente novamente pelo ConnectHub.</p>
+      <p>Esta janela será fechada automaticamente em alguns segundos. Tente novamente pelo OpenPtl.</p>
     </div>
 
     <div class="closing-text animate-fade-in delay-3">
@@ -484,7 +484,7 @@ function renderCallbackHTML({ tokens, user, error }) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ConnectHub — Autenticado</title>
+  <title>OpenPtl — Autenticado</title>
   ${BASE_STYLE}
 </head>
 <body>
@@ -493,7 +493,7 @@ function renderCallbackHTML({ tokens, user, error }) {
 
     <div class="text-center animate-fade-in delay-1">
       <h1>Autenticado com sucesso</h1>
-      <p class="subtitle">Sua conta Google foi conectada ao ConnectHub.</p>
+      <p class="subtitle">Sua conta Google foi conectada ao OpenPtl.</p>
     </div>
 
     <div class="user-card animate-fade-in delay-2">
@@ -525,7 +525,7 @@ function renderCallbackHTML({ tokens, user, error }) {
         email:         data.user.email || '',
         name:          data.user.name  || '',
       });
-      window.location.href = 'termopen://auth?' + params.toString();
+      window.location.href = 'openptl://auth?' + params.toString();
     } catch (e) { /* desktop não disponível */ }
     setTimeout(() => window.close(), 3000);
   <\/script>
@@ -543,7 +543,7 @@ export default {
     const url    = new URL(request.url);
     const origin = request.headers.get('Origin') || '';
 
-    console.info({ message: 'ConnectHub Auth Worker received a request', pathname: url.pathname });
+    console.info({ message: 'OpenPtl Auth Worker received a request', pathname: url.pathname });
 
     // Valida variáveis de ambiente obrigatórias
     if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
@@ -560,7 +560,7 @@ export default {
 
     switch (url.pathname) {
       case '/':
-        return jsonResponse({ service: 'connecthub-auth', status: 'ok' }, 200, origin, env);
+        return jsonResponse({ service: 'openptl-auth', status: 'ok' }, 200, origin, env);
 
       case '/auth/google':
         return handleGoogleAuth(request, env);

@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -17,20 +17,15 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::models::{
+use crate::constants::{
+    APP_KEYRING_SERVICE, CURRENT_PAYLOAD_VERSION, CURRENT_STORAGE_VERSION, KEYRING_VAULT_KEY,
+    MANIFEST_FILE_NAME, OPENPTL_FILE_NAME, PROFILE_FILE_NAME, STORAGE_DIR_NAME,
+    STORAGE_FILE_EXTENSION,
+};
+use crate::libs::models::{
     AppSettings, AuthServer, ConnectionProfile, KeyMode, KeychainEntry, ManifestBinPayload,
     ProfileBinPayload, SyncMetadata, VaultPayload, VaultStatus, WindowState,
 };
-
-const KEYRING_SERVICE: &str = "com.urubucode.termopen";
-const KEYRING_VAULT_KEY: &str = "vault-key";
-const STORAGE_DIR_NAME: &str = "TermOpen";
-const TERM_OPEN_FILE_NAME: &str = "term-open.bin";
-const PROFILE_FILE_NAME: &str = "profile.bin";
-const MANIFEST_FILE_NAME: &str = "manifest.bin";
-const FILE_EXTENSION: &str = "bin";
-const CURRENT_STORAGE_VERSION: u32 = 1;
-const CURRENT_PAYLOAD_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 struct VaultRuntime {
@@ -57,14 +52,14 @@ impl Default for VaultRuntime {
 
 pub struct VaultManager {
     storage_root: PathBuf,
-    term_open_path: PathBuf,
+    openptl_path: PathBuf,
     profile_path: PathBuf,
     manifest_path: PathBuf,
     runtime: VaultRuntime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TermOpenBin {
+struct OpenPtlBin {
     version: u32,
     key_mode: KeyMode,
     salt: Option<[u8; 16]>,
@@ -83,7 +78,7 @@ struct EncryptedBin {
 
 impl VaultManager {
     pub fn new() -> Result<Self> {
-        let dirs = ProjectDirs::from("com", "urubucode", "termopen")
+        let dirs = ProjectDirs::from("com", "urubucode", "openptl")
             .ok_or_else(|| anyhow!("Nao foi possivel resolver diretorio de dados do aplicativo"))?;
         let data_dir = dirs.data_dir();
         fs::create_dir_all(data_dir).with_context(|| {
@@ -97,7 +92,7 @@ impl VaultManager {
         cleanup_legacy_layout(data_dir, &storage_root)?;
 
         Ok(Self {
-            term_open_path: storage_root.join(TERM_OPEN_FILE_NAME),
+            openptl_path: storage_root.join(OPENPTL_FILE_NAME),
             profile_path: storage_root.join(PROFILE_FILE_NAME),
             manifest_path: storage_root.join(MANIFEST_FILE_NAME),
             storage_root,
@@ -107,12 +102,12 @@ impl VaultManager {
 
     pub fn status(&self) -> Result<VaultStatus> {
         let initialized = self.vault_initialized();
-        let recoverable = self.term_open_exists() && !initialized;
+        let recoverable = self.openptl_exists() && !initialized;
 
         let key_mode = if self.runtime.key_mode.is_some() {
             self.runtime.key_mode.clone()
-        } else if self.term_open_exists() {
-            Some(self.read_term_open_file()?.key_mode)
+        } else if self.openptl_exists() {
+            Some(self.read_openptl_file()?.key_mode)
         } else {
             None
         };
@@ -173,16 +168,16 @@ impl VaultManager {
             return Err(anyhow!("Vault ainda nao foi inicializado"));
         }
 
-        let term_open = self.read_term_open_file()?;
-        if term_open.version != CURRENT_STORAGE_VERSION {
+        let openptl = self.read_openptl_file()?;
+        if openptl.version != CURRENT_STORAGE_VERSION {
             return Err(anyhow!(
-                "Versao de term-open.bin nao suportada. Atual: {}, encontrada: {}",
+                "Versao de openptl.bin nao suportada. Atual: {}, encontrada: {}",
                 CURRENT_STORAGE_VERSION,
-                term_open.version
+                openptl.version
             ));
         }
 
-        let (key, salt) = match term_open.key_mode {
+        let (key, salt) = match openptl.key_mode {
             KeyMode::Password => {
                 let raw_password =
                     password.ok_or_else(|| anyhow!("Senha mestre obrigatoria para este vault"))?;
@@ -190,16 +185,16 @@ impl VaultManager {
                 if pass.is_empty() {
                     return Err(anyhow!("Senha mestre obrigatoria para este vault"));
                 }
-                let salt = term_open
+                let salt = openptl
                     .salt
-                    .ok_or_else(|| anyhow!("Salt ausente no term-open.bin"))?;
+                    .ok_or_else(|| anyhow!("Salt ausente no openptl.bin"))?;
                 let key = derive_key(pass, &salt)?;
                 (key, Some(salt))
             }
             KeyMode::Keychain => (load_keychain_key()?, None),
         };
 
-        if compute_key_check(&key) != term_open.key_check {
+        if compute_key_check(&key) != openptl.key_check {
             return Err(anyhow!("Senha mestre invalida"));
         }
 
@@ -209,11 +204,11 @@ impl VaultManager {
 
         self.runtime = VaultRuntime {
             unlocked: true,
-            key_mode: Some(term_open.key_mode),
+            key_mode: Some(openptl.key_mode),
             key: Some(key),
             salt,
             payload: Some(payload),
-            created_at: Some(term_open.created_at),
+            created_at: Some(openptl.created_at),
         };
 
         self.status()
@@ -225,7 +220,7 @@ impl VaultManager {
             initialized: self.vault_initialized(),
             locked: true,
             key_mode: None,
-            recoverable: self.term_open_exists() && !self.vault_initialized(),
+            recoverable: self.openptl_exists() && !self.vault_initialized(),
         }
     }
 
@@ -683,19 +678,19 @@ impl VaultManager {
         Ok(())
     }
 
-    pub fn validate_password_for_term_open_bytes(
+    pub fn validate_password_for_openptl_bytes(
         &self,
-        term_open_bytes: &[u8],
+        openptl_bytes: &[u8],
         password: &str,
     ) -> Result<bool> {
-        let term_open: TermOpenBin = decode_bin(term_open_bytes, "term-open.bin invalido")?;
-        match term_open.key_mode {
+        let openptl: OpenPtlBin = decode_bin(openptl_bytes, "openptl.bin invalido")?;
+        match openptl.key_mode {
             KeyMode::Password => {
-                let salt = term_open
+                let salt = openptl
                     .salt
-                    .ok_or_else(|| anyhow!("Salt ausente no term-open.bin"))?;
+                    .ok_or_else(|| anyhow!("Salt ausente no openptl.bin"))?;
                 let key = derive_key(password.trim(), &salt)?;
-                Ok(compute_key_check(&key) == term_open.key_check)
+                Ok(compute_key_check(&key) == openptl.key_check)
             }
             KeyMode::Keychain => Err(anyhow!(
                 "Backup usa keychain do sistema. Recuperacao remota exige senha mestre"
@@ -732,10 +727,10 @@ impl VaultManager {
             .runtime
             .key
             .ok_or_else(|| anyhow!("Chave do vault indisponivel"))?;
-        let term_open = self.read_term_open_file()?;
+        let openptl = self.read_openptl_file()?;
 
-        if compute_key_check(&key) != term_open.key_check {
-            return Err(anyhow!("term-open.bin local pertence a outra chave mestre"));
+        if compute_key_check(&key) != openptl.key_check {
+            return Err(anyhow!("openptl.bin local pertence a outra chave mestre"));
         }
 
         let mut payload = self.read_payload_from_disk(&key)?;
@@ -743,9 +738,9 @@ impl VaultManager {
         ensure_default_server(&mut payload.auth_servers);
 
         self.runtime.payload = Some(payload);
-        self.runtime.key_mode = Some(term_open.key_mode);
-        self.runtime.salt = term_open.salt;
-        self.runtime.created_at = Some(term_open.created_at);
+        self.runtime.key_mode = Some(openptl.key_mode);
+        self.runtime.salt = openptl.salt;
+        self.runtime.created_at = Some(openptl.created_at);
 
         Ok(())
     }
@@ -873,7 +868,7 @@ impl VaultManager {
             encrypt_bin_payload(&profile_payload, &key, PROFILE_FILE_NAME, now)?;
         write_bin_file(&self.profile_path, &profile_encrypted)?;
 
-        let term_open = TermOpenBin {
+        let openptl = OpenPtlBin {
             version: CURRENT_STORAGE_VERSION,
             key_mode,
             salt: self.runtime.salt,
@@ -881,7 +876,7 @@ impl VaultManager {
             created_at,
             updated_at: now,
         };
-        write_bin_file(&self.term_open_path, &term_open)?;
+        write_bin_file(&self.openptl_path, &openptl)?;
 
         self.runtime.created_at = Some(created_at);
         self.cleanup_stale_item_files(&expected_files)
@@ -907,9 +902,7 @@ impl VaultManager {
             if !is_bin_file_name(&name) {
                 continue;
             }
-            if name == TERM_OPEN_FILE_NAME
-                || name == PROFILE_FILE_NAME
-                || name == MANIFEST_FILE_NAME
+            if name == OPENPTL_FILE_NAME || name == PROFILE_FILE_NAME || name == MANIFEST_FILE_NAME
             {
                 continue;
             }
@@ -924,8 +917,8 @@ impl VaultManager {
         Ok(())
     }
 
-    fn read_term_open_file(&self) -> Result<TermOpenBin> {
-        read_bin_file(&self.term_open_path)
+    fn read_openptl_file(&self) -> Result<OpenPtlBin> {
+        read_bin_file(&self.openptl_path)
     }
 
     fn read_payload_from_disk(&self, key: &[u8; 32]) -> Result<VaultPayload> {
@@ -1021,11 +1014,11 @@ impl VaultManager {
     }
 
     fn vault_initialized(&self) -> bool {
-        self.term_open_exists() && self.profile_path.exists() && self.manifest_path.exists()
+        self.openptl_exists() && self.profile_path.exists() && self.manifest_path.exists()
     }
 
-    fn term_open_exists(&self) -> bool {
-        self.term_open_path.exists()
+    fn openptl_exists(&self) -> bool {
+        self.openptl_path.exists()
     }
 }
 
@@ -1095,7 +1088,7 @@ fn derive_key(password: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
 fn compute_key_check(key: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(key);
-    hasher.update(b"termopen-key-check-v1");
+    hasher.update(b"openptl-key-check-v1");
     let digest = hasher.finalize();
 
     let mut out = [0u8; 32];
@@ -1121,7 +1114,7 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn content_hash_bytes(key: &[u8; 32], file_tag: &str, plaintext: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"termopen-content-hash-v1");
+    hasher.update(b"openptl-content-hash-v1");
     hasher.update(key);
     hasher.update(file_tag.as_bytes());
     hasher.update(plaintext);
@@ -1253,12 +1246,12 @@ fn normalize_bin_file_name(input: &str) -> Result<String> {
 
 fn is_bin_file_name(name: &str) -> bool {
     name.to_ascii_lowercase()
-        .ends_with(&format!(".{}", FILE_EXTENSION))
+        .ends_with(&format!(".{}", STORAGE_FILE_EXTENSION))
 }
 
 fn persist_keychain_key(key: &[u8; 32]) -> Result<()> {
     let entry =
-        Entry::new(KEYRING_SERVICE, KEYRING_VAULT_KEY).context("Falha ao preparar keychain")?;
+        Entry::new(APP_KEYRING_SERVICE, KEYRING_VAULT_KEY).context("Falha ao preparar keychain")?;
     entry
         .set_password(&to_hex(key))
         .context("Falha ao salvar chave no keychain")
@@ -1266,7 +1259,7 @@ fn persist_keychain_key(key: &[u8; 32]) -> Result<()> {
 
 fn load_keychain_key() -> Result<[u8; 32]> {
     let entry =
-        Entry::new(KEYRING_SERVICE, KEYRING_VAULT_KEY).context("Falha ao preparar keychain")?;
+        Entry::new(APP_KEYRING_SERVICE, KEYRING_VAULT_KEY).context("Falha ao preparar keychain")?;
     let value = entry
         .get_password()
         .context("Nao foi possivel ler chave do keychain")?;
@@ -1282,7 +1275,7 @@ fn load_keychain_key() -> Result<[u8; 32]> {
 }
 
 fn clear_keychain_key() {
-    if let Ok(entry) = Entry::new(KEYRING_SERVICE, KEYRING_VAULT_KEY) {
+    if let Ok(entry) = Entry::new(APP_KEYRING_SERVICE, KEYRING_VAULT_KEY) {
         let _ = entry.delete_password();
     }
 }
@@ -1315,7 +1308,7 @@ fn normalize_option(input: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ConnectionKind, ConnectionProtocol};
+    use crate::libs::models::{ConnectionKind, ConnectionProtocol};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -1323,7 +1316,7 @@ mod tests {
         fs::create_dir_all(storage_root).expect("test storage should be created");
         VaultManager {
             storage_root: storage_root.to_path_buf(),
-            term_open_path: storage_root.join(TERM_OPEN_FILE_NAME),
+            openptl_path: storage_root.join(OPENPTL_FILE_NAME),
             profile_path: storage_root.join(PROFILE_FILE_NAME),
             manifest_path: storage_root.join(MANIFEST_FILE_NAME),
             runtime: VaultRuntime::default(),
@@ -1401,9 +1394,9 @@ mod tests {
                 .get(PROFILE_FILE_NAME)
                 .expect("version X should include profile.bin"),
         );
-        let term_open_x = snapshot_x
-            .get(TERM_OPEN_FILE_NAME)
-            .expect("version X should include term-open.bin")
+        let openptl_x = snapshot_x
+            .get(OPENPTL_FILE_NAME)
+            .expect("version X should include openptl.bin")
             .clone();
 
         // Versao Y: cliente altera settings/profile e persiste.
@@ -1427,10 +1420,10 @@ mod tests {
             "profile hash should diverge between snapshot X and Y"
         );
 
-        // Mesmo com Y local, a senha atual continua valida para o term-open de X.
+        // Mesmo com Y local, a senha atual continua valida para o openptl de X.
         assert!(
             vault
-                .validate_password_for_term_open_bytes(&term_open_x, password)
+                .validate_password_for_openptl_bytes(&openptl_x, password)
                 .expect("password validation should run"),
             "same password should validate against version X metadata"
         );
@@ -1446,3 +1439,5 @@ mod tests {
         assert!(!status.locked, "vault should be unlocked after restoring X");
     }
 }
+
+

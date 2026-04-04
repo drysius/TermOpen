@@ -1,7 +1,7 @@
 import { normalizeRemotePath } from "@/functions/common";
 import { api } from "@/lib/tauri";
 import { parseProfileSourceRef } from "@/pages/tabs/workspace/natives/runtime";
-import type { SftpEntry } from "@/types/termopen";
+import type { SftpEntry } from "@/types/openptl";
 
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 

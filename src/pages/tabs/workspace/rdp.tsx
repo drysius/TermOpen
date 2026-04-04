@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 import type {
   ConnectionProfile,
   RdpSessionFocusInput,
-} from "@/types/termopen";
+} from "@/types/openptl";
 import {
   onRdpCursor,
   onRdpVideoRects,

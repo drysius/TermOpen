@@ -1,9 +1,9 @@
 import { ArrowDownAZ, ArrowUpAZ, FileText, Folder, MonitorUp, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/utils";
-import type { SftpEntry } from "@/types/termopen";
+import type { SftpEntry } from "@/types/openptl";
 
 import type {
   BlockTransferItem,
@@ -15,83 +15,6 @@ import type {
   SortKey,
 } from "./types";
 import type { WorkspaceBlockModule } from "./block-module";
-
-const DRAG_ENTRY_MIME = "application/x-termopen-entry";
-
-function parseDragPayload(dataTransfer: DataTransfer): DragPayload | null {
-  const raw = dataTransfer.getData(DRAG_ENTRY_MIME) || dataTransfer.getData("text/plain");
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<DragPayload>;
-    if (
-      typeof parsed.sourceBlockId === "string" &&
-      typeof parsed.sourceId === "string" &&
-      typeof parsed.path === "string" &&
-      typeof parsed.isDir === "boolean"
-    ) {
-      return parsed as DragPayload;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function writeDragPayload(dataTransfer: DataTransfer, payload: DragPayload): void {
-  const raw = JSON.stringify(payload);
-  dataTransfer.setData(DRAG_ENTRY_MIME, raw);
-  dataTransfer.setData("text/plain", raw);
-}
-
-function parseFileUriPath(uri: string): string | null {
-  const trimmed = uri.trim();
-  if (!trimmed || !trimmed.startsWith("file://")) {
-    return null;
-  }
-  try {
-    const parsed = new URL(trimmed);
-    let path = decodeURIComponent(parsed.pathname || "");
-    if (!path) {
-      return null;
-    }
-    // file:///C:/path -> C:/path on Windows.
-    if (/^\/[A-Za-z]:\//.test(path)) {
-      path = path.slice(1);
-    }
-    return path;
-  } catch {
-    return null;
-  }
-}
-
-function parseExternalLocalPaths(dataTransfer: DataTransfer): string[] {
-  const paths = new Set<string>();
-
-  const uriList = dataTransfer.getData("text/uri-list");
-  if (uriList) {
-    for (const line of uriList.split(/\r?\n/)) {
-      if (!line || line.startsWith("#")) {
-        continue;
-      }
-      const parsed = parseFileUriPath(line);
-      if (parsed) {
-        paths.add(parsed);
-      }
-    }
-  }
-
-  for (const file of Array.from(dataTransfer.files ?? [])) {
-    const candidate = (file as File & { path?: string }).path;
-    if (typeof candidate === "string" && candidate.trim().length > 0) {
-      paths.add(candidate.trim());
-    }
-  }
-
-  return Array.from(paths);
-}
 
 function formatSize(size: number): string {
   if (!Number.isFinite(size) || size <= 0) {
@@ -190,14 +113,22 @@ export interface SftpBlockViewProps {
   block: SftpBlock;
   sourceOptions: Array<{ id: string; label: string }>;
   transferItems: BlockTransferItem[];
+  externalDropPreview?: {
+    mode: "external" | "internal";
+    kind: "file" | "folder" | "mixed" | "unknown";
+    count: number;
+    targetPath: string;
+  } | null;
   onFocus: () => void;
   onPasteClipboardFiles: () => void;
-  onDropLocalPaths: (paths: string[], targetPath: string) => void;
+  onEntryDragStart: (
+    payload: DragPayload,
+    pointer: { x: number; y: number },
+  ) => void;
   onRefresh: (path: string, sourceId: string) => void;
   onSelectSort: (sortKey: SortKey) => void;
   onSelectEntry: (path: string) => void;
   onOpenEntry: (entry: SftpEntry) => void;
-  onDropTransfer: (payload: DragPayload, targetPath: string) => void;
   onContextAction: (action: SftpContextAction, entry: SftpEntry | null) => void;
   onTrustHost: () => void;
   onRetry: () => void;
@@ -210,14 +141,14 @@ export function SftpBlockView({
   block,
   sourceOptions,
   transferItems,
+  externalDropPreview = null,
   onFocus,
   onPasteClipboardFiles,
-  onDropLocalPaths,
+  onEntryDragStart,
   onRefresh,
   onSelectSort,
   onSelectEntry,
   onOpenEntry,
-  onDropTransfer,
   onContextAction,
   onTrustHost,
   onRetry,
@@ -381,20 +312,23 @@ export function SftpBlockView({
 
   const columnButtonClass =
     "inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-muted-foreground hover:text-foreground";
-  const handleEntryDragStart = useCallback(
-    (event: DragEvent<HTMLElement>, entry: SftpEntry) => {
+  const handleEntryPointerDown = useCallback(
+    (event: MouseEvent<HTMLElement>, entry: SftpEntry) => {
+      if (event.button !== 0) {
+        return;
+      }
+      if (entry.name === "..") {
+        return;
+      }
       const payload: DragPayload = {
         sourceBlockId: block.id,
         sourceId: block.sourceId,
         path: entry.path,
         isDir: entry.is_dir,
       };
-      writeDragPayload(event.dataTransfer, payload);
-      event.dataTransfer.effectAllowed = "copy";
-      event.dataTransfer.dropEffect = "copy";
-      event.stopPropagation();
+      onEntryDragStart(payload, { x: event.clientX, y: event.clientY });
     },
-    [block.id, block.sourceId],
+    [block.id, block.sourceId, onEntryDragStart],
   );
 
   const openContextMenu = useCallback(
@@ -443,6 +377,23 @@ export function SftpBlockView({
       ).length,
     [transferItems],
   );
+  const externalDropLabel = useMemo(() => {
+    if (!externalDropPreview) {
+      return null;
+    }
+    const countLabel = externalDropPreview.count > 1 ? `${externalDropPreview.count} itens` : "1 item";
+    const prefix = externalDropPreview.mode === "internal" ? "Transferencia" : "Upload";
+    if (externalDropPreview.kind === "folder") {
+      return `${prefix} de pasta (${countLabel})`;
+    }
+    if (externalDropPreview.kind === "file") {
+      return `${prefix} de arquivo (${countLabel})`;
+    }
+    if (externalDropPreview.kind === "mixed") {
+      return `${prefix} mista (${countLabel})`;
+    }
+    return `${prefix} (${countLabel})`;
+  }, [externalDropPreview]);
   const isConnected = block.connectStage === "ready" && !block.pendingProfileId;
 
   const runContextAction = useCallback(
@@ -457,8 +408,14 @@ export function SftpBlockView({
   return (
     <div
       ref={containerRef}
+      data-openptl-drop-target="sftp"
+      data-openptl-block-id={block.id}
+      data-openptl-target-path={block.path}
       tabIndex={0}
-      className="relative flex h-full min-h-0 flex-col outline-none"
+      className={cn(
+        "relative flex h-full min-h-0 flex-col outline-none",
+        externalDropPreview ? "ring-2 ring-primary/60 ring-offset-1 ring-offset-background" : undefined,
+      )}
       onMouseDown={(event) => {
         onFocus();
         const target = event.target as HTMLElement | null;
@@ -479,27 +436,15 @@ export function SftpBlockView({
           return;
         }
         event.preventDefault();
-        onPasteClipboardFiles();
+      onPasteClipboardFiles();
       }}
       onContextMenu={(event) => openContextMenu(event, null)}
-      onDragOver={(event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "copy";
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
-        const payload = parseDragPayload(event.dataTransfer);
-        if (payload) {
-          onDropTransfer(payload, block.path);
-          return;
-        }
-
-        const localPaths = parseExternalLocalPaths(event.dataTransfer);
-        if (localPaths.length > 0) {
-          onDropLocalPaths(localPaths, block.path);
-        }
-      }}
     >
+      {externalDropLabel ? (
+        <div className="pointer-events-none absolute right-2 top-2 z-30 rounded-full border border-primary/60 bg-primary/15 px-2 py-1 text-[10px] font-medium text-primary shadow-sm">
+          {externalDropLabel}
+        </div>
+      ) : null}
       <div className="grid grid-cols-[minmax(140px,0.9fr)_minmax(0,1.7fr)_auto] gap-2 border-b border-border/50 px-2 py-1.5">
         <select
           className="h-8 rounded border border-border/50 bg-background px-2 text-xs text-foreground"
@@ -684,12 +629,14 @@ export function SftpBlockView({
               return (
                 <tr
                   key={entry.path}
+                  data-openptl-drop-target={entry.is_dir ? "sftp" : undefined}
+                  data-openptl-block-id={entry.is_dir ? block.id : undefined}
+                  data-openptl-target-path={entry.is_dir ? entry.path : undefined}
                   className={cn(
                     "border-b border-border/30 text-foreground transition hover:bg-secondary/70",
-                    "cursor-grab active:cursor-grabbing",
+                    "cursor-default",
                     selected ? "bg-primary/10" : undefined,
                   )}
-                  draggable
                   onClick={() => onSelectEntry(entry.path)}
                   onDoubleClick={() => onOpenEntry(entry)}
                   onContextMenu={(event) => {
@@ -698,34 +645,7 @@ export function SftpBlockView({
                     }
                     openContextMenu(event, entry);
                   }}
-                  onDragStart={(event) => {
-                    if (entry.name === "..") {
-                      event.preventDefault();
-                      return;
-                    }
-                    handleEntryDragStart(event, entry);
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "copy";
-                  }}
-                  onDrop={(event) => {
-                    if (!entry.is_dir) {
-                      return;
-                    }
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const payload = parseDragPayload(event.dataTransfer);
-                    if (payload) {
-                      onDropTransfer(payload, entry.path);
-                      return;
-                    }
-
-                    const localPaths = parseExternalLocalPaths(event.dataTransfer);
-                    if (localPaths.length > 0) {
-                      onDropLocalPaths(localPaths, entry.path);
-                    }
-                  }}
+                  onMouseDown={(event) => handleEntryPointerDown(event, entry)}
                 >
                   <td className="px-2 py-1.5">
                     <span

@@ -7,7 +7,7 @@ import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { getT } from "@/langs";
 import { api } from "@/lib/tauri";
 import type { AppActions, PaneSide } from "@/store/app-store.types";
-import type { ConnectionProfile, ConnectionProtocol, SftpEntry } from "@/types/termopen";
+import type { ConnectionProfile, ConnectionProtocol, SftpEntry } from "@/types/openptl";
 
 const PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 

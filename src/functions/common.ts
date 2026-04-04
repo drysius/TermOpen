@@ -1,4 +1,4 @@
-import type { ConnectionProfile, ConnectionProtocol } from "@/types/termopen";
+import type { ConnectionProfile, ConnectionProtocol } from "@/types/openptl";
 import { logFrontendDebug } from "@/lib/debug-logs";
 
 export function getError(error: unknown): string {

@@ -4106,6 +4106,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "openptl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "base64 0.22.1",
+ "bincode",
+ "chacha20poly1305",
+ "chrono",
+ "directories",
+ "futures-util",
+ "ironrdp",
+ "ironrdp-blocking",
+ "ironrdp-graphics",
+ "ironrdp-pdu",
+ "keyring",
+ "lz4_flex",
+ "macos-accessibility-client",
+ "open",
+ "rand 0.8.5",
+ "rdev",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "smb",
+ "ssh2",
+ "sspi",
+ "suppaftp",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-deep-link",
+ "tauri-plugin-dialog",
+ "tauri-plugin-http",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "urlencoding",
+ "uuid",
+ "x509-cert",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6979,51 +7024,6 @@ checksum = "c4790fc369d5a530f4b544b094e31388b9b3a37c0f4652ade4505945f5660d24"
 dependencies = [
  "new_debug_unreachable",
  "utf-8",
-]
-
-[[package]]
-name = "termopen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "base64 0.22.1",
- "bincode",
- "chacha20poly1305",
- "chrono",
- "directories",
- "futures-util",
- "ironrdp",
- "ironrdp-blocking",
- "ironrdp-graphics",
- "ironrdp-pdu",
- "keyring",
- "lz4_flex",
- "macos-accessibility-client",
- "open",
- "rand 0.8.5",
- "rdev",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "smb",
- "ssh2",
- "sspi",
- "suppaftp",
- "tauri",
- "tauri-build",
- "tauri-plugin-deep-link",
- "tauri-plugin-dialog",
- "tauri-plugin-http",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "urlencoding",
- "uuid",
- "x509-cert",
 ]
 
 [[package]]

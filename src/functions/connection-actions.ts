@@ -15,7 +15,7 @@ import type {
   KeychainEntry,
   SyncLoggedUser,
   SyncProgressState,
-} from "@/types/termopen";
+} from "@/types/openptl";
 
 function normalizeProtocols(protocols: ConnectionProtocol[]): ConnectionProtocol[] {
   const next = Array.from(new Set(protocols));

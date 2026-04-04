@@ -7,7 +7,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useT } from "@/langs";
 import { cn } from "@/lib/utils";
-import type { SyncLoggedUser, SyncProgressState } from "@/types/termopen";
+import type { SyncLoggedUser, SyncProgressState } from "@/types/openptl";
 import type { WorkTab } from "@/types/workspace";
 
 interface AppHeaderProps {

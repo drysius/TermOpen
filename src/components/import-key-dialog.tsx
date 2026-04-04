@@ -17,7 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
 import { useAppStore } from "@/store/app-store";
-import type { KeychainEntry, KeychainEntryType, SshKeyGenerateInput } from "@/types/termopen";
+import type { KeychainEntry, KeychainEntryType, SshKeyGenerateInput } from "@/types/openptl";
 
 interface ImportKeyDialogProps {
   open: boolean;
