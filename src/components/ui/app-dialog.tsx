@@ -1,6 +1,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 
+import { useWindowOverlayBoundsClassName } from "@/components/ui/window-overlay";
 import { cn } from "@/lib/utils";
 
 interface DialogProps {
@@ -13,12 +14,17 @@ interface DialogProps {
 }
 
 export function AppDialog({ open, title, description, onClose, children, footer }: DialogProps) {
+  const overlayBoundsClassName = useWindowOverlayBoundsClassName();
+
   if (!open) {
     return null;
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/65 p-4" onMouseDown={onClose}>
+    <div
+      className={cn("fixed z-[120] flex items-center justify-center bg-black/65 p-4", overlayBoundsClassName)}
+      onMouseDown={onClose}
+    >
       <div
         className="w-full max-w-2xl rounded-xl border border-border/60 bg-card/95 shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}

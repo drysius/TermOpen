@@ -280,7 +280,7 @@ export function VaultGatePage() {
   const IntroIcon = currentIntro.icon;
 
   return (
-    <div className="h-[80%] relative flex min-h-0 flex-1 items-center justify-center bg-background px-6 py-8">
+    <div className="h-[80%] relative flex min-h-0 flex-1 items-center justify-center px-6 py-8">
       <div className="absolute right-4 top-4">
         <select
           className="h-8 rounded-md border border-border/50 bg-card px-2 text-xs text-muted-foreground"

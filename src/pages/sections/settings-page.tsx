@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { AppDialog } from "@/components/ui/app-dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { useWindowOverlayBoundsClassName } from "@/components/ui/window-overlay";
 import { getError } from "@/functions/common";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
@@ -54,6 +55,7 @@ function normalizeSettingsValues(values: SettingsFormValues): AppSettings {
 
 export function SettingsPage() {
   const t = useT();
+  const overlayBoundsClassName = useWindowOverlayBoundsClassName();
   const settings = useAppStore((state) => state.settings);
   const syncState = useAppStore((state) => state.syncState);
   const connections = useAppStore((state) => state.connections);
@@ -1364,7 +1366,7 @@ export function SettingsPage() {
       </AppDialog>
 
       {showUploadPolicyModal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
+        <div className={`fixed z-50 flex items-center justify-center bg-black/65 p-4 ${overlayBoundsClassName}`}>
           <div className="w-full max-w-lg rounded-xl border border-border/40 bg-background p-4 shadow-2xl">
             <h3 className="text-sm font-semibold text-foreground">{t.settings.uploadPolicy.modalTitle}</h3>
             <p className="mt-2 text-sm text-foreground/90">{t.settings.uploadPolicy.modalDescription}</p>

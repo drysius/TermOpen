@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useWindowOverlayBoundsClassName } from "@/components/ui/window-overlay";
 import { cn } from "@/lib/utils";
 
 interface DrawerProps {
@@ -19,10 +20,13 @@ export function AppDrawer({
   children,
   widthClassName = "w-[480px]",
 }: DrawerProps) {
+  const overlayBoundsClassName = useWindowOverlayBoundsClassName();
+
   return (
     <div
       className={cn(
-        "fixed inset-0 z-40 transition-colors duration-200",
+        "fixed z-40 transition-colors duration-200",
+        overlayBoundsClassName,
         open ? "pointer-events-auto bg-black/35" : "pointer-events-none bg-transparent",
       )}
       onMouseDown={(event) => {
@@ -48,4 +52,3 @@ export function AppDrawer({
     </div>
   );
 }
-
