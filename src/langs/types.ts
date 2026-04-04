@@ -393,6 +393,7 @@ export interface AppDictionary {
   keychain: {
     title: string;
     subtitle: string;
+    addKeychain: string;
     newKey: string;
     newItem: string;
     importKey: string;

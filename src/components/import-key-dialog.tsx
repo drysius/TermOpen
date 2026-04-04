@@ -23,6 +23,7 @@ interface ImportKeyDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   initialMethod?: ImportMethod;
+  initialEntry?: KeychainEntry | null;
 }
 
 export type ImportMethod = "manual" | "file" | "paste" | "generate";
@@ -50,7 +51,12 @@ function defaultKeyName(path: string): string {
   return name.replace(/\.(pem|key|pub|ppk)$/i, "") || "ssh_key";
 }
 
-export function ImportKeyDialog({ open, onOpenChange, initialMethod = "file" }: ImportKeyDialogProps) {
+export function ImportKeyDialog({
+  open,
+  onOpenChange,
+  initialMethod = "file",
+  initialEntry = null,
+}: ImportKeyDialogProps) {
   const t = useT();
   const saveKeychain = useAppStore((state) => state.saveKeychain);
   const busy = useAppStore((state) => state.busy);
@@ -91,12 +97,32 @@ export function ImportKeyDialog({ open, onOpenChange, initialMethod = "file" }: 
     setErrorMessage(null);
   }
 
+  function hydrateFromEntry(entry: KeychainEntry) {
+    setMethod("manual");
+    setName(entry.name ?? "");
+    setPassphrase(entry.passphrase ?? "");
+    setSourcePath("");
+    setManualType(entry.entry_type);
+    setManualPassword(entry.password ?? "");
+    setManualPrivateKey(entry.private_key ?? "");
+    setManualPublicKey(entry.public_key ?? "");
+    setRawKey(entry.private_key ?? entry.public_key ?? "");
+    setAlgorithm("ed25519");
+    setGenerateComment("");
+    setGeneratedFingerprint(null);
+    setErrorMessage(null);
+  }
+
   useEffect(() => {
     if (open) {
-      setMethod(initialMethod);
-      setErrorMessage(null);
+      if (initialEntry) {
+        hydrateFromEntry(initialEntry);
+      } else {
+        resetState(initialMethod);
+        setErrorMessage(null);
+      }
     }
-  }, [initialMethod, open]);
+  }, [initialEntry, initialMethod, open]);
 
   async function handleSelectFile() {
     const selected = await openDialog({
@@ -129,6 +155,8 @@ export function ImportKeyDialog({ open, onOpenChange, initialMethod = "file" }: 
 
   async function handleSubmit() {
     setErrorMessage(null);
+    const existingId = initialEntry?.id ?? "";
+    const existingCreatedAt = initialEntry?.created_at ?? 0;
     try {
       if (method === "manual") {
         const nextName = (name || "credential").trim();
@@ -151,14 +179,14 @@ export function ImportKeyDialog({ open, onOpenChange, initialMethod = "file" }: 
         }
 
         await persistEntry({
-          id: "",
+          id: existingId,
           name: nextName,
           entry_type: manualType,
           password: manualType === "password" || manualType === "secret" ? (nextPassword || null) : null,
           private_key: manualType === "ssh_key" || manualType === "secret" ? (nextPrivateKey || null) : null,
           public_key: manualType === "ssh_key" || manualType === "secret" ? (nextPublicKey || null) : null,
           passphrase: manualType === "ssh_key" || manualType === "secret" ? (nextPassphrase || null) : null,
-          created_at: 0,
+          created_at: existingCreatedAt,
         });
         return;
       }
@@ -172,14 +200,14 @@ export function ImportKeyDialog({ open, onOpenChange, initialMethod = "file" }: 
         });
         setGeneratedFingerprint(generated.fingerprint);
         await persistEntry({
-          id: "",
+          id: existingId,
           name: (name || generated.name_suggestion || "ssh_key").trim(),
           entry_type: "ssh_key",
           password: null,
           private_key: generated.private_key,
           public_key: generated.public_key,
           passphrase: passphrase || null,
-          created_at: 0,
+          created_at: existingCreatedAt,
         });
         return;
       }
@@ -192,14 +220,14 @@ export function ImportKeyDialog({ open, onOpenChange, initialMethod = "file" }: 
 
       const keyFields = inferKeyFields(keyValue);
       await persistEntry({
-        id: "",
+        id: existingId,
         name: (name || "ssh_key").trim(),
         entry_type: "ssh_key",
         password: null,
         private_key: keyFields.private_key,
         public_key: keyFields.public_key,
         passphrase: passphrase || null,
-        created_at: 0,
+        created_at: existingCreatedAt,
       });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t.keychain.importDialog.saveError);

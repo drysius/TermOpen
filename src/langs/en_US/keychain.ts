@@ -3,6 +3,7 @@ import type { AppDictionary } from "../types";
 export const keychain: AppDictionary["keychain"] = {
   title: "Keychain",
   subtitle: "SSH keys and secure credentials.",
+  addKeychain: "Add Keychain",
   newKey: "New key",
   newItem: "New item",
   importKey: "Import key",

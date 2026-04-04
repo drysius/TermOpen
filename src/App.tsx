@@ -7,7 +7,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
 import { HostFormDrawer } from "@/components/drawers/host-form-drawer";
-import { KeychainFormDrawer } from "@/components/drawers/keychain-form-drawer";
 import { AppHeader } from "@/components/layout/app-header";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { AppConfirmDialog, AppDialog } from "@/components/ui/app-dialog";
@@ -965,7 +964,6 @@ function App() {
         </section>
 
         <HostFormDrawer />
-        <KeychainFormDrawer />
         <AppDialog
         open={loginServerModalOpen}
         title={t.app.header.loginServerTitle}

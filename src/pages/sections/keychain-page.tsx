@@ -5,6 +5,7 @@ import { ImportKeyDialog, type ImportMethod } from "@/components/import-key-dial
 import { Button } from "@/components/ui/button";
 import { useT } from "@/langs";
 import { useAppStore } from "@/store/app-store";
+import type { KeychainEntry } from "@/types/openptl";
 
 function formatCreatedAt(timestamp: number): string {
   if (!timestamp) {
@@ -23,45 +24,42 @@ function fingerprintPreview(publicKey: string | null | undefined): string {
 export function KeychainPage() {
   const t = useT();
   const entries = useAppStore((state) => state.keychainEntries);
-  const openKeychainDrawer = useAppStore((state) => state.openKeychainDrawer);
   const deleteKeychain = useAppStore((state) => state.deleteKeychain);
   const [importOpen, setImportOpen] = useState(false);
-  const [importMethod, setImportMethod] = useState<ImportMethod>("file");
+  const [importMethod, setImportMethod] = useState<ImportMethod>("manual");
+  const [editingEntry, setEditingEntry] = useState<KeychainEntry | null>(null);
 
   return (
     <div className="flex-1 p-6 space-y-6">
-      <ImportKeyDialog open={importOpen} onOpenChange={setImportOpen} initialMethod={importMethod} />
+      <ImportKeyDialog
+        open={importOpen}
+        onOpenChange={(nextOpen) => {
+          setImportOpen(nextOpen);
+          if (!nextOpen) {
+            setEditingEntry(null);
+          }
+        }}
+        initialMethod={importMethod}
+        initialEntry={editingEntry}
+      />
 
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-foreground">{t.sidebar.keychain}</h1>
           <p className="text-sm text-muted-foreground mt-0.5">{t.keychain.subtitle}</p>
         </div>
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            className="gap-2"
-            onClick={() => {
-              setImportMethod("manual");
-              setImportOpen(true);
-            }}
-          >
-            <Plus className="h-4 w-4" />
-            {t.keychain.newItem}
-          </Button>
-          <Button
-            size="sm"
-            className="gap-2"
-            onClick={() => {
-              setImportMethod("file");
-              setImportOpen(true);
-            }}
-          >
-            <Plus className="h-4 w-4" />
-            {t.keychain.importKey}
-          </Button>
-        </div>
+        <Button
+          size="sm"
+          className="gap-2"
+          onClick={() => {
+            setEditingEntry(null);
+            setImportMethod("manual");
+            setImportOpen(true);
+          }}
+        >
+          <Plus className="h-4 w-4" />
+          {t.keychain.addKeychain}
+        </Button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -92,7 +90,16 @@ export function KeychainPage() {
               </div>
             </div>
             <div className="mt-3 pt-2 border-t border-border/20 flex items-center justify-end gap-2">
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openKeychainDrawer(entry)}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={() => {
+                  setEditingEntry(entry);
+                  setImportMethod("manual");
+                  setImportOpen(true);
+                }}
+              >
                 {t.keychain.edit}
               </Button>
               <Button size="sm" variant="outline" className="h-7 text-xs text-destructive" onClick={() => void deleteKeychain(entry.id)}>
