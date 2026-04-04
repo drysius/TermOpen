@@ -13,6 +13,7 @@ import { editor } from "./editor";
 import { conflicts } from "./conflicts";
 import { toasts } from "./toasts";
 import { common } from "./common";
+import { backendMessages } from "./backend-messages";
 
 export const ptBR: AppDictionary = {
   app,
@@ -39,5 +40,6 @@ export const ptBR: AppDictionary = {
   editor,
   conflicts,
   toasts,
+  backendMessages,
   common,
 };

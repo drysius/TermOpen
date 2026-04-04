@@ -1,3 +1,6 @@
+import { backendMessageKey, resolveBackendMessage } from "@/functions/backend-message";
+import type { BackendMessage } from "@/types/openptl";
+
 export const MAX_CONNECT_RETRY_ATTEMPTS = 3;
 
 export type FileSourceProtocol = "sftp" | "ftp" | "ftps" | "smb";
@@ -7,8 +10,12 @@ export interface ProfileSourceRef {
   protocol: FileSourceProtocol;
 }
 
-export function isTimeoutErrorMessage(message: string): boolean {
-  const normalized = message.toLowerCase();
+export function isTimeoutErrorMessage(message: string | BackendMessage): boolean {
+  const key = backendMessageKey(message);
+  if (key === "connection_timeout") {
+    return true;
+  }
+  const normalized = resolveBackendMessage(message).toLowerCase();
   return (
     normalized.includes("timeout") ||
     normalized.includes("timed out") ||

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { Controller, useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { Copy, FileKey, Key, Lock, Shield, Upload } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
@@ -14,8 +16,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { useT } from "@/langs";
 import { api } from "@/lib/tauri";
+import { importKeySchema, type ImportKeySchemaInput, type ImportKeySchemaValues } from "@/schemas/import-key";
 import { useAppStore } from "@/store/app-store";
 import type { KeychainEntry, KeychainEntryType, SshKeyGenerateInput } from "@/types/openptl";
 
@@ -51,6 +55,21 @@ function defaultKeyName(path: string): string {
   return name.replace(/\.(pem|key|pub|ppk)$/i, "") || "ssh_key";
 }
 
+function buildDefaultValues(defaultMethod: ImportMethod): ImportKeySchemaInput {
+  return {
+    method: defaultMethod,
+    name: "",
+    passphrase: "",
+    rawKey: "",
+    manualType: "password",
+    manualPassword: "",
+    manualPrivateKey: "",
+    manualPublicKey: "",
+    algorithm: "ed25519",
+    generateComment: "",
+  };
+}
+
 export function ImportKeyDialog({
   open,
   onOpenChange,
@@ -61,20 +80,19 @@ export function ImportKeyDialog({
   const saveKeychain = useAppStore((state) => state.saveKeychain);
   const busy = useAppStore((state) => state.busy);
 
-  const [method, setMethod] = useState<ImportMethod>(initialMethod);
-  const [name, setName] = useState("");
-  const [passphrase, setPassphrase] = useState("");
-  const [rawKey, setRawKey] = useState("");
   const [sourcePath, setSourcePath] = useState("");
-  const [manualType, setManualType] = useState<KeychainEntryType>("password");
-  const [manualPassword, setManualPassword] = useState("");
-  const [manualPrivateKey, setManualPrivateKey] = useState("");
-  const [manualPublicKey, setManualPublicKey] = useState("");
-  const [algorithm, setAlgorithm] = useState<SshKeyGenerateInput["algorithm"]>("ed25519");
-  const [generateComment, setGenerateComment] = useState("");
   const [generating, setGenerating] = useState(false);
   const [generatedFingerprint, setGeneratedFingerprint] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const form = useForm<ImportKeySchemaInput, unknown, ImportKeySchemaValues>({
+    resolver: zodResolver(importKeySchema),
+    defaultValues: buildDefaultValues(initialMethod),
+  });
+
+  const method = form.watch("method");
+  const name = form.watch("name");
+  const manualType = form.watch("manualType");
 
   const submitLabel = useMemo(
     () => (method === "generate" ? t.keychain.importDialog.generateAction : t.keychain.importDialog.importAction),
@@ -82,47 +100,40 @@ export function ImportKeyDialog({
   );
 
   function resetState(defaultMethod: ImportMethod = initialMethod) {
-    setMethod(defaultMethod);
-    setName("");
-    setPassphrase("");
-    setRawKey("");
+    form.reset(buildDefaultValues(defaultMethod));
     setSourcePath("");
-    setManualType("password");
-    setManualPassword("");
-    setManualPrivateKey("");
-    setManualPublicKey("");
-    setAlgorithm("ed25519");
-    setGenerateComment("");
     setGeneratedFingerprint(null);
     setErrorMessage(null);
   }
 
   function hydrateFromEntry(entry: KeychainEntry) {
-    setMethod("manual");
-    setName(entry.name ?? "");
-    setPassphrase(entry.passphrase ?? "");
+    form.reset({
+      method: "manual",
+      name: entry.name ?? "",
+      passphrase: entry.passphrase ?? "",
+      rawKey: entry.private_key ?? entry.public_key ?? "",
+      manualType: entry.entry_type,
+      manualPassword: entry.password ?? "",
+      manualPrivateKey: entry.private_key ?? "",
+      manualPublicKey: entry.public_key ?? "",
+      algorithm: "ed25519",
+      generateComment: "",
+    });
     setSourcePath("");
-    setManualType(entry.entry_type);
-    setManualPassword(entry.password ?? "");
-    setManualPrivateKey(entry.private_key ?? "");
-    setManualPublicKey(entry.public_key ?? "");
-    setRawKey(entry.private_key ?? entry.public_key ?? "");
-    setAlgorithm("ed25519");
-    setGenerateComment("");
     setGeneratedFingerprint(null);
     setErrorMessage(null);
   }
 
   useEffect(() => {
-    if (open) {
-      if (initialEntry) {
-        hydrateFromEntry(initialEntry);
-      } else {
-        resetState(initialMethod);
-        setErrorMessage(null);
-      }
+    if (!open) {
+      return;
     }
-  }, [initialEntry, initialMethod, open]);
+    if (initialEntry) {
+      hydrateFromEntry(initialEntry);
+    } else {
+      resetState(initialMethod);
+    }
+  }, [form, initialEntry, initialMethod, open]);
 
   async function handleSelectFile() {
     const selected = await openDialog({
@@ -137,9 +148,9 @@ export function ImportKeyDialog({
     try {
       const content = await api.localRead(selected);
       setSourcePath(selected);
-      setRawKey(content);
-      if (!name) {
-        setName(defaultKeyName(selected));
+      form.setValue("rawKey", content, { shouldDirty: true, shouldValidate: true });
+      if (!form.getValues("name").trim()) {
+        form.setValue("name", defaultKeyName(selected), { shouldDirty: true, shouldValidate: true });
       }
       setErrorMessage(null);
     } catch (error) {
@@ -153,80 +164,60 @@ export function ImportKeyDialog({
     onOpenChange(false);
   }
 
-  async function handleSubmit() {
+  const submit = form.handleSubmit(async (values) => {
     setErrorMessage(null);
     const existingId = initialEntry?.id ?? "";
     const existingCreatedAt = initialEntry?.created_at ?? 0;
     try {
-      if (method === "manual") {
-        const nextName = (name || "credential").trim();
-        const nextPassword = manualPassword.trim();
-        const nextPrivateKey = manualPrivateKey.trim();
-        const nextPublicKey = manualPublicKey.trim();
-        const nextPassphrase = passphrase.trim();
-
-        if (manualType === "password" && !nextPassword) {
-          setErrorMessage(t.keychain.importDialog.missingManualData);
-          return;
-        }
-        if (manualType === "ssh_key" && !nextPrivateKey && !nextPublicKey) {
-          setErrorMessage(t.keychain.importDialog.missingManualData);
-          return;
-        }
-        if (manualType === "secret" && !nextPassword && !nextPrivateKey && !nextPublicKey) {
-          setErrorMessage(t.keychain.importDialog.missingManualData);
-          return;
-        }
+      if (values.method === "manual") {
+        const nextPassword = values.manualPassword.trim();
+        const nextPrivateKey = values.manualPrivateKey.trim();
+        const nextPublicKey = values.manualPublicKey.trim();
+        const nextPassphrase = values.passphrase.trim();
 
         await persistEntry({
           id: existingId,
-          name: nextName,
-          entry_type: manualType,
-          password: manualType === "password" || manualType === "secret" ? (nextPassword || null) : null,
-          private_key: manualType === "ssh_key" || manualType === "secret" ? (nextPrivateKey || null) : null,
-          public_key: manualType === "ssh_key" || manualType === "secret" ? (nextPublicKey || null) : null,
-          passphrase: manualType === "ssh_key" || manualType === "secret" ? (nextPassphrase || null) : null,
+          name: values.name.trim(),
+          entry_type: values.manualType,
+          password: values.manualType === "password" || values.manualType === "secret" ? (nextPassword || null) : null,
+          private_key: values.manualType === "ssh_key" || values.manualType === "secret" ? (nextPrivateKey || null) : null,
+          public_key: values.manualType === "ssh_key" || values.manualType === "secret" ? (nextPublicKey || null) : null,
+          passphrase: values.manualType === "ssh_key" || values.manualType === "secret" ? (nextPassphrase || null) : null,
           created_at: existingCreatedAt,
         });
         return;
       }
 
-      if (method === "generate") {
+      if (values.method === "generate") {
         setGenerating(true);
         const generated = await api.sshKeyGenerate({
-          algorithm,
-          comment: generateComment || name || null,
-          passphrase: passphrase || null,
+          algorithm: values.algorithm,
+          comment: values.generateComment || values.name || null,
+          passphrase: values.passphrase || null,
         });
         setGeneratedFingerprint(generated.fingerprint);
         await persistEntry({
           id: existingId,
-          name: (name || generated.name_suggestion || "ssh_key").trim(),
+          name: values.name.trim() || generated.name_suggestion || "ssh_key",
           entry_type: "ssh_key",
           password: null,
           private_key: generated.private_key,
           public_key: generated.public_key,
-          passphrase: passphrase || null,
+          passphrase: values.passphrase || null,
           created_at: existingCreatedAt,
         });
         return;
       }
 
-      const keyValue = rawKey.trim();
-      if (!keyValue) {
-        setErrorMessage(t.keychain.importDialog.missingKey);
-        return;
-      }
-
-      const keyFields = inferKeyFields(keyValue);
+      const keyFields = inferKeyFields(values.rawKey);
       await persistEntry({
         id: existingId,
-        name: (name || "ssh_key").trim(),
+        name: values.name.trim(),
         entry_type: "ssh_key",
         password: null,
         private_key: keyFields.private_key,
         public_key: keyFields.public_key,
-        passphrase: passphrase || null,
+        passphrase: values.passphrase || null,
         created_at: existingCreatedAt,
       });
     } catch (error) {
@@ -234,7 +225,12 @@ export function ImportKeyDialog({
     } finally {
       setGenerating(false);
     }
-  }
+  });
+
+  const manualPasswordError = form.formState.errors.manualPassword?.message;
+  const manualPrivateKeyError = form.formState.errors.manualPrivateKey?.message;
+  const rawKeyError = form.formState.errors.rawKey?.message;
+  const nameError = form.formState.errors.name?.message;
 
   return (
     <Dialog
@@ -266,7 +262,11 @@ export function ImportKeyDialog({
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setMethod(item.id)}
+                onClick={() => {
+                  form.setValue("method", item.id, { shouldDirty: true, shouldValidate: true });
+                  form.clearErrors();
+                  setErrorMessage(null);
+                }}
                 className={`flex flex-col items-center gap-1.5 rounded-lg border p-3 transition-all cursor-pointer ${
                   method === item.id
                     ? "border-primary/40 bg-primary/10 text-primary"
@@ -283,18 +283,19 @@ export function ImportKeyDialog({
             <div>
               <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.importDialog.nameLabel}</label>
               <Input
-                value={name}
-                onChange={(event) => setName(event.target.value)}
+                {...form.register("name")}
                 placeholder={t.keychain.importDialog.namePlaceholder}
               />
+              {nameError ? (
+                <p className="mt-1 text-xs text-destructive">{resolveBackendMessage(String(nameError))}</p>
+              ) : null}
             </div>
             {method !== "manual" || manualType !== "password" ? (
               <div>
                 <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.importDialog.passphraseLabel}</label>
                 <Input
                   type="password"
-                  value={passphrase}
-                  onChange={(event) => setPassphrase(event.target.value)}
+                  {...form.register("passphrase")}
                   placeholder={t.keychain.importDialog.passphrasePlaceholder}
                 />
               </div>
@@ -305,16 +306,22 @@ export function ImportKeyDialog({
             <div className="space-y-3">
               <div>
                 <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.drawer.typeLabel}</label>
-                <Select value={manualType} onValueChange={(value) => setManualType(value as KeychainEntryType)}>
-                  <SelectTrigger className="h-9 bg-secondary/50">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="password">{t.keychain.typePassword}</SelectItem>
-                    <SelectItem value="ssh_key">{t.keychain.typeSshKey}</SelectItem>
-                    <SelectItem value="secret">{t.keychain.typeSecret}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Controller
+                  control={form.control}
+                  name="manualType"
+                  render={({ field }) => (
+                    <Select value={field.value} onValueChange={(value) => field.onChange(value as KeychainEntryType)}>
+                      <SelectTrigger className="h-9 bg-secondary/50">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="password">{t.keychain.typePassword}</SelectItem>
+                        <SelectItem value="ssh_key">{t.keychain.typeSshKey}</SelectItem>
+                        <SelectItem value="secret">{t.keychain.typeSecret}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                />
               </div>
 
               {manualType === "password" || manualType === "secret" ? (
@@ -322,10 +329,12 @@ export function ImportKeyDialog({
                   <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.password}</label>
                   <Input
                     type="password"
-                    value={manualPassword}
-                    onChange={(event) => setManualPassword(event.target.value)}
+                    {...form.register("manualPassword")}
                     placeholder={t.keychain.drawer.passwordPlaceholder}
                   />
+                  {manualPasswordError ? (
+                    <p className="mt-1 text-xs text-destructive">{resolveBackendMessage(String(manualPasswordError))}</p>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -335,18 +344,19 @@ export function ImportKeyDialog({
                     <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.privateKey}</label>
                     <Textarea
                       rows={6}
-                      value={manualPrivateKey}
-                      onChange={(event) => setManualPrivateKey(event.target.value)}
+                      {...form.register("manualPrivateKey")}
                       placeholder={t.keychain.drawer.privateKeyPlaceholder}
                       className="font-mono text-xs"
                     />
+                    {manualPrivateKeyError ? (
+                      <p className="mt-1 text-xs text-destructive">{resolveBackendMessage(String(manualPrivateKeyError))}</p>
+                    ) : null}
                   </div>
                   <div>
                     <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.publicKey}</label>
                     <Textarea
                       rows={4}
-                      value={manualPublicKey}
-                      onChange={(event) => setManualPublicKey(event.target.value)}
+                      {...form.register("manualPublicKey")}
                       placeholder={t.keychain.drawer.publicKeyPlaceholder}
                       className="font-mono text-xs"
                     />
@@ -372,11 +382,13 @@ export function ImportKeyDialog({
               {sourcePath ? <p className="text-[11px] text-muted-foreground break-all">{sourcePath}</p> : null}
               <Textarea
                 rows={6}
-                value={rawKey}
-                onChange={(event) => setRawKey(event.target.value)}
+                {...form.register("rawKey")}
                 placeholder={t.keychain.importDialog.fileContentPlaceholder}
                 className="font-mono text-xs"
               />
+              {rawKeyError ? (
+                <p className="text-xs text-destructive">{resolveBackendMessage(String(rawKeyError))}</p>
+              ) : null}
             </div>
           ) : null}
 
@@ -385,11 +397,13 @@ export function ImportKeyDialog({
               <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.importDialog.pasteLabel}</label>
               <Textarea
                 rows={8}
-                value={rawKey}
-                onChange={(event) => setRawKey(event.target.value)}
+                {...form.register("rawKey")}
                 placeholder={t.keychain.importDialog.pastePlaceholder}
                 className="font-mono text-xs"
               />
+              {rawKeyError ? (
+                <p className="text-xs text-destructive">{resolveBackendMessage(String(rawKeyError))}</p>
+              ) : null}
             </div>
           ) : null}
 
@@ -397,26 +411,31 @@ export function ImportKeyDialog({
             <div className="space-y-3">
               <div>
                 <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.importDialog.algorithmLabel}</label>
-                <Select
-                  value={algorithm}
-                  onValueChange={(value) => setAlgorithm(value as SshKeyGenerateInput["algorithm"])}
-                >
-                  <SelectTrigger className="h-9 bg-secondary/50">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="ed25519">{t.keychain.importDialog.algorithmEd25519}</SelectItem>
-                    <SelectItem value="rsa4096">{t.keychain.importDialog.algorithmRsa4096}</SelectItem>
-                    <SelectItem value="rsa2048">{t.keychain.importDialog.algorithmRsa2048}</SelectItem>
-                    <SelectItem value="ecdsa521">{t.keychain.importDialog.algorithmEcdsa521}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Controller
+                  control={form.control}
+                  name="algorithm"
+                  render={({ field }) => (
+                    <Select
+                      value={field.value}
+                      onValueChange={(value) => field.onChange(value as SshKeyGenerateInput["algorithm"])}
+                    >
+                      <SelectTrigger className="h-9 bg-secondary/50">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="ed25519">{t.keychain.importDialog.algorithmEd25519}</SelectItem>
+                        <SelectItem value="rsa4096">{t.keychain.importDialog.algorithmRsa4096}</SelectItem>
+                        <SelectItem value="rsa2048">{t.keychain.importDialog.algorithmRsa2048}</SelectItem>
+                        <SelectItem value="ecdsa521">{t.keychain.importDialog.algorithmEcdsa521}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                />
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1.5 block">{t.keychain.importDialog.commentLabel}</label>
                 <Input
-                  value={generateComment}
-                  onChange={(event) => setGenerateComment(event.target.value)}
+                  {...form.register("generateComment")}
                   placeholder={t.keychain.importDialog.commentPlaceholder}
                 />
               </div>
@@ -440,7 +459,7 @@ export function ImportKeyDialog({
           <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={busy || generating}>
             {t.common.cancel}
           </Button>
-          <Button size="sm" onClick={() => void handleSubmit()} disabled={busy || generating || !name.trim()}>
+          <Button size="sm" onClick={() => void submit()} disabled={busy || generating || !(name ?? "").trim()}>
             {generating ? t.keychain.importDialog.generatingAction : submitLabel}
           </Button>
         </DialogFooter>

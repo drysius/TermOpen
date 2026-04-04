@@ -7,6 +7,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { useT } from "@/langs";
 import { cn } from "@/lib/utils";
 import type {
@@ -323,7 +324,7 @@ export function RdpBlockView({
     [isConnected],
   );
 
-  const statusMessage = block.connectMessage;
+  const statusMessage = resolveBackendMessage(block.connectMessage);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -437,7 +438,7 @@ export function RdpBlockView({
                 ) : null}
 
                 {block.connectError ? (
-                  <p className="mt-3 text-xs text-red-300">{block.connectError}</p>
+                  <p className="mt-3 text-xs text-red-300">{resolveBackendMessage(block.connectError)}</p>
                 ) : null}
               </div>
             </div>

@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 
 import { BLANK_KEYCHAIN_ENTRY, BLANK_PROFILE } from "@/constants";
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { getError } from "@/functions/common";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { getT } from "@/langs";
@@ -282,7 +283,7 @@ export function createConnectionActions(
         set({ settings: saved });
         if (saved.sync_on_settings_change && get().syncState.connected) {
           set((state) => ({
-            syncState: { ...state.syncState, status: "running", message: "Sincronizando configuracoes..." },
+            syncState: { ...state.syncState, status: "running", message: { message: "sync_settings_running" } },
           }));
           const synced = await api.syncPush();
           set({ syncState: synced });
@@ -318,7 +319,7 @@ export function createConnectionActions(
     runSync: async (action, serverAddress) => {
       try {
         set((state) => ({
-          syncState: { ...state.syncState, status: "running", message: "Sincronizando..." },
+          syncState: { ...state.syncState, status: "running", message: { message: "sync_login_opening_browser" } },
         }));
         const nextState =
           action === "login"
@@ -327,11 +328,11 @@ export function createConnectionActions(
               ? await api.syncPush()
               : await api.syncPull();
         set({ syncState: nextState });
-        toast.message(nextState.message);
+        toast.message(resolveBackendMessage(nextState.message));
       } catch (error) {
         toast.error(getError(error));
         set((state) => ({
-          syncState: { ...state.syncState, status: "error", message: getError(error) },
+          syncState: { ...state.syncState, status: "error", message: { message: "backend_error" } },
         }));
       }
     },
@@ -340,7 +341,7 @@ export function createConnectionActions(
       try {
         const next = await api.syncCancel();
         set({ syncState: next });
-        toast.message(next.message);
+        toast.message(resolveBackendMessage(next.message));
       } catch (error) {
         toast.error(getError(error));
       }

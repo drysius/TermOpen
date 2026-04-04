@@ -22,10 +22,13 @@ import {
   useRef,
   useState,
 } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 
 import { WorkspaceBlockController, type WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
 import { AppDialog } from "@/components/ui/app-dialog";
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { baseName, getError, joinPath, joinRemotePath, normalizeRemotePath, supportsProtocol } from "@/functions/common";
 import {
   detectEditorFileMeta,
@@ -36,6 +39,7 @@ import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
 import type {
+  BackendMessage,
   ClipboardLocalItem,
   ConnectionProfile,
   ConnectionProtocol,
@@ -78,6 +82,11 @@ import {
 } from "@/pages/tabs/workspace/natives/rdp-stream";
 import { createSourceFile, createSourceFolder, decodeBase64Chunk, deleteSourceEntry, listSourceEntries, readSourceBinaryPreview, readSourceFile, readSourceTextChunk, renameSourceEntry, writeSourceFile } from "@/pages/tabs/workspace/natives/source-io";
 import {
+  workspaceNameInputSchema,
+  type WorkspaceNameInputValues,
+  workspacePasswordSchema,
+} from "@/schemas/workspace";
+import {
   createId,
   formatProfileSourceId,
   isTimeoutErrorMessage,
@@ -102,6 +111,33 @@ type SftpCreateDialogState = {
   sourceId: string;
   basePath: string;
   value: string;
+  busy: boolean;
+};
+
+type SftpPathDialogMode = "rename" | "move";
+
+type SftpPathDialogState = {
+  mode: SftpPathDialogMode;
+  blockId: string;
+  sourceId: string;
+  fromPath: string;
+  entryName: string;
+  value: string;
+  busy: boolean;
+};
+
+type SftpDeleteDialogState = {
+  blockId: string;
+  sourceId: string;
+  path: string;
+  entryName: string;
+  isDir: boolean;
+  busy: boolean;
+};
+
+type EditorUploadDialogState = {
+  blockId: string;
+  path: string;
   busy: boolean;
 };
 
@@ -319,8 +355,15 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
   const [keyActionsStatus, setKeyActionsStatus] = useState<KeyActionsStatusPayload | null>(null);
   const [captureContextVersion, setCaptureContextVersion] = useState(0);
   const [sftpCreateDialog, setSftpCreateDialog] = useState<SftpCreateDialogState | null>(null);
+  const [sftpPathDialog, setSftpPathDialog] = useState<SftpPathDialogState | null>(null);
+  const [sftpDeleteDialog, setSftpDeleteDialog] = useState<SftpDeleteDialogState | null>(null);
+  const [editorUploadDialog, setEditorUploadDialog] = useState<EditorUploadDialogState | null>(null);
   const [externalDropPreview, setExternalDropPreview] = useState<ExternalDropPreview | null>(null);
   const [internalEntryDrag, setInternalEntryDrag] = useState<InternalEntryDragState | null>(null);
+  const sftpPathForm = useForm<WorkspaceNameInputValues>({
+    resolver: zodResolver(workspaceNameInputSchema),
+    defaultValues: { value: "" },
+  });
   const connectRetryTimersRef = useRef<Record<string, { retryTimer: number; countdownTimer: number }>>({});
   const rdpStreamSessionByBlockRef = useRef<Map<string, string>>(new Map());
   const rdpStreamTokenByBlockRef = useRef<Map<string, string>>(new Map());
@@ -828,13 +871,13 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
   );
 
   const appendWorkspaceLog = useCallback(
-    (level: WorkspaceLogLevel, message: string, details?: string) => {
+    (level: WorkspaceLogLevel, message: string, details?: string | BackendMessage) => {
       const entry: WorkspaceLogEntry = {
         id: createId("log"),
         timestamp: Date.now(),
         level,
         message,
-        details,
+        details: details ? resolveBackendMessage(details) : undefined,
       };
       setWorkspaceLogs((current) => {
         const next = [...current, entry];
@@ -1193,7 +1236,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
     [connections, notifyModuleFailure, notifyModuleNotFound],
   );
 
-  const saveEditorBlock = useCallback(
+  const persistEditorBlock = useCallback(
     async (blockId: string) => {
       const target = blocksRef.current.find((block): block is EditorBlock => block.id === blockId && block.kind === "editor");
       if (!target || target.view !== "text" || target.loading || !target.dirty || target.saving) {
@@ -1206,13 +1249,6 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
           toast.warning("Aguarde o fim do carregamento para salvar.");
         }
         return;
-      }
-
-      if (settings.modified_files_upload_policy === "ask") {
-        const confirmUpload = window.confirm(`Enviar alteracoes de ${baseName(target.path)} agora?`);
-        if (!confirmUpload) {
-          return;
-        }
       }
 
       setBlocks((current) =>
@@ -1238,7 +1274,29 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
         );
       }
     },
-    [notifyModuleFailure, notifyModuleNotFound, settings.modified_files_upload_policy],
+    [notifyModuleFailure, notifyModuleNotFound],
+  );
+
+  const saveEditorBlock = useCallback(
+    async (blockId: string) => {
+      const target = blocksRef.current.find((block): block is EditorBlock => block.id === blockId && block.kind === "editor");
+      if (!target || target.view !== "text" || target.loading || !target.dirty || target.saving) {
+        await persistEditorBlock(blockId);
+        return;
+      }
+
+      if (settings.modified_files_upload_policy === "ask") {
+        setEditorUploadDialog({
+          blockId,
+          path: target.path,
+          busy: false,
+        });
+        return;
+      }
+
+      await persistEditorBlock(blockId);
+    },
+    [persistEditorBlock, settings.modified_files_upload_policy],
   );
 
   const openEditorBlockExternal = useCallback(
@@ -3718,11 +3776,12 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
       return;
     }
 
-    const name = snapshot.value.trim();
-    if (!name) {
-      toast.error("Informe um nome valido.");
+    const parsed = workspaceNameInputSchema.safeParse({ value: snapshot.value });
+    if (!parsed.success) {
+      toast.error(resolveBackendMessage(parsed.error.issues[0]?.message ?? "invalid_input"));
       return;
     }
+    const name = parsed.data.value.trim();
 
     setSftpCreateDialog((current) => (current ? { ...current, busy: true } : current));
     try {
@@ -3751,6 +3810,84 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
       setSftpCreateDialog((current) => (current ? { ...current, busy: false } : current));
     }
   }, [refreshSftpBlock, sftpCreateDialog]);
+
+  const closeSftpPathDialog = useCallback(() => {
+    setSftpPathDialog((current) => (current?.busy ? current : null));
+    sftpPathForm.reset({ value: "" });
+  }, [sftpPathForm]);
+
+  const submitSftpPathDialog = useCallback(() => {
+    const snapshot = sftpPathDialog;
+    if (!snapshot || snapshot.busy) {
+      return;
+    }
+
+    void sftpPathForm.handleSubmit(async (values) => {
+      const nextPath = values.value.trim();
+      if (!nextPath || nextPath === snapshot.fromPath) {
+        setSftpPathDialog(null);
+        return;
+      }
+
+      setSftpPathDialog((current) => (current ? { ...current, busy: true } : current));
+      try {
+        await renameSourceEntry(snapshot.sourceId, snapshot.fromPath, nextPath);
+        const currentBlock = blocksRef.current.find(
+          (item): item is SftpBlock => item.id === snapshot.blockId && item.kind === "sftp",
+        );
+        await refreshSftpBlock(
+          snapshot.blockId,
+          currentBlock?.path ?? parentDirectory(snapshot.fromPath),
+          currentBlock?.sourceId ?? snapshot.sourceId,
+        );
+        setSftpPathDialog(null);
+      } catch (error) {
+        toast.error(getError(error));
+        setSftpPathDialog((current) => (current ? { ...current, busy: false } : current));
+      }
+    })();
+  }, [refreshSftpBlock, sftpPathDialog, sftpPathForm]);
+
+  const closeSftpDeleteDialog = useCallback(() => {
+    setSftpDeleteDialog((current) => (current?.busy ? current : null));
+  }, []);
+
+  const submitSftpDeleteDialog = useCallback(async () => {
+    const snapshot = sftpDeleteDialog;
+    if (!snapshot || snapshot.busy) {
+      return;
+    }
+    setSftpDeleteDialog((current) => (current ? { ...current, busy: true } : current));
+    try {
+      await deleteSourceEntry(snapshot.sourceId, snapshot.path, snapshot.isDir);
+      const currentBlock = blocksRef.current.find(
+        (item): item is SftpBlock => item.id === snapshot.blockId && item.kind === "sftp",
+      );
+      await refreshSftpBlock(
+        snapshot.blockId,
+        currentBlock?.path ?? parentDirectory(snapshot.path),
+        currentBlock?.sourceId ?? snapshot.sourceId,
+      );
+      setSftpDeleteDialog(null);
+    } catch (error) {
+      toast.error(getError(error));
+      setSftpDeleteDialog((current) => (current ? { ...current, busy: false } : current));
+    }
+  }, [refreshSftpBlock, sftpDeleteDialog]);
+
+  const closeEditorUploadDialog = useCallback(() => {
+    setEditorUploadDialog((current) => (current?.busy ? current : null));
+  }, []);
+
+  const submitEditorUploadDialog = useCallback(async () => {
+    const snapshot = editorUploadDialog;
+    if (!snapshot || snapshot.busy) {
+      return;
+    }
+    setEditorUploadDialog((current) => (current ? { ...current, busy: true } : current));
+    await persistEditorBlock(snapshot.blockId);
+    setEditorUploadDialog(null);
+  }, [editorUploadDialog, persistEditorBlock]);
 
   const handleSftpContextAction = useCallback(
     async (block: SftpBlock, action: SftpContextAction, entry: SftpEntry | null) => {
@@ -3826,12 +3963,16 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
           return;
         }
         if (action === "rename") {
-          const nextPath = window.prompt("Novo caminho:", entry.path);
-          if (!nextPath || nextPath.trim() === entry.path) {
-            return;
-          }
-          await renameSourceEntry(block.sourceId, entry.path, nextPath.trim());
-          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          setSftpPathDialog({
+            mode: "rename",
+            blockId: block.id,
+            sourceId: block.sourceId,
+            fromPath: entry.path,
+            entryName: entry.name,
+            value: entry.path,
+            busy: false,
+          });
+          sftpPathForm.reset({ value: entry.path });
           return;
         }
         if (action === "move") {
@@ -3839,27 +3980,33 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
             block.sourceId === "local"
               ? joinPath(block.path, baseName(entry.path))
               : joinRemotePath(block.path, baseName(entry.path));
-          const nextPath = window.prompt("Mover para:", suggested);
-          if (!nextPath || nextPath.trim() === entry.path) {
-            return;
-          }
-          await renameSourceEntry(block.sourceId, entry.path, nextPath.trim());
-          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          setSftpPathDialog({
+            mode: "move",
+            blockId: block.id,
+            sourceId: block.sourceId,
+            fromPath: entry.path,
+            entryName: entry.name,
+            value: suggested,
+            busy: false,
+          });
+          sftpPathForm.reset({ value: suggested });
           return;
         }
         if (action === "delete") {
-          const confirmed = window.confirm(`Remover ${entry.name}?`);
-          if (!confirmed) {
-            return;
-          }
-          await deleteSourceEntry(block.sourceId, entry.path, entry.is_dir);
-          await refreshSftpBlock(block.id, block.path, block.sourceId);
+          setSftpDeleteDialog({
+            blockId: block.id,
+            sourceId: block.sourceId,
+            path: entry.path,
+            entryName: entry.name,
+            isDir: entry.is_dir,
+            busy: false,
+          });
         }
       } catch (error) {
         toast.error(getError(error));
       }
     },
-    [executeTransfer, openFile, openPathInTerminal, refreshSftpBlock],
+    [executeTransfer, openFile, openPathInTerminal, refreshSftpBlock, sftpPathForm],
   );
 
   const createBlock = useCallback(async () => {
@@ -4261,17 +4408,21 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
                     );
                   },
                   onSubmitPassword: () => {
-                    const password = block.passwordDraft.trim();
-                    if (!password) {
+                    const parsed = workspacePasswordSchema.safeParse({
+                      password: block.passwordDraft,
+                      save: block.savePasswordChoice,
+                    });
+                    if (!parsed.success) {
                       setBlocks((current) =>
                         current.map((item) =>
                           item.id === block.id && item.kind === "terminal"
-                            ? { ...item, connectError: "Informe a senha para continuar." }
+                            ? { ...item, connectError: parsed.error.issues[0]?.message ?? "invalid_input" }
                             : item,
                         ),
                       );
                       return;
                     }
+                    const password = parsed.data.password;
                     void resolvePendingTerminalConnection(block.id, {
                       acceptUnknownHost: block.acceptUnknownHost,
                       passwordOverride: password,
@@ -4401,17 +4552,21 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
                     );
                   },
                   onSubmitPassword: () => {
-                    const password = block.passwordDraft.trim();
-                    if (!password) {
+                    const parsed = workspacePasswordSchema.safeParse({
+                      password: block.passwordDraft,
+                      save: block.savePasswordChoice,
+                    });
+                    if (!parsed.success) {
                       setBlocks((current) =>
                         current.map((item) =>
                           item.id === block.id && item.kind === "sftp"
-                            ? { ...item, connectError: "Informe a senha para continuar." }
+                            ? { ...item, connectError: parsed.error.issues[0]?.message ?? "invalid_input" }
                             : item,
                         ),
                       );
                       return;
                     }
+                    const password = parsed.data.password;
                     clearBlockRetryTimers(block.id);
                     void resolvePendingSftpConnection(block.id, {
                       acceptUnknownHost: block.acceptUnknownHost,
@@ -4502,17 +4657,21 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
                       ),
                     ),
                   onSubmitPassword: () => {
-                    const password = block.passwordDraft.trim();
-                    if (!password) {
+                    const parsed = workspacePasswordSchema.safeParse({
+                      password: block.passwordDraft,
+                      save: block.savePasswordChoice,
+                    });
+                    if (!parsed.success) {
                       setBlocks((current) =>
                         current.map((item) =>
                           item.id === block.id && item.kind === "rdp"
-                            ? { ...item, connectError: "Informe a senha para continuar." }
+                            ? { ...item, connectError: parsed.error.issues[0]?.message ?? "invalid_input" }
                             : item,
                         ),
                       );
                       return;
                     }
+                    const password = parsed.data.password;
                     clearBlockRetryTimers(block.id);
                     void resolvePendingRdpConnection(block.id, {
                       passwordOverride: password,
@@ -4595,6 +4754,133 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
             placeholder={sftpCreateDialog?.mode === "mkdir" ? "ex: docs" : "ex: notes.txt"}
             className="h-9 w-full rounded-lg border border-border/60 bg-secondary/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
           />
+        </div>
+      </AppDialog>
+
+      <AppDialog
+        open={!!sftpPathDialog}
+        title={sftpPathDialog?.mode === "rename" ? "Renomear entrada" : "Mover entrada"}
+        description={sftpPathDialog ? `Origem: ${sftpPathDialog.fromPath}` : undefined}
+        onClose={closeSftpPathDialog}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-foreground/90 transition hover:bg-secondary disabled:opacity-60"
+              disabled={!!sftpPathDialog?.busy}
+              onClick={closeSftpPathDialog}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-60"
+              disabled={!!sftpPathDialog?.busy}
+              onClick={() => submitSftpPathDialog()}
+            >
+              {sftpPathDialog?.mode === "rename" ? "Renomear" : "Mover"}
+            </button>
+          </div>
+        }
+      >
+        <form
+          id="sftp-path-dialog-form"
+          className="space-y-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitSftpPathDialog();
+          }}
+        >
+          <p className="text-xs text-muted-foreground">
+            {sftpPathDialog?.mode === "rename"
+              ? `Defina o novo caminho para "${sftpPathDialog?.entryName ?? ""}".`
+              : `Defina o destino para "${sftpPathDialog?.entryName ?? ""}".`}
+          </p>
+          <input
+            autoFocus
+            {...sftpPathForm.register("value")}
+            placeholder={sftpPathDialog?.mode === "rename" ? "ex: novo-nome.txt" : "ex: /destino/arquivo.txt"}
+            className="h-9 w-full rounded-lg border border-border/60 bg-secondary/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+          {sftpPathForm.formState.errors.value?.message ? (
+            <p className="text-xs text-destructive">
+              {resolveBackendMessage(String(sftpPathForm.formState.errors.value.message))}
+            </p>
+          ) : null}
+        </form>
+      </AppDialog>
+
+      <AppDialog
+        open={!!sftpDeleteDialog}
+        title="Remover entrada"
+        description={sftpDeleteDialog ? `Destino: ${sftpDeleteDialog.path}` : undefined}
+        onClose={closeSftpDeleteDialog}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-foreground/90 transition hover:bg-secondary disabled:opacity-60"
+              disabled={!!sftpDeleteDialog?.busy}
+              onClick={closeSftpDeleteDialog}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition hover:opacity-90 disabled:opacity-60"
+              disabled={!!sftpDeleteDialog?.busy}
+              onClick={() => void submitSftpDeleteDialog()}
+            >
+              Remover
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-2">
+          <p className="text-sm text-foreground">
+            {sftpDeleteDialog
+              ? `Deseja remover ${sftpDeleteDialog.isDir ? "a pasta" : "o arquivo"} "${sftpDeleteDialog.entryName ?? ""}"?`
+              : "Deseja remover a entrada selecionada?"}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Essa ação não pode ser desfeita.
+          </p>
+        </div>
+      </AppDialog>
+
+      <AppDialog
+        open={!!editorUploadDialog}
+        title="Salvar alterações"
+        description={editorUploadDialog ? baseName(editorUploadDialog.path) : undefined}
+        onClose={closeEditorUploadDialog}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-foreground/90 transition hover:bg-secondary disabled:opacity-60"
+              disabled={!!editorUploadDialog?.busy}
+              onClick={closeEditorUploadDialog}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-60"
+              disabled={!!editorUploadDialog?.busy}
+              onClick={() => void submitEditorUploadDialog()}
+            >
+              Salvar agora
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-2">
+          <p className="text-sm text-foreground">
+            Deseja salvar as alterações deste arquivo agora?
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Esta confirmação aparece porque a política de upload está definida como "ask".
+          </p>
         </div>
       </AppDialog>
 

@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { open } from "@tauri-apps/plugin-dialog";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { toast } from "sonner";
@@ -29,18 +30,32 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useWindowOverlayBoundsClassName } from "@/components/ui/window-overlay";
 import { getError } from "@/functions/common";
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { useT } from "@/langs";
+import {
+  type ChangePasswordSchemaInput,
+  type ChangePasswordSchemaValues,
+  type DeleteAccountSchemaInput,
+  type DeleteAccountSchemaValues,
+  type LocalServerSchemaInput,
+  type LocalServerSchemaValues,
+  type SettingsSchemaInput,
+  type SettingsSchemaValues,
+  changePasswordSchema,
+  deleteAccountSchema,
+  localServerSchema,
+  settingsSchema,
+} from "@/schemas/settings";
 import { useAppStore } from "@/store/app-store";
 import { api } from "@/lib/tauri";
 import type { AppSettings, AuthServer, ModifiedUploadPolicy, SyncLoggedUser } from "@/types/openptl";
 import { OptionDropdown } from "@/pages/sections/settings/option-dropdown";
 import { SettingsPanel } from "@/pages/sections/settings/settings-panel";
 import { SettingsRow } from "@/pages/sections/settings/settings-row";
-import type { PasswordFormValues, SettingsFormValues } from "@/pages/sections/settings/types";
 
 const uploadPolicyStorageKey = "openptl.upload-policy.prompted";
 
-function normalizeSettingsValues(values: SettingsFormValues): AppSettings {
+function normalizeSettingsValues(values: SettingsSchemaInput): AppSettings {
   return {
     ...values,
     external_editor_command: values.external_editor_command?.trim() ?? "",
@@ -80,22 +95,37 @@ export function SettingsPage() {
   const [serverPage, setServerPage] = useState(0);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncAction, setSyncAction] = useState<"login" | "push" | "pull" | null>(null);
-  const [serverDraft, setServerDraft] = useState({ id: "", label: "", address: "", author: "" });
   const [showLocalServerModal, setShowLocalServerModal] = useState(false);
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
   const [deleteAccountBusy, setDeleteAccountBusy] = useState(false);
-  const [deleteCloudData, setDeleteCloudData] = useState(false);
-  const [deleteCurrentPassword, setDeleteCurrentPassword] = useState("");
   const SERVERS_PER_PAGE = 5;
 
-  const settingsForm = useForm<SettingsFormValues>({
+  const settingsForm = useForm<SettingsSchemaInput, unknown, SettingsSchemaValues>({
+    resolver: zodResolver(settingsSchema),
     defaultValues: settings,
   });
-  const passwordForm = useForm<PasswordFormValues>({
+  const passwordForm = useForm<ChangePasswordSchemaInput, unknown, ChangePasswordSchemaValues>({
+    resolver: zodResolver(changePasswordSchema),
     defaultValues: {
       oldPassword: "",
       newPassword: "",
       confirmPassword: "",
+    },
+  });
+  const deleteAccountForm = useForm<DeleteAccountSchemaInput, unknown, DeleteAccountSchemaValues>({
+    resolver: zodResolver(deleteAccountSchema),
+    defaultValues: {
+      currentPassword: "",
+      deleteCloudData: false,
+    },
+  });
+  const localServerForm = useForm<LocalServerSchemaInput, unknown, LocalServerSchemaValues>({
+    resolver: zodResolver(localServerSchema),
+    defaultValues: {
+      id: "",
+      label: "",
+      address: "",
+      author: "",
     },
   });
   const saveInFlightRef = useRef(false);
@@ -112,7 +142,7 @@ export function SettingsPage() {
     }
     const next =
       pendingSettingsRef.current ??
-      normalizeSettingsValues(settingsForm.getValues() as SettingsFormValues);
+      normalizeSettingsValues(settingsForm.getValues());
     pendingSettingsRef.current = null;
 
     if (JSON.stringify(next) === JSON.stringify(settings)) {
@@ -134,7 +164,7 @@ export function SettingsPage() {
 
   const requestSettingsSave = useCallback(
     (immediate = false) => {
-      pendingSettingsRef.current = normalizeSettingsValues(settingsForm.getValues() as SettingsFormValues);
+      pendingSettingsRef.current = normalizeSettingsValues(settingsForm.getValues());
       if (immediate) {
         void flushSettingsSave();
       }
@@ -212,23 +242,20 @@ export function SettingsPage() {
     await saveSettings({ ...settings, selected_auth_server_id: id }, { silent: true });
   }
 
-  async function handleSaveServer() {
-    const label = serverDraft.label.trim();
-    const address = serverDraft.address.trim();
-    if (!label || !address) {
-      return;
-    }
+  async function handleSaveServer(values: LocalServerSchemaValues) {
+    const label = values.label.trim();
+    const address = values.address.trim();
     const payload: AuthServer = {
-      id: serverDraft.id || `local:${Date.now()}`,
+      id: values.id || `local:${Date.now()}`,
       label,
       address,
-      author: serverDraft.author.trim() || null,
+      author: values.author.trim() || null,
       official: false,
     };
     await api.authServerSave(payload);
     const next = await api.authServersList();
     setAuthServers(next);
-    setServerDraft({ id: "", label: "", address: "", author: "" });
+    localServerForm.reset({ id: "", label: "", address: "", author: "" });
     setShowLocalServerModal(false);
   }
 
@@ -246,19 +273,13 @@ export function SettingsPage() {
     }
   }
 
-  async function handleDeleteAccount() {
-    const password = deleteCurrentPassword.trim();
-    if (!password) {
-      toast.error(t.settings.security.confirmPasswordRequired);
-      return;
-    }
-
+  async function handleDeleteAccount(values: DeleteAccountSchemaValues) {
+    const password = values.currentPassword.trim();
     setDeleteAccountBusy(true);
     try {
-      await api.vaultDeleteAccount(password, deleteCloudData && Boolean(loggedUser));
+      await api.vaultDeleteAccount(password, values.deleteCloudData && Boolean(loggedUser));
       setDeleteAccountOpen(false);
-      setDeleteCurrentPassword("");
-      setDeleteCloudData(false);
+      deleteAccountForm.reset({ currentPassword: "", deleteCloudData: false });
       await bootstrap();
       toast.success(t.settings.security.deleteSuccess);
     } catch (error) {
@@ -837,7 +858,7 @@ export function SettingsPage() {
                                   : "text-foreground/90"
                               }`}
                           >
-                            {syncState.message}
+                            {resolveBackendMessage(syncState.message)}
                           </p>
                           {syncState.last_sync_at ? (
                             <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -924,7 +945,7 @@ export function SettingsPage() {
                         size="sm"
                         className="gap-1.5"
                         onClick={() => {
-                          setServerDraft({
+                          localServerForm.reset({
                             id: "",
                             label: "",
                             address: "",
@@ -1068,7 +1089,7 @@ export function SettingsPage() {
                                       className="h-7 w-7 p-0"
                                       onClick={(event) => {
                                         event.stopPropagation();
-                                        setServerDraft({
+                                        localServerForm.reset({
                                           id: server.id,
                                           label: server.label,
                                           address: server.address,
@@ -1191,8 +1212,10 @@ export function SettingsPage() {
                     type="button"
                     variant="destructive"
                     onClick={() => {
-                      setDeleteCurrentPassword("");
-                      setDeleteCloudData(cloudConnected);
+                      deleteAccountForm.reset({
+                        currentPassword: "",
+                        deleteCloudData: cloudConnected,
+                      });
                       setDeleteAccountOpen(true);
                     }}
                   >
@@ -1227,8 +1250,7 @@ export function SettingsPage() {
             return;
           }
           setDeleteAccountOpen(false);
-          setDeleteCurrentPassword("");
-          setDeleteCloudData(false);
+          deleteAccountForm.reset({ currentPassword: "", deleteCloudData: false });
         }}
         footer={
           <div className="flex justify-end gap-2">
@@ -1238,8 +1260,7 @@ export function SettingsPage() {
               disabled={deleteAccountBusy}
               onClick={() => {
                 setDeleteAccountOpen(false);
-                setDeleteCurrentPassword("");
-                setDeleteCloudData(false);
+                deleteAccountForm.reset({ currentPassword: "", deleteCloudData: false });
               }}
             >
               {t.common.cancel}
@@ -1247,8 +1268,8 @@ export function SettingsPage() {
             <Button
               type="button"
               variant="destructive"
-              disabled={deleteAccountBusy || !deleteCurrentPassword.trim()}
-              onClick={() => void handleDeleteAccount()}
+              disabled={deleteAccountBusy || !deleteAccountForm.watch("currentPassword")?.trim()}
+              onClick={() => void deleteAccountForm.handleSubmit(handleDeleteAccount)()}
             >
               {deleteAccountBusy ? t.settings.security.deletingAction : t.settings.security.deleteConfirmAction}
             </Button>
@@ -1284,9 +1305,11 @@ export function SettingsPage() {
                   <p className="mt-1 text-xs text-muted-foreground">{t.settings.security.deleteCloudDescription}</p>
                 </div>
                 <Switch
-                  checked={deleteCloudData}
+                  checked={deleteAccountForm.watch("deleteCloudData")}
                   disabled={deleteAccountBusy}
-                  onCheckedChange={setDeleteCloudData}
+                  onCheckedChange={(checked) =>
+                    deleteAccountForm.setValue("deleteCloudData", checked, { shouldDirty: true })
+                  }
                 />
               </div>
             </div>
@@ -1301,9 +1324,8 @@ export function SettingsPage() {
             <Input
               type="password"
               placeholder={t.settings.security.confirmPasswordPlaceholder}
-              value={deleteCurrentPassword}
+              {...deleteAccountForm.register("currentPassword")}
               disabled={deleteAccountBusy}
-              onChange={(event) => setDeleteCurrentPassword(event.target.value)}
             />
           </div>
         </div>
@@ -1311,11 +1333,11 @@ export function SettingsPage() {
 
       <AppDialog
         open={showLocalServerModal}
-        title={serverDraft.id ? t.settings.localServer.editTitle : t.settings.localServer.newTitle}
+        title={localServerForm.watch("id") ? t.settings.localServer.editTitle : t.settings.localServer.newTitle}
         description={t.settings.localServer.modalDescription}
         onClose={() => {
           setShowLocalServerModal(false);
-          setServerDraft({ id: "", label: "", address: "", author: "" });
+          localServerForm.reset({ id: "", label: "", address: "", author: "" });
         }}
         footer={
           <div className="flex justify-end gap-2">
@@ -1324,17 +1346,17 @@ export function SettingsPage() {
               variant="outline"
               onClick={() => {
                 setShowLocalServerModal(false);
-                setServerDraft({ id: "", label: "", address: "", author: "" });
+                localServerForm.reset({ id: "", label: "", address: "", author: "" });
               }}
             >
               Cancelar
             </Button>
             <Button
               type="button"
-              onClick={() => void handleSaveServer()}
-              disabled={!serverDraft.label.trim() || !serverDraft.address.trim()}
+              onClick={() => void localServerForm.handleSubmit(handleSaveServer)()}
+              disabled={!localServerForm.watch("label")?.trim() || !localServerForm.watch("address")?.trim()}
             >
-              {serverDraft.id ? t.settings.localServer.saveChanges : t.settings.localServer.addServer}
+              {localServerForm.watch("id") ? t.settings.localServer.saveChanges : t.settings.localServer.addServer}
             </Button>
           </div>
         }
@@ -1342,25 +1364,16 @@ export function SettingsPage() {
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <Input
             placeholder={t.settings.localServer.editTitle}
-            value={serverDraft.label}
-            onChange={(event) =>
-              setServerDraft((current) => ({ ...current, label: event.target.value }))
-            }
+            {...localServerForm.register("label")}
           />
           <Input
             placeholder="https://worker.example.com"
-            value={serverDraft.address}
-            onChange={(event) =>
-              setServerDraft((current) => ({ ...current, address: event.target.value }))
-            }
+            {...localServerForm.register("address")}
           />
           <Input
             className="md:col-span-2"
             placeholder={t.settings.localServer.addServer}
-            value={serverDraft.author}
-            onChange={(event) =>
-              setServerDraft((current) => ({ ...current, author: event.target.value }))
-            }
+            {...localServerForm.register("author")}
           />
         </div>
       </AppDialog>

@@ -1,8 +1,58 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 fn default_ssh_port() -> u16 {
     22
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackendMessage {
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<HashMap<String, String>>,
+}
+
+impl BackendMessage {
+    pub fn key(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            params: None,
+        }
+    }
+
+    pub fn with_params(
+        message: impl Into<String>,
+        params: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            params: Some(params),
+        }
+    }
+}
+
+impl From<&str> for BackendMessage {
+    fn from(value: &str) -> Self {
+        Self::key(value)
+    }
+}
+
+impl From<String> for BackendMessage {
+    fn from(value: String) -> Self {
+        Self::key(value)
+    }
+}
+
+impl From<&String> for BackendMessage {
+    fn from(value: &String) -> Self {
+        Self::key(value.clone())
+    }
+}
+
+impl std::fmt::Display for BackendMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
 }
 
 fn default_connection_protocols() -> Vec<ConnectionProtocol> {
@@ -414,13 +464,13 @@ pub enum SshConnectResult {
         key_type: String,
         fingerprint: String,
         known_hosts_path: String,
-        message: String,
+        message: BackendMessage,
     },
     AuthRequired {
-        message: String,
+        message: BackendMessage,
     },
     Error {
-        message: String,
+        message: BackendMessage,
     },
 }
 
@@ -435,7 +485,7 @@ pub enum SshConnectPurpose {
 pub struct SyncState {
     pub connected: bool,
     pub status: String,
-    pub message: String,
+    pub message: BackendMessage,
     pub last_sync_at: Option<String>,
     pub pending_user_code: Option<String>,
     pub verification_url: Option<String>,
@@ -452,7 +502,7 @@ pub struct SyncLoggedUser {
 }
 
 impl SyncState {
-    pub fn idle(message: impl Into<String>) -> Self {
+    pub fn idle(message: impl Into<BackendMessage>) -> Self {
         Self {
             connected: false,
             status: "idle".to_string(),
@@ -463,7 +513,7 @@ impl SyncState {
         }
     }
 
-    pub fn ok(message: impl Into<String>, last_sync_at: Option<String>) -> Self {
+    pub fn ok(message: impl Into<BackendMessage>, last_sync_at: Option<String>) -> Self {
         Self {
             connected: true,
             status: "ok".to_string(),
@@ -474,7 +524,7 @@ impl SyncState {
         }
     }
 
-    pub fn error(message: impl Into<String>) -> Self {
+    pub fn error(message: impl Into<BackendMessage>) -> Self {
         Self {
             connected: false,
             status: "error".to_string(),
@@ -526,7 +576,7 @@ pub struct SyncConflictDecision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryProbeResult {
     pub found: bool,
-    pub message: String,
+    pub message: BackendMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,7 +584,7 @@ pub struct ReleaseCheckResult {
     pub available: bool,
     pub latest_version: Option<String>,
     pub url: Option<String>,
-    pub message: String,
+    pub message: BackendMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

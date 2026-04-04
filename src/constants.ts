@@ -50,7 +50,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 export const INITIAL_SYNC_STATE: SyncState = {
   connected: false,
   status: "idle",
-  message: "Sincronizacao ainda nao iniciada.",
+  message: { message: "sync_not_started" },
   last_sync_at: null,
   pending_user_code: null,
   verification_url: null,

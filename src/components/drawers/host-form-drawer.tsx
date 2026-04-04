@@ -1,6 +1,7 @@
 import { ChevronRight, Eye, EyeOff, Folder, Globe, HardDrive, Key, Lock, Monitor, Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { Button } from "@/components/ui/button";
@@ -19,21 +20,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/tauri";
 import { useT } from "@/langs";
+import { hostFormSchema, type HostFormSchemaInput, type HostFormSchemaValues } from "@/schemas/host";
 import { useAppStore } from "@/store/app-store";
 import type { ConnectionProfile, ConnectionProtocol, KeychainEntry } from "@/types/openptl";
-
-interface HostFormValues {
-  id: string;
-  name: string;
-  protocols: ConnectionProtocol[];
-  host: string;
-  port: number;
-  username: string;
-  password: string;
-  private_key: string;
-  keychain_id: string;
-  remote_path: string;
-}
 
 type AuthMethod = "password" | "key" | "agent";
 
@@ -223,7 +212,12 @@ export function HostFormDrawer() {
   const [authMethod, setAuthMethod] = useState<AuthMethod>("password");
   const [privateKeyPath, setPrivateKeyPath] = useState("");
 
-  const { control, register, watch, handleSubmit, reset, setValue } = useForm<HostFormValues>({
+  const { control, register, watch, handleSubmit, reset, setValue } = useForm<
+    HostFormSchemaInput,
+    unknown,
+    HostFormSchemaValues
+  >({
+    resolver: zodResolver(hostFormSchema),
     defaultValues: {
       id: initialProfile.id ?? "",
       name: initialProfile.name ?? "",
@@ -344,7 +338,7 @@ export function HostFormDrawer() {
     }
   }
 
-  function submitConnection(values: HostFormValues) {
+  function submitConnection(values: HostFormSchemaValues) {
     const protocols = normalizeProtocolList(values.protocols);
     const profile: ConnectionProfile = {
       ...initialProfile,
@@ -657,7 +651,11 @@ export function HostFormDrawer() {
                   type="button"
                   size="sm"
                   onClick={() => void submitCurrentConnection()}
-                  disabled={busy || !canSubmit || (authMethod === "key" && !watchedPrivateKey.trim() && !watchedKeychainId)}
+                  disabled={
+                    busy ||
+                    !canSubmit ||
+                    (authMethod === "key" && !(watchedPrivateKey ?? "").trim() && !watchedKeychainId)
+                  }
                 >
                   {t.hostDrawer.wizard.create}
                 </Button>

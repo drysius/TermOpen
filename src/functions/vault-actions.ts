@@ -67,7 +67,7 @@ export function createVaultActions(
         }
 
         set((state) => ({
-          syncState: { ...state.syncState, status: "running", message: "Sincronizando no startup..." },
+          syncState: { ...state.syncState, status: "running", message: { message: "sync_startup_running" } },
           startupSyncBusy: true,
         }));
 
@@ -79,7 +79,7 @@ export function createVaultActions(
             syncState: {
               ...INITIAL_SYNC_STATE,
               status: "conflict",
-              message: "Conflitos de sincronizacao detectados no startup.",
+              message: { message: "sync_startup_conflicts_detected" },
               connected: true,
             },
           });

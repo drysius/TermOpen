@@ -1,24 +1,17 @@
 import { ChevronDown } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 
 import { Button } from "@/components/ui/button";
 import { AppDialog } from "@/components/ui/app-dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { useT } from "@/langs";
+import { keychainSchema, type KeychainSchemaInput, type KeychainSchemaValues } from "@/schemas/keychain";
 import { useAppStore } from "@/store/app-store";
 import type { KeychainEntry, KeychainEntryType } from "@/types/openptl";
-
-interface KeychainFormValues {
-  id: string;
-  name: string;
-  entry_type: KeychainEntryType;
-  password: string;
-  passphrase: string;
-  private_key: string;
-  public_key: string;
-}
 
 export function KeychainFormDrawer() {
   const t = useT();
@@ -32,7 +25,12 @@ export function KeychainFormDrawer() {
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   const typeMenuRef = useRef<HTMLDivElement | null>(null);
 
-  const { register, handleSubmit, reset, watch, setValue } = useForm<KeychainFormValues>({
+  const { register, handleSubmit, reset, watch, setValue, formState } = useForm<
+    KeychainSchemaInput,
+    unknown,
+    KeychainSchemaValues
+  >({
+    resolver: zodResolver(keychainSchema),
     defaultValues: {
       id: initialEntry.id ?? "",
       name: initialEntry.name ?? "",
@@ -110,7 +108,7 @@ export function KeychainFormDrawer() {
 
   const selectedType = typeOptions.find((option) => option.value === watchedType) ?? typeOptions[0];
 
-  const onSubmit = (values: KeychainFormValues) => {
+  const onSubmit = (values: KeychainSchemaValues) => {
     const entry: KeychainEntry = {
       ...initialEntry,
       id: values.id,
@@ -144,6 +142,9 @@ export function KeychainFormDrawer() {
       <form id={formId} onSubmit={handleSubmit(onSubmit)}>
         <div className="space-y-3">
           <Input placeholder={t.keychain.drawer.namePlaceholder} {...register("name", { required: true })} />
+          {formState.errors.name?.message ? (
+            <p className="text-xs text-destructive">{resolveBackendMessage(String(formState.errors.name.message))}</p>
+          ) : null}
 
           <div ref={typeMenuRef} className="relative">
             <p className="mb-1 text-xs font-medium text-muted-foreground">{t.keychain.drawer.typeLabel}</p>
@@ -186,6 +187,10 @@ export function KeychainFormDrawer() {
               <Textarea className="min-h-[120px]" placeholder={t.keychain.drawer.publicKeyPlaceholder} {...register("public_key")} />
               <Input type="password" placeholder={t.keychain.drawer.passphrasePlaceholder} {...register("passphrase")} />
             </>
+          ) : null}
+
+          {formState.errors.root?.message ? (
+            <p className="text-xs text-destructive">{resolveBackendMessage(String(formState.errors.root.message))}</p>
           ) : null}
         </div>
       </form>

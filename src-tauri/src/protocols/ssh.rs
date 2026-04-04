@@ -34,8 +34,8 @@ use tokio::{
 };
 
 use crate::libs::models::{
-    ConnectionProfile, KnownHostEntry, SftpEntry, SshConnectPurpose, SshConnectResult,
-    SshSessionInfo,
+    BackendMessage, ConnectionProfile, KnownHostEntry, SftpEntry, SshConnectPurpose,
+    SshConnectResult, SshSessionInfo,
 };
 
 pub struct SshManager {
@@ -303,9 +303,7 @@ fn verify_known_host(
                     key_type: key_type_label,
                     fingerprint,
                     known_hosts_path: known_hosts_path.to_string_lossy().to_string(),
-                    message:
-                        "Host desconhecido. Confirme para adicionar ao known_hosts e continuar."
-                            .to_string(),
+                    message: BackendMessage::key("ssh_unknown_host_challenge"),
                 }));
             }
 
@@ -314,11 +312,15 @@ fn verify_known_host(
             Ok(None)
         }
         Err(keys::Error::KeyChanged { .. }) => Ok(Some(SshConnectResult::Error {
-            message: "Host key divergente. Possivel alteracao remota ou risco de MITM.".to_string(),
+            message: BackendMessage::key("ssh_host_key_mismatch"),
         })),
-        Err(error) => Ok(Some(SshConnectResult::Error {
-            message: format!("Falha ao validar host key no known_hosts: {}", error),
-        })),
+        Err(error) => {
+            let mut params = HashMap::new();
+            params.insert("reason".to_string(), error.to_string());
+            Ok(Some(SshConnectResult::Error {
+                message: BackendMessage::with_params("ssh_known_hosts_validation_failed", params),
+            }))
+        }
     }
 }
 
@@ -339,9 +341,9 @@ async fn authenticate_session(
         .filter(|value| !value.trim().is_empty());
 
     if key_data.is_none() && password_data.is_none() {
-        return Err(AuthFailure::NeedsInput(
-            "Credenciais ausentes. Informe senha ou keychain para conectar.".to_string(),
-        ));
+        return Err(AuthFailure::NeedsInput(BackendMessage::key(
+            "ssh_credentials_missing",
+        )));
     }
 
     if let Some(private_key) = key_data {
@@ -354,17 +356,13 @@ async fn authenticate_session(
 
         if password_data.is_none() {
             let message = match key_result {
-                Ok(false) => {
-                    "Falha na autenticacao com chave privada. Verifique passphrase ou selecione outro keychain."
-                        .to_string()
+                Ok(false) => BackendMessage::key("ssh_private_key_auth_failed"),
+                Ok(true) => BackendMessage::key("ssh_private_key_auth_unexpected"),
+                Err(error) => {
+                    let mut params = HashMap::new();
+                    params.insert("reason".to_string(), error.to_string());
+                    BackendMessage::with_params("ssh_private_key_auth_failed_with_reason", params)
                 }
-                Ok(true) => {
-                    "Falha inesperada na autenticacao com chave privada.".to_string()
-                }
-                Err(error) => format!(
-                    "Falha na autenticacao com chave privada: {}. Verifique passphrase ou keychain.",
-                    error
-                ),
             };
             return Err(AuthFailure::NeedsInput(message));
         }
@@ -375,9 +373,11 @@ async fn authenticate_session(
             .authenticate_password(&profile.username, password)
             .await
             .map_err(|error| {
-                AuthFailure::NeedsInput(format!(
-                    "Falha na autenticacao por senha: {}. Informe nova senha ou keychain.",
-                    error
+                let mut params = HashMap::new();
+                params.insert("reason".to_string(), error.to_string());
+                AuthFailure::NeedsInput(BackendMessage::with_params(
+                    "ssh_password_auth_failed_with_reason",
+                    params,
                 ))
             })?;
 
@@ -385,14 +385,12 @@ async fn authenticate_session(
             return Ok(());
         }
 
-        return Err(AuthFailure::NeedsInput(
-            "Falha na autenticacao por senha. Informe nova senha ou keychain.".to_string(),
-        ));
+        return Err(AuthFailure::NeedsInput(BackendMessage::key(
+            "ssh_password_auth_failed",
+        )));
     }
 
-    Err(AuthFailure::Fatal(
-        "Falha ao autenticar com as credenciais informadas.".to_string(),
-    ))
+    Err(AuthFailure::Fatal(BackendMessage::key("ssh_auth_failed")))
 }
 
 fn parse_known_host_line(line: &str, source_path: &Path) -> Option<KnownHostEntry> {
@@ -762,8 +760,8 @@ impl client::Handler for SshClientHandler {
 }
 
 enum AuthFailure {
-    NeedsInput(String),
-    Fatal(String),
+    NeedsInput(BackendMessage),
+    Fatal(BackendMessage),
 }
 
 impl SshManager {
@@ -799,9 +797,11 @@ impl SshManager {
             .await?
         {
             SshConnectResult::Connected { session } => Ok(session),
-            SshConnectResult::UnknownHostChallenge { message, .. } => Err(anyhow!(message)),
-            SshConnectResult::AuthRequired { message } => Err(anyhow!(message)),
-            SshConnectResult::Error { message } => Err(anyhow!(message)),
+            SshConnectResult::UnknownHostChallenge { message, .. } => {
+                Err(anyhow!(message.message.clone()))
+            }
+            SshConnectResult::AuthRequired { message } => Err(anyhow!(message.message.clone())),
+            SshConnectResult::Error { message } => Err(anyhow!(message.message.clone())),
         }
     }
 

@@ -32,6 +32,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio_rustls::rustls;
 use uuid::Uuid;
 
+use crate::libs::models::BackendMessage;
 use crate::utils::keyboard::{pressed_modifier_scan_codes, web_code_to_scan_code};
 use crate::utils::mouse::{interpolate_pointer_route, WheelAccumulator};
 
@@ -51,8 +52,8 @@ pub struct RdpSessionOptions {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RdpSessionStartResult {
     Started { session_id: String },
-    AuthRequired { message: String },
-    Error { message: String },
+    AuthRequired { message: BackendMessage },
+    Error { message: BackendMessage },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -60,7 +61,7 @@ pub enum RdpSessionStartResult {
 pub enum RdpSessionControlEvent {
     Connecting {
         session_id: String,
-        message: String,
+        message: BackendMessage,
     },
     Ready {
         session_id: String,
@@ -69,18 +70,18 @@ pub enum RdpSessionControlEvent {
     },
     AuthRequired {
         session_id: String,
-        message: String,
+        message: BackendMessage,
     },
     Error {
         session_id: String,
-        message: String,
+        message: BackendMessage,
     },
     Stopped {
         session_id: String,
     },
     ReleasedCapture {
         session_id: String,
-        message: String,
+        message: BackendMessage,
     },
 }
 
@@ -242,7 +243,7 @@ impl RdpSessionManager {
 
         let Ok(join) = join else {
             return RdpSessionStartResult::Error {
-                message: "Nao foi possivel iniciar worker RDP.".to_string(),
+                message: BackendMessage::key("rdp_worker_start_failed"),
             };
         };
 
@@ -254,7 +255,7 @@ impl RdpSessionManager {
 
     pub fn focus(&mut self, session_id: &str, focus: RdpSessionFocusInput) -> Result<()> {
         let Some(session) = self.sessions.get(session_id) else {
-            anyhow::bail!("Sessao RDP nao encontrada.");
+            anyhow::bail!("rdp_session_not_found");
         };
 
         if let Err(error) = session.tx.send(RdpSessionWorkerMessage::Focus(focus)) {
@@ -267,7 +268,7 @@ impl RdpSessionManager {
 
     pub fn input_batch(&mut self, session_id: &str, batch: RdpInputBatch) -> Result<()> {
         let Some(session) = self.sessions.get(session_id) else {
-            anyhow::bail!("Sessao RDP nao encontrada.");
+            anyhow::bail!("rdp_session_not_found");
         };
 
         if let Err(error) = session.tx.send(RdpSessionWorkerMessage::InputBatch(batch)) {
@@ -280,7 +281,7 @@ impl RdpSessionManager {
 
     pub fn stop(&mut self, session_id: &str) -> Result<()> {
         let Some(session) = self.sessions.remove(session_id) else {
-            anyhow::bail!("Sessao RDP nao encontrada.");
+            anyhow::bail!("rdp_session_not_found");
         };
 
         let _ = session.tx.send(RdpSessionWorkerMessage::Stop);
@@ -417,7 +418,7 @@ fn run_rdp_session_worker(
         &control_channel,
         RdpSessionControlEvent::Connecting {
             session_id: session_id.clone(),
-            message: "Conectando ao host RDP...".to_string(),
+            message: BackendMessage::key("rdp_connecting"),
         },
     ) {
         return;
@@ -434,21 +435,23 @@ fn run_rdp_session_worker(
     );
 
     if let Err(error) = worker_result {
-        let message = format!("{error:#}");
-        let _ = if looks_like_auth_error(&message) {
+        let reason = format!("{error:#}");
+        let _ = if looks_like_auth_error(&reason) {
             emit_control_event(
                 &control_channel,
                 RdpSessionControlEvent::AuthRequired {
                     session_id: session_id.clone(),
-                    message,
+                    message: BackendMessage::key("auth_required"),
                 },
             )
         } else {
+            let mut params = HashMap::new();
+            params.insert("reason".to_string(), reason);
             emit_control_event(
                 &control_channel,
                 RdpSessionControlEvent::Error {
                     session_id: session_id.clone(),
-                    message,
+                    message: BackendMessage::with_params("rdp_runtime_error", params),
                 },
             )
         };
@@ -541,11 +544,10 @@ fn run_rdp_session_worker_inner(
                     if was_focused && !focus_state.focused {
                         let _ = emit_control_event(
                             control_channel,
-                            RdpSessionControlEvent::ReleasedCapture {
-                                session_id: session_id.to_string(),
-                                message: "Captura raw indisponivel; fallback por lote ativo."
-                                    .to_string(),
-                            },
+                RdpSessionControlEvent::ReleasedCapture {
+                    session_id: session_id.to_string(),
+                    message: BackendMessage::key("rdp_capture_released"),
+                },
                         );
                     }
                 }

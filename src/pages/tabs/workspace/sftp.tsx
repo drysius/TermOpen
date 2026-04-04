@@ -2,6 +2,7 @@ import { ArrowDownAZ, ArrowUpAZ, FileText, Folder, MonitorUp, RefreshCw } from "
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { cn } from "@/lib/utils";
 import type { SftpEntry } from "@/types/openptl";
 
@@ -696,7 +697,7 @@ export function SftpBlockView({
               ) : (
                 <Folder className="h-4 w-4 text-primary" />
               )}
-              <span>{block.connectMessage}</span>
+              <span>{resolveBackendMessage(block.connectMessage)}</span>
             </div>
             <div className="mt-3 space-y-1 text-xs text-muted-foreground">
               <p className={cn(block.connectStage === "connecting" ? "text-primary" : undefined)}>1. Conectando...</p>
@@ -716,7 +717,7 @@ export function SftpBlockView({
 
             {block.connectStage === "verifying_fingerprint" && block.hostChallenge ? (
               <div className="mt-3 rounded border border-border/50 bg-secondary/70 p-3 text-xs text-foreground/90">
-                <p className="font-medium text-foreground">{block.hostChallenge.message}</p>
+                <p className="font-medium text-foreground">{resolveBackendMessage(block.hostChallenge.message)}</p>
                 <p className="mt-1">
                   {block.hostChallenge.host}:{block.hostChallenge.port}
                 </p>
@@ -789,7 +790,7 @@ export function SftpBlockView({
             ) : null}
 
             {block.connectError ? (
-              <p className="mt-3 text-xs text-red-300">{block.connectError}</p>
+              <p className="mt-3 text-xs text-red-300">{resolveBackendMessage(block.connectError)}</p>
             ) : null}
           </div>
         </div>

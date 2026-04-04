@@ -1,12 +1,13 @@
 import type { WorkspaceBlockLayout } from "@/components/workspace/workspace-block-controller";
 import type { EditorViewMode } from "@/functions/editor-file-utils";
-import type { SftpEntry } from "@/types/openptl";
+import type { BackendMessage, SftpEntry } from "@/types/openptl";
 
 export type WorkspaceKind = "terminal" | "sftp" | "rdp" | "editor";
 export type WorkspaceMode = "free";
 export type SortKey = "name" | "size" | "permissions" | "modified_at";
 export type SortDirection = "asc" | "desc";
 export type ConnectStage = "ready" | "connecting" | "verifying_fingerprint" | "awaiting_password" | "error";
+export type WorkspaceMessage = string | BackendMessage;
 
 export interface WorkspaceTabPageProps {
   tabId: string;
@@ -30,7 +31,7 @@ export interface PendingHostChallenge {
   port: number;
   keyType: string;
   fingerprint: string;
-  message: string;
+  message: WorkspaceMessage;
 }
 
 export interface TerminalBlock extends BaseBlock {
@@ -38,8 +39,8 @@ export interface TerminalBlock extends BaseBlock {
   sessionId: string | null;
   pendingProfileId: string | null;
   connectStage: ConnectStage;
-  connectMessage: string;
-  connectError: string | null;
+  connectMessage: WorkspaceMessage;
+  connectError: WorkspaceMessage | null;
   hostChallenge: PendingHostChallenge | null;
   passwordDraft: string;
   savePasswordChoice: boolean;
@@ -60,8 +61,8 @@ export interface SftpBlock extends BaseBlock {
   pathHistory: string[];
   pendingProfileId: string | null;
   connectStage: ConnectStage;
-  connectMessage: string;
-  connectError: string | null;
+  connectMessage: WorkspaceMessage;
+  connectError: WorkspaceMessage | null;
   hostChallenge: PendingHostChallenge | null;
   passwordDraft: string;
   savePasswordChoice: boolean;
@@ -93,8 +94,8 @@ export interface RdpBlock extends BaseBlock {
   profileId: string;
   sessionId: string | null;
   connectStage: ConnectStage;
-  connectMessage: string;
-  connectError: string | null;
+  connectMessage: WorkspaceMessage;
+  connectError: WorkspaceMessage | null;
   passwordDraft: string;
   savePasswordChoice: boolean;
   retryAttempt: number;

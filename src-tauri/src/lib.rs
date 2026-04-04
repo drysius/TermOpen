@@ -1,7 +1,7 @@
 ﻿#[cfg(windows)]
 use std::collections::HashSet;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -21,8 +21,9 @@ use constants::{
 };
 use libs::key_actions::{KeyActionsActiveTargetInput, KeyActionsService};
 use libs::models::{
-    AppSettings, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol, KeychainEntry,
-    KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectPurpose,
+    AppSettings, BackendMessage, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol,
+    KeychainEntry, KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry,
+    SshConnectPurpose,
     SshConnectResult,
     SshSessionInfo, SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState,
     VaultStatus, WindowState,
@@ -179,14 +180,27 @@ fn normalize_debug_level(level: &str) -> &'static str {
 }
 
 fn app_error(error: impl std::fmt::Display) -> String {
+    let concise = error.to_string();
     let message = format!("{:#}", error);
     push_debug_log(
         "error",
         "backend",
-        "Falha no backend",
+        "backend_error",
         Some(message.clone()),
     );
-    message
+    if is_backend_message_key(&concise) {
+        concise
+    } else {
+        "backend_error".to_string()
+    }
+}
+
+fn is_backend_message_key(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn normalize_optional_input(value: Option<String>) -> Option<String> {
@@ -300,7 +314,7 @@ async fn resolve_rdp_profile(
             Ok(value) => value,
             Err(error) => {
                 return Err(RdpSessionStartResult::Error {
-                    message: app_error(error),
+                    message: BackendMessage::key(app_error(error)),
                 });
             }
         };
@@ -313,7 +327,7 @@ async fn resolve_rdp_profile(
                 Ok(value) => value,
                 Err(error) => {
                     return Err(RdpSessionStartResult::Error {
-                        message: app_error(error),
+                        message: BackendMessage::key(app_error(error)),
                     });
                 }
             };
@@ -348,20 +362,20 @@ async fn resolve_rdp_profile(
     let host = profile.host.trim().to_string();
     if host.is_empty() {
         return Err(RdpSessionStartResult::Error {
-            message: "Host RDP invalido.".to_string(),
+            message: BackendMessage::key("rdp_host_invalid"),
         });
     }
 
     let (domain_from_user, username) = split_domain_username(profile.username.as_str());
     if username.trim().is_empty() {
         return Err(RdpSessionStartResult::AuthRequired {
-            message: "Usuario RDP nao informado.".to_string(),
+            message: BackendMessage::key("rdp_username_missing"),
         });
     }
 
     let Some(password) = normalize_optional_input(profile.password.clone()) else {
         return Err(RdpSessionStartResult::AuthRequired {
-            message: "Senha RDP necessaria para conectar.".to_string(),
+            message: BackendMessage::key("rdp_password_required"),
         });
     };
 
@@ -2618,32 +2632,38 @@ async fn release_check_latest() -> Result<ReleaseCheckResult, String> {
     {
         Ok(response) => response,
         Err(error) => {
+            let mut params = HashMap::new();
+            params.insert("reason".to_string(), error.to_string());
             return Ok(ReleaseCheckResult {
                 available: false,
                 latest_version: None,
                 url: None,
-                message: format!("Falha ao verificar atualizacoes: {}", error),
+                message: BackendMessage::with_params("release_check_failed", params),
             });
         }
     };
 
     if !response.status().is_success() {
+        let mut params = HashMap::new();
+        params.insert("status".to_string(), response.status().to_string());
         return Ok(ReleaseCheckResult {
             available: false,
             latest_version: None,
             url: None,
-            message: format!("Falha ao verificar atualizacoes ({})", response.status()),
+            message: BackendMessage::with_params("release_check_http_failed", params),
         });
     }
 
     let release: GithubRelease = match response.json().await {
         Ok(value) => value,
         Err(error) => {
+            let mut params = HashMap::new();
+            params.insert("reason".to_string(), error.to_string());
             return Ok(ReleaseCheckResult {
                 available: false,
                 latest_version: None,
                 url: None,
-                message: format!("Resposta de release invalida: {}", error),
+                message: BackendMessage::with_params("release_check_invalid_response", params),
             });
         }
     };
@@ -2657,9 +2677,11 @@ async fn release_check_latest() -> Result<ReleaseCheckResult, String> {
         latest_version: Some(latest.to_string()),
         url: Some(release.html_url),
         message: if available {
-            format!("Nova versao disponivel: {}", latest)
+            let mut params = HashMap::new();
+            params.insert("version".to_string(), latest.to_string());
+            BackendMessage::with_params("release_update_available", params)
         } else {
-            "Aplicativo atualizado.".to_string()
+            BackendMessage::key("release_up_to_date")
         },
     })
 }
@@ -2836,7 +2858,7 @@ fn deeplink_take_pending(state: State<'_, AppState>) -> Result<Vec<String>, Stri
     let mut queue = state
         .deeplink_queue
         .lock()
-        .map_err(|_| "Falha ao acessar fila de deeplinks.".to_string())?;
+        .map_err(|_| "deeplink_queue_lock_failed".to_string())?;
     Ok(queue.drain(..).collect())
 }
 

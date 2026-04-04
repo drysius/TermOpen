@@ -5,6 +5,11 @@ export type KeychainEntryType = "password" | "ssh_key" | "secret";
 export type EditorPreference = "internal" | "vscode" | "system";
 export type ModifiedUploadPolicy = "auto" | "ask" | "manual";
 
+export interface BackendMessage {
+  message: string;
+  params?: Record<string, string>;
+}
+
 export interface AuthServer {
   id: string;
   label: string;
@@ -210,11 +215,11 @@ export type RdpSessionStartResult =
     }
   | {
       status: "auth_required";
-      message: string;
+      message: BackendMessage;
     }
   | {
       status: "error";
-      message: string;
+      message: BackendMessage;
     };
 
 export type RdpSessionControlEvent =
@@ -222,7 +227,7 @@ export type RdpSessionControlEvent =
       event: "connecting";
       data: {
         session_id: string;
-        message: string;
+        message: BackendMessage;
       };
     }
   | {
@@ -237,14 +242,14 @@ export type RdpSessionControlEvent =
       event: "auth_required";
       data: {
         session_id: string;
-        message: string;
+        message: BackendMessage;
       };
     }
   | {
       event: "error";
       data: {
         session_id: string;
-        message: string;
+        message: BackendMessage;
       };
     }
   | {
@@ -257,7 +262,7 @@ export type RdpSessionControlEvent =
       event: "released_capture";
       data: {
         session_id: string;
-        message: string;
+        message: BackendMessage;
       };
     };
 
@@ -316,7 +321,7 @@ export interface TextReadChunk {
 export interface SyncState {
   connected: boolean;
   status: "idle" | "running" | "ok" | "error" | "conflict";
-  message: string;
+  message: BackendMessage;
   last_sync_at?: string | null;
   pending_user_code?: string | null;
   verification_url?: string | null;
@@ -359,14 +364,14 @@ export interface SyncConflictDecision {
 
 export interface RecoveryProbeResult {
   found: boolean;
-  message: string;
+  message: BackendMessage;
 }
 
 export interface ReleaseCheckResult {
   available: boolean;
   latest_version?: string | null;
   url?: string | null;
-  message: string;
+  message: BackendMessage;
 }
 
 export interface KnownHostEntry {
@@ -392,13 +397,13 @@ export type SshConnectResult =
       key_type: string;
       fingerprint: string;
       known_hosts_path: string;
-      message: string;
+      message: BackendMessage;
     }
   | {
       status: "auth_required";
-      message: string;
+      message: BackendMessage;
     }
   | {
       status: "error";
-      message: string;
+      message: BackendMessage;
     };

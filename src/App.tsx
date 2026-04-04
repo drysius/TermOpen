@@ -12,6 +12,7 @@ import { AppSidebar } from "@/components/layout/app-sidebar";
 import { AppConfirmDialog, AppDialog } from "@/components/ui/app-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { getError } from "@/functions/common";
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { useT } from "@/langs";
 import { logFrontendDebug, logFrontendError } from "@/lib/debug-logs";
 import { api } from "@/lib/tauri";
@@ -526,7 +527,7 @@ function App() {
         setBootMessage(t.app.boot.checkingUpdates);
         const release = await api.releaseCheckLatest().catch(() => null);
         if (mounted && release?.available) {
-          toast.message(release.message);
+          toast.message(resolveBackendMessage(release.message));
         }
       } finally {
         if (mounted) {
@@ -578,7 +579,7 @@ function App() {
 
     const timer = window.setInterval(() => {
       useAppStore.setState((state) => ({
-        syncState: { ...state.syncState, status: "running", message: t.app.sync.autoRunning },
+        syncState: { ...state.syncState, status: "running", message: { message: "sync_auto_running" } },
       }));
       void api
         .syncPush()
@@ -590,7 +591,7 @@ function App() {
             syncState: {
               ...state.syncState,
               status: "error",
-              message: t.app.sync.autoFailed,
+              message: { message: "sync_auto_failed" },
             },
           }));
         });

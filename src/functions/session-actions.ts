@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
+import { backendMessageKey, resolveBackendMessage } from "@/functions/backend-message";
 import { getError } from "@/functions/common";
 import type { StoreGet, StoreSet } from "@/functions/store-types";
 import { getT } from "@/langs";
@@ -48,11 +49,7 @@ export function createSessionActions(
           acceptUnknownHost: true,
         });
         if (reconnectResult.status !== "connected") {
-          throw new Error(
-            reconnectResult.status === "error" || reconnectResult.status === "auth_required"
-              ? reconnectResult.message
-              : reconnectResult.message,
-          );
+          throw new Error(resolveBackendMessage(reconnectResult.message));
         }
         const reconnected = reconnectResult.session;
         await get().ensureSessionListeners(reconnected.session_id);
@@ -197,38 +194,15 @@ export function createSessionActions(
       });
 
       if (result.status === "unknown_host_challenge") {
-        const accepted = window.confirm(
-          getT().toasts.unknownHostConfirm
-            .replace("{host}", result.host)
-            .replace("{port}", String(result.port))
-            .replace("{keyType}", result.key_type)
-            .replace("{fingerprint}", result.fingerprint),
-        );
-        if (!accepted) {
-          throw new Error(getT().toasts.connectionCancelledHost);
-        }
-        result = await api.sshConnectEx(profile.id, {
-          acceptUnknownHost: true,
-        });
+        throw new Error(resolveBackendMessage(result.message));
       }
 
       if (result.status === "auth_required") {
-        const password = window.prompt(
-          getT().toasts.passwordPrompt.replace("{message}", result.message),
-        );
-        if (!password) {
-          throw new Error(getT().toasts.connectionCancelledPassword);
-        }
-        const save = window.confirm(getT().toasts.savePasswordConfirm);
-        result = await api.sshConnectEx(profile.id, {
-          acceptUnknownHost: true,
-          passwordOverride: password,
-          saveAuthChoice: save,
-        });
+        throw new Error(resolveBackendMessage(result.message));
       }
 
       if (result.status === "error") {
-        throw new Error(result.message);
+        throw new Error(resolveBackendMessage(result.message));
       }
 
       if (result.status !== "connected") {
@@ -269,14 +243,22 @@ export function createSessionActions(
       try {
         await api.sshWrite(sessionId, data);
       } catch (error) {
+        const rawKey = backendMessageKey(
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+              ? error
+              : ((error as { message?: unknown } | null)?.message as string | undefined),
+        );
         const message = getError(error);
         if (data.length > 0) {
           toast.error(message);
         }
 
-        const missingSession = /sess[aã]o .*nao encontrada|sess[aã]o .*não encontrada|session .* not found/i.test(
-          message,
-        );
+        const missingSession =
+          rawKey === "session_not_found" ||
+          rawKey === "ssh_session_not_found" ||
+          /sess[aã]o .*nao encontrada|sess[aã]o .*não encontrada|session .* not found/i.test(message);
         if (missingSession) {
           get().clearSessionListeners(sessionId);
           set((state) => {
@@ -345,3 +327,4 @@ export function createSessionActions(
     },
   };
 }
+

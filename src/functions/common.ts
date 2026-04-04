@@ -1,20 +1,32 @@
 import type { ConnectionProfile, ConnectionProtocol } from "@/types/openptl";
 import { logFrontendDebug } from "@/lib/debug-logs";
+import { resolveBackendMessage } from "@/functions/backend-message";
 
 export function getError(error: unknown): string {
   if (error instanceof Error) {
-    logFrontendDebug("error", error.message || "Erro desconhecido", {
+    const resolved = resolveBackendMessage(error.message || "backend_error");
+    logFrontendDebug("error", resolved, {
       source: "frontend.catch",
       context: error.stack ?? null,
     });
-    return error.message;
+    return resolved;
   }
   if (typeof error === "string") {
-    logFrontendDebug("error", error, { source: "frontend.catch" });
-    return error;
+    const resolved = resolveBackendMessage(error);
+    logFrontendDebug("error", resolved, { source: "frontend.catch" });
+    return resolved;
   }
-  logFrontendDebug("error", "Erro desconhecido", { source: "frontend.catch" });
-  return "Erro desconhecido";
+  if (error && typeof error === "object" && "message" in error) {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === "string") {
+      const resolved = resolveBackendMessage(maybeMessage);
+      logFrontendDebug("error", resolved, { source: "frontend.catch" });
+      return resolved;
+    }
+  }
+  const resolved = resolveBackendMessage("backend_error");
+  logFrontendDebug("error", resolved, { source: "frontend.catch" });
+  return resolved;
 }
 
 export function baseName(path: string): string {

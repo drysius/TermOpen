@@ -1,25 +1,32 @@
 import { ArrowLeft, ArrowRight, Cloud, KeyRound, Lock, Shield, Terminal, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { AppDialog } from "@/components/ui/app-dialog";
 import { Input } from "@/components/ui/input";
 import { getError } from "@/functions/common";
+import { resolveBackendMessage } from "@/functions/backend-message";
 import { LOCALE_LABELS, useI18n, useT, type Locale } from "@/langs";
+import {
+  vaultForgotConfirmSchema,
+  vaultInitSchema,
+  vaultRecoverySchema,
+  vaultUnlockSchema,
+  type VaultForgotConfirmInput,
+  type VaultForgotConfirmValues,
+  type VaultInitInput,
+  type VaultInitValues,
+  type VaultRecoveryInput,
+  type VaultRecoveryValues,
+  type VaultUnlockInput,
+  type VaultUnlockValues,
+} from "@/schemas/vault";
 import { api } from "@/lib/tauri";
 import { useAppStore } from "@/store/app-store";
 import type { AuthServer } from "@/types/openptl";
-
-interface InitFormValues {
-  password: string;
-  confirm_password: string;
-}
-
-interface UnlockFormValues {
-  password: string;
-}
 
 export function VaultGatePage() {
   const t = useT();
@@ -35,30 +42,40 @@ export function VaultGatePage() {
   const [recoveryStep, setRecoveryStep] = useState<"server" | "password" | "downloading">("server");
   const [servers, setServers] = useState<AuthServer[]>([]);
   const [selectedServerId, setSelectedServerId] = useState<string>("default");
-  const [recoverPassword, setRecoverPassword] = useState("");
   const [recoverAttempts, setRecoverAttempts] = useState(0);
   const [recoverBusy, setRecoverBusy] = useState(false);
 
   const [forgotOpen, setForgotOpen] = useState(false);
-  const [deleteInput, setDeleteInput] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [showIntro, setShowIntro] = useState(false);
   const [introStep, setIntroStep] = useState(0);
 
-  const initForm = useForm<InitFormValues>({
+  const initForm = useForm<VaultInitInput, unknown, VaultInitValues>({
+    resolver: zodResolver(vaultInitSchema),
+    mode: "onChange",
     defaultValues: {
       password: "",
       confirm_password: "",
     },
   });
-  const unlockForm = useForm<UnlockFormValues>({
+  const unlockForm = useForm<VaultUnlockInput, unknown, VaultUnlockValues>({
+    resolver: zodResolver(vaultUnlockSchema),
     defaultValues: {
       password: "",
     },
   });
-
-  const initPassword = initForm.watch("password");
-  const initConfirmPassword = initForm.watch("confirm_password");
+  const recoveryForm = useForm<VaultRecoveryInput, unknown, VaultRecoveryValues>({
+    resolver: zodResolver(vaultRecoverySchema),
+    defaultValues: {
+      password: "",
+    },
+  });
+  const forgotForm = useForm<VaultForgotConfirmInput, unknown, VaultForgotConfirmValues>({
+    resolver: zodResolver(vaultForgotConfirmSchema),
+    defaultValues: {
+      confirm: "",
+    },
+  });
   const isInit = !status?.initialized;
 
   const selectedServer = useMemo(
@@ -173,7 +190,7 @@ export function VaultGatePage() {
     setRecoverOpen(true);
     setRecoveryStep("server");
     setRecoverAttempts(0);
-    setRecoverPassword("");
+    recoveryForm.reset({ password: "" });
   }
 
   function handleIntroCreateVault() {
@@ -200,11 +217,11 @@ export function VaultGatePage() {
       await api.syncGoogleLogin(selectedServer.address);
       const probe = await api.syncRecoveryProbe(selectedServer.address);
       if (!probe.found) {
-        toast.error(probe.message);
+        toast.error(resolveBackendMessage(probe.message));
         setRecoverOpen(false);
         setRecoveryStep("server");
         setRecoverAttempts(0);
-        setRecoverPassword("");
+        recoveryForm.reset({ password: "" });
         return;
       }
       setRecoveryStep("password");
@@ -216,23 +233,20 @@ export function VaultGatePage() {
     }
   }
 
-  async function handleRecoveryRestore() {
+  async function handleRecoveryRestore(values: VaultRecoveryValues) {
     if (!selectedServer) {
       toast.error(t.vault.recovery.invalidServer);
       return;
     }
-    if (!recoverPassword.trim()) {
-      toast.error(t.vault.recovery.enterPassword);
-      return;
-    }
+    const password = values.password.trim();
 
     setRecoverBusy(true);
     setRecoveryStep("downloading");
     try {
-      const nextStatus = await api.syncRecoveryRestore(recoverPassword, selectedServer.address);
+      const nextStatus = await api.syncRecoveryRestore(password, selectedServer.address);
       useAppStore.setState({ vaultStatus: nextStatus });
       setRecoverOpen(false);
-      setRecoverPassword("");
+      recoveryForm.reset({ password: "" });
       setRecoverAttempts(0);
       await loadWorkspace();
       toast.success(t.vault.recovery.restoreSuccess);
@@ -245,7 +259,7 @@ export function VaultGatePage() {
         toast.error(t.vault.recovery.limitReached);
         setRecoverOpen(false);
         setRecoverAttempts(0);
-        setRecoverPassword("");
+        recoveryForm.reset({ password: "" });
         setRecoveryStep("server");
       }
     } finally {
@@ -253,8 +267,8 @@ export function VaultGatePage() {
     }
   }
 
-  async function handleDeleteAllData() {
-    if (deleteInput.trim() !== t.vault.forgot.confirmPhrase) {
+  async function handleDeleteAllData(values: VaultForgotConfirmValues) {
+    if (values.confirm.trim() !== t.vault.forgot.confirmPhrase) {
       toast.error(t.vault.forgot.confirmError);
       return;
     }
@@ -263,7 +277,7 @@ export function VaultGatePage() {
     try {
       await api.vaultResetAll();
       setForgotOpen(false);
-      setDeleteInput("");
+      forgotForm.reset({ confirm: "" });
       await bootstrap();
       toast.success(t.vault.forgot.deleteSuccess);
     } catch (error) {
@@ -436,10 +450,6 @@ export function VaultGatePage() {
             <form
               className="space-y-5"
               onSubmit={initForm.handleSubmit((values) => {
-                if (values.password !== values.confirm_password) {
-                  toast.error(t.vault.init.mismatch);
-                  return;
-                }
                 void vaultInit(values.password);
                 initForm.reset({ password: "", confirm_password: "" });
               })}
@@ -459,7 +469,7 @@ export function VaultGatePage() {
               <Button
                 className="mt-2 w-full"
                 type="submit"
-                disabled={busy || initPassword.length < 6 || initConfirmPassword.length < 6}
+                disabled={busy || !initForm.formState.isValid}
               >
                 <KeyRound className="mr-2 h-4 w-4" /> {t.vault.init.submit}
               </Button>
@@ -495,7 +505,10 @@ export function VaultGatePage() {
               <button
                 type="button"
                 className="w-full text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                onClick={() => setForgotOpen(true)}
+                onClick={() => {
+                  forgotForm.reset({ confirm: "" });
+                  setForgotOpen(true);
+                }}
               >
                 {t.vault.unlock.forgotPassword}
               </button>
@@ -511,6 +524,7 @@ export function VaultGatePage() {
         onClose={() => {
           if (recoverBusy) return;
           setRecoverOpen(false);
+          recoveryForm.reset({ password: "" });
         }}
         footer={
           recoveryStep === "server" ? (
@@ -518,7 +532,10 @@ export function VaultGatePage() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setRecoverOpen(false)}
+                onClick={() => {
+                  setRecoverOpen(false);
+                  recoveryForm.reset({ password: "" });
+                }}
                 disabled={recoverBusy}
               >
                 {t.common.cancel}
@@ -532,12 +549,19 @@ export function VaultGatePage() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setRecoverOpen(false)}
+                onClick={() => {
+                  setRecoverOpen(false);
+                  recoveryForm.reset({ password: "" });
+                }}
                 disabled={recoverBusy}
               >
                 {t.common.cancel}
               </Button>
-              <Button type="button" onClick={() => void handleRecoveryRestore()} disabled={recoverBusy}>
+              <Button
+                type="button"
+                onClick={() => void recoveryForm.handleSubmit(handleRecoveryRestore)()}
+                disabled={recoverBusy || !recoveryForm.watch("password")?.trim()}
+              >
                 {recoverBusy ? t.vault.recovery.validating : t.vault.recovery.restoreButton}
               </Button>
             </div>
@@ -573,8 +597,7 @@ export function VaultGatePage() {
             <Input
               type="password"
               placeholder={t.vault.unlock.passwordPlaceholder}
-              value={recoverPassword}
-              onChange={(event) => setRecoverPassword(event.target.value)}
+              {...recoveryForm.register("password")}
             />
             <p className="text-xs text-muted-foreground">{t.vault.recovery.attempts.replace("{count}", String(recoverAttempts))}</p>
           </div>
@@ -593,13 +616,17 @@ export function VaultGatePage() {
         onClose={() => {
           if (deleteBusy) return;
           setForgotOpen(false);
+          forgotForm.reset({ confirm: "" });
         }}
         footer={
           <div className="flex justify-end gap-2">
             <Button
               type="button"
               variant="outline"
-              onClick={() => setForgotOpen(false)}
+              onClick={() => {
+                setForgotOpen(false);
+                forgotForm.reset({ confirm: "" });
+              }}
               disabled={deleteBusy}
             >
               {t.common.cancel}
@@ -607,8 +634,8 @@ export function VaultGatePage() {
             <Button
               type="button"
               variant="destructive"
-              onClick={() => void handleDeleteAllData()}
-              disabled={deleteBusy || deleteInput.trim() !== t.vault.forgot.confirmPhrase}
+              onClick={() => void forgotForm.handleSubmit(handleDeleteAllData)()}
+              disabled={deleteBusy || forgotForm.watch("confirm")?.trim() !== t.vault.forgot.confirmPhrase}
             >
               {deleteBusy ? t.vault.forgot.deleting : t.vault.forgot.deleteButton}
             </Button>
@@ -632,8 +659,7 @@ export function VaultGatePage() {
             </label>
             <Input
               placeholder={t.vault.forgot.confirmPlaceholder}
-              value={deleteInput}
-              onChange={(event) => setDeleteInput(event.target.value)}
+              {...forgotForm.register("confirm")}
             />
           </div>
         </div>

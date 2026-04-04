@@ -670,6 +670,7 @@ export interface AppDictionary {
     fileTooLarge: string;
     knownHostRemoved: string;
   };
+  backendMessages: Record<string, string>;
   common: {
     cancel: string;
     save: string;

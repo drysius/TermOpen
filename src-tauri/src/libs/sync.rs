@@ -22,8 +22,9 @@ use crate::{
         KEYRING_USER_PICTURE, MANIFEST_FILE_NAME, OPENPTL_FILE_NAME, PROFILE_FILE_NAME,
     },
     libs::models::{
-        RecoveryProbeResult, SyncConflictDecision, SyncConflictItem, SyncConflictKind,
-        SyncConflictPreview, SyncKeepSide, SyncLoggedUser, SyncState, VaultStatus,
+        BackendMessage, RecoveryProbeResult, SyncConflictDecision, SyncConflictItem,
+        SyncConflictKind, SyncConflictPreview, SyncKeepSide, SyncLoggedUser, SyncState,
+        VaultStatus,
     },
     libs::vault::VaultManager,
 };
@@ -99,7 +100,7 @@ async fn wait_for_sync_cancel() {
 }
 
 fn cancelled_state() -> SyncState {
-    SyncState::idle("Sincronizacao cancelada pelo usuario.")
+    SyncState::idle("sync_cancelled")
 }
 
 pub fn request_sync_cancel() -> SyncState {
@@ -154,7 +155,7 @@ impl SyncManager {
         let pending = SyncState {
             connected: false,
             status: "running".to_string(),
-            message: "Abrindo navegador para login com Google...".to_string(),
+            message: BackendMessage::key("sync_login_opening_browser"),
             last_sync_at: None,
             pending_user_code: None,
             verification_url: None,
@@ -303,7 +304,7 @@ impl SyncManager {
         vault.set_sync_metadata(metadata.clone())?;
 
         let state = SyncState::ok(
-            "Arquivos enviados para o Google Drive com sucesso.",
+            "sync_push_success",
             metadata.last_sync_at,
         );
         emit_sync_progress(app, "complete", None, total_steps, total_steps);
@@ -329,7 +330,7 @@ impl SyncManager {
 
         let client = Client::new();
         let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
-            let state = SyncState::idle("Nenhum backup encontrado no Google Drive.");
+            let state = SyncState::idle("sync_backup_not_found");
             app.emit("sync:status", &state).ok();
             return Ok(state);
         };
@@ -339,7 +340,7 @@ impl SyncManager {
             || !remote_files.contains_key(PROFILE_FILE_NAME)
             || !remote_files.contains_key(MANIFEST_FILE_NAME)
         {
-            let state = SyncState::idle("Backup remoto incompleto: faltam arquivos base.");
+            let state = SyncState::idle("sync_backup_incomplete");
             app.emit("sync:status", &state).ok();
             return Ok(state);
         }
@@ -371,7 +372,7 @@ impl SyncManager {
         vault.set_sync_metadata(next_metadata.clone())?;
 
         let state = SyncState::ok(
-            "Arquivos baixados do Google Drive com sucesso.",
+            "sync_pull_success",
             next_metadata.last_sync_at,
         );
         emit_sync_progress(app, "complete", None, total_steps, total_steps);
@@ -532,7 +533,7 @@ impl SyncManager {
         vault.set_sync_metadata(next_metadata.clone())?;
 
         let state = SyncState::ok(
-            "Conflitos resolvidos e sincronizados com sucesso.",
+            "sync_conflicts_resolved",
             next_metadata.last_sync_at,
         );
         app.emit("sync:status", &state).ok();
@@ -551,7 +552,7 @@ impl SyncManager {
         let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
             return Ok(RecoveryProbeResult {
                 found: false,
-                message: "Pasta OpenPtl nao encontrada no Google Drive.".to_string(),
+                message: BackendMessage::key("sync_probe_folder_not_found"),
             });
         };
 
@@ -559,12 +560,12 @@ impl SyncManager {
         if files.contains_key(OPENPTL_FILE_NAME) {
             Ok(RecoveryProbeResult {
                 found: true,
-                message: "Backup encontrado no Google Drive.".to_string(),
+                message: BackendMessage::key("sync_probe_backup_found"),
             })
         } else {
             Ok(RecoveryProbeResult {
                 found: false,
-                message: "Backup nao encontrado no Google Drive.".to_string(),
+                message: BackendMessage::key("sync_probe_backup_not_found"),
             })
         }
     }
@@ -583,23 +584,23 @@ impl SyncManager {
         let client = Client::new();
 
         let Some(folder_id) = ensure_openptl_folder(&client, &access_token, false).await? else {
-            return Err(anyhow!("Pasta OpenPtl nao encontrada no Google Drive"));
+            return Err(anyhow!("sync_recovery_folder_not_found"));
         };
 
         let files = list_drive_bin_files(&client, &access_token, &folder_id).await?;
         let openptl_meta = files
             .get(OPENPTL_FILE_NAME)
-            .ok_or_else(|| anyhow!("openptl.bin nao encontrado na nuvem"))?;
+            .ok_or_else(|| anyhow!("sync_recovery_openptl_not_found"))?;
         let openptl_bytes = download_file_bytes(&client, &access_token, &openptl_meta.id).await?;
 
         if !vault.validate_password_for_openptl_bytes(&openptl_bytes, password.trim())? {
-            return Err(anyhow!("Senha mestre invalida"));
+            return Err(anyhow!("sync_recovery_invalid_master_password"));
         }
 
         let pending = SyncState {
             connected: true,
             status: "running".to_string(),
-            message: "Baixando arquivos da nuvem...".to_string(),
+            message: BackendMessage::key("sync_recovery_downloading"),
             last_sync_at: None,
             pending_user_code: None,
             verification_url: None,
@@ -616,7 +617,7 @@ impl SyncManager {
             || !snapshot.contains_key(PROFILE_FILE_NAME)
             || !snapshot.contains_key(MANIFEST_FILE_NAME)
         {
-            return Err(anyhow!("Backup remoto incompleto: faltam arquivos base"));
+            return Err(anyhow!("sync_backup_incomplete"));
         }
 
         vault.replace_local_files(&snapshot)?;
@@ -630,7 +631,7 @@ fn conflict_file_name(decision: &SyncConflictDecision) -> Result<String> {
         SyncConflictKind::Profile => Ok(PROFILE_FILE_NAME.to_string()),
         SyncConflictKind::Host | SyncConflictKind::Keychain => {
             if uuid::Uuid::parse_str(decision.id.trim()).is_err() {
-                return Err(anyhow!("ID de conflito invalido: {}", decision.id));
+                return Err(anyhow!("sync_conflict_invalid_id"));
             }
             Ok(format!("{}.bin", decision.id.trim()))
         }
@@ -656,15 +657,22 @@ fn finalize_auth_result(
 
             let message = if let Some(ref name) = auth_data.name {
                 let email = auth_data.email.as_deref().unwrap_or("");
-                format!("Conectado como {} ({}).", name, email)
+                let mut params = HashMap::new();
+                params.insert("name".to_string(), name.clone());
+                params.insert("email".to_string(), email.to_string());
+                BackendMessage::with_params("sync_login_connected_as", params)
             } else {
-                "Google Drive conectado com sucesso.".to_string()
+                BackendMessage::key("sync_login_connected")
             };
 
-            SyncState::ok(&message, None)
+            SyncState::ok(message, None)
         }
-        Ok(Err(error)) => SyncState::error(format!("Erro no login: {}", error)),
-        Err(_) => SyncState::error("Tempo de login expirado. Tente novamente."),
+        Ok(Err(error)) => {
+            let mut params = HashMap::new();
+            params.insert("reason".to_string(), format!("{}", error));
+            SyncState::error(BackendMessage::with_params("sync_login_error", params))
+        }
+        Err(_) => SyncState::error("sync_login_timeout"),
     };
 
     app.emit("sync:status", &state).ok();
