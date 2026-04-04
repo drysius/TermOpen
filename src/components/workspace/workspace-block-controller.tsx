@@ -113,7 +113,7 @@ export function WorkspaceBlockController({
       dragHandleClassName="workspace-block-handle"
       className={
         active
-          ? "overflow-hidden rounded-lg border border-primary/45 bg-card shadow-[0_0_18px_hsl(var(--primary)/0.22)]"
+          ? "overflow-hidden rounded-lg border border-primary/65 bg-card shadow-xl"
           : "overflow-hidden rounded-lg border border-border/55 bg-card shadow-xl"
       }
       style={{ zIndex }}

@@ -66,7 +66,7 @@ import type {
   WorkspaceMode,
   WorkspaceTabPageProps,
 } from "@/pages/tabs/workspace/types";
-import { snapLayoutToWorkspace, workspaceDefaultLayout } from "@/pages/tabs/workspace/natives/layout";
+import { clampLayoutToWorkspace, snapLayoutToWorkspace, workspaceDefaultLayout } from "@/pages/tabs/workspace/natives/layout";
 import { joinPathBySource, joinRelativePathBySource, normalizeAnyPath, parentDirectory, shellQuote } from "@/pages/tabs/workspace/natives/paths";
 import {
   emitRdpAudio,
@@ -264,6 +264,13 @@ const connectionProtocolColor: Record<ConnectionProtocol, string> = {
   rdp: "bg-destructive/15 text-destructive",
 };
 
+function blockMinSize(kind: WorkspaceKind): { width: number; height: number } {
+  if (kind === "terminal" || kind === "rdp") {
+    return { width: 420, height: 260 };
+  }
+  return { width: 360, height: 240 };
+}
+
 export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initialOpenFiles = false }: WorkspaceTabPageProps) {
   const t = useT();
   const sessions = useAppStore((state) => state.sessions);
@@ -331,6 +338,8 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
     at: number;
   } | null>(null);
   const internalEntryDragRef = useRef<InternalEntryDragState | null>(null);
+  const snappedBlockIdsRef = useRef<Set<string>>(new Set());
+  const floatingLayoutByBlockRef = useRef<Record<string, WorkspaceBlockLayout>>({});
 
   const clearBlockRetryTimers = useCallback((blockId: string) => {
     const active = connectRetryTimersRef.current[blockId];
@@ -419,6 +428,20 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
 
   useEffect(() => {
     blocksRef.current = blocks;
+  }, [blocks]);
+
+  useEffect(() => {
+    const activeIds = new Set(blocks.map((block) => block.id));
+    Object.keys(floatingLayoutByBlockRef.current).forEach((blockId) => {
+      if (!activeIds.has(blockId)) {
+        delete floatingLayoutByBlockRef.current[blockId];
+      }
+    });
+    snappedBlockIdsRef.current.forEach((blockId) => {
+      if (!activeIds.has(blockId)) {
+        snappedBlockIdsRef.current.delete(blockId);
+      }
+    });
   }, [blocks]);
 
   useEffect(() => {
@@ -976,35 +999,117 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
     [focusedBlockId],
   );
 
+  const resolveSnapLayoutForBlock = useCallback(
+    (blockId: string, kind: WorkspaceKind, nextLayout: WorkspaceBlockLayout): WorkspaceBlockLayout => {
+      const minSize = blockMinSize(kind);
+      const occupied = blocksRef.current
+        .filter((item) => item.id !== blockId && !item.minimized)
+        .map((item) => item.layout);
+
+      return snapLayoutToWorkspace(nextLayout, workspaceSize, {
+        occupied,
+        minWidth: minSize.width,
+        minHeight: minSize.height,
+      });
+    },
+    [workspaceSize],
+  );
+
   const onLayoutChange = useCallback((id: string, nextLayout: WorkspaceBlockLayout) => {
     setBlocks((current) =>
       current.map((block) => {
         if (block.id !== id) {
           return block;
         }
-        // Drag updates keep width/height; use this to apply edge/corner snap assist.
+
         const dragged =
           Math.round(block.layout.width) === Math.round(nextLayout.width) &&
           Math.round(block.layout.height) === Math.round(nextLayout.height);
-        const snapped = dragged
-          ? snapLayoutToWorkspace(nextLayout, workspaceSize)
-          : {
-              ...nextLayout,
-              x: Math.max(8, Math.min(nextLayout.x, Math.max(8, workspaceSize.width - nextLayout.width - 8))),
-              y: Math.max(8, Math.min(nextLayout.y, Math.max(8, workspaceSize.height - nextLayout.height - 8))),
-            };
-        return { ...block, layout: snapped };
+
+        if (!dragged) {
+          const clamped = clampLayoutToWorkspace(nextLayout, workspaceSize);
+          floatingLayoutByBlockRef.current[id] = clamped;
+          snappedBlockIdsRef.current.delete(id);
+          return { ...block, layout: clamped };
+        }
+
+        const minSize = blockMinSize(block.kind);
+        const occupied = current
+          .filter((item) => item.id !== id && !item.minimized)
+          .map((item) => item.layout);
+        const snapped = snapLayoutToWorkspace(nextLayout, workspaceSize, {
+          occupied,
+          minWidth: minSize.width,
+          minHeight: minSize.height,
+        });
+        const snapChanged =
+          Math.round(snapped.x) !== Math.round(nextLayout.x) ||
+          Math.round(snapped.y) !== Math.round(nextLayout.y) ||
+          Math.round(snapped.width) !== Math.round(nextLayout.width) ||
+          Math.round(snapped.height) !== Math.round(nextLayout.height);
+
+        if (snapChanged) {
+          if (!floatingLayoutByBlockRef.current[id]) {
+            floatingLayoutByBlockRef.current[id] = clampLayoutToWorkspace(block.layout, workspaceSize);
+          }
+          snappedBlockIdsRef.current.add(id);
+          return { ...block, layout: snapped };
+        }
+
+        const clamped = clampLayoutToWorkspace(nextLayout, workspaceSize);
+        floatingLayoutByBlockRef.current[id] = clamped;
+        snappedBlockIdsRef.current.delete(id);
+        return { ...block, layout: clamped };
       }),
     );
   }, [workspaceSize]);
 
-  const onBlockDragStart = useCallback((id: string) => {
-    setDraggingBlockId(id);
-  }, []);
+  const onBlockDragStart = useCallback(
+    (id: string) => {
+      setDraggingBlockId(id);
+
+      if (!snappedBlockIdsRef.current.has(id)) {
+        return;
+      }
+
+      const floating = floatingLayoutByBlockRef.current[id];
+      if (!floating) {
+        return;
+      }
+
+      setBlocks((current) =>
+        current.map((block) => {
+          if (block.id !== id) {
+            return block;
+          }
+
+          const restored = clampLayoutToWorkspace(
+            {
+              x: block.layout.x,
+              y: block.layout.y,
+              width: floating.width,
+              height: floating.height,
+            },
+            workspaceSize,
+          );
+          return { ...block, layout: restored };
+        }),
+      );
+
+      snappedBlockIdsRef.current.delete(id);
+    },
+    [workspaceSize],
+  );
 
   const onBlockDragPreview = useCallback(
     (id: string, nextLayout: WorkspaceBlockLayout) => {
-      const snapped = snapLayoutToWorkspace(nextLayout, workspaceSize);
+      const block = blocksRef.current.find((item) => item.id === id);
+      if (!block) {
+        setSnapPreview(null);
+        return;
+      }
+
+      const snapped = resolveSnapLayoutForBlock(id, block.kind, nextLayout);
       const changed =
         Math.round(snapped.x) !== Math.round(nextLayout.x) ||
         Math.round(snapped.y) !== Math.round(nextLayout.y) ||
@@ -1013,7 +1118,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
       setDraggingBlockId(id);
       setSnapPreview(changed ? snapped : null);
     },
-    [workspaceSize],
+    [resolveSnapLayoutForBlock],
   );
 
   const onBlockDragEnd = useCallback(() => {
@@ -4005,7 +4110,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
 
         {snapPreview ? (
           <div
-            className="pointer-events-none absolute rounded-md border border-primary/70 bg-primary/12 shadow-[0_0_24px_hsl(var(--primary)/0.35)]"
+            className="pointer-events-none absolute rounded-md border border-primary/70 bg-primary/10"
             style={{
               left: snapPreview.x,
               top: snapPreview.y,
