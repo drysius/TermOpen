@@ -1,46 +1,105 @@
-# TermOpen
+# OpenPtl (OP)
 
-TermOpen is a desktop SSH/SFTP workspace built with **Tauri + React**.
+OpenPtl is a multi-protocol desktop remote workspace built with **Tauri + React**.  
+It combines terminals, remote file management, encrypted local persistence, and Google Drive cloud sync for profile data.
 
-## Implemented foundation
+## Screenshots
 
-- Encrypted vault with:
+![OpenPtl Screenshot 1](.github/images/Screenshot_1.png)
+![OpenPtl Screenshot 2](.github/images/Screenshot_2.png)
+![OpenPtl Screenshot 3](.github/images/Screenshot_3.png)
+![OpenPtl Screenshot 5](.github/images/Screenshot_5.png)
+![OpenPtl Screenshot 6](.github/images/Screenshot_6.png)
+![OpenPtl Screenshot 7](.github/images/Screenshot_7.png)
+![OpenPtl Screenshot 8](.github/images/Screenshot_8.png)
+![OpenPtl Screenshot 9](.github/images/Screenshot_9.png)
+
+## Supported protocols
+
+- SSH
+- SFTP
+- FTP
+- FTPS
+- SMB
+- RDP
+
+## What OpenPtl does
+
+- Encrypted vault for profiles/settings:
   - master password mode (`Argon2id` + `XChaCha20-Poly1305`)
-  - no-password mode (random key stored in OS keychain)
-- Connection manager for SSH/SFTP profiles stored inside the encrypted vault
-- Multi-session SSH manager (session IDs, command execution, terminal events)
-- SFTP operations:
-  - list directory
-  - read file
-  - write file
-- Internal editor with Monaco and external editor launch (VS Code priority)
-- Google Drive encrypted backup sync (device flow OAuth2 + appDataFolder)
-- Transparent, decoration-less Tauri window with custom React titlebar
-- Tailwind + shadcn-style UI shell
+  - keychain-backed mode (generated key stored in OS keychain)
+- Workspace tabs with draggable/resizable blocks
+- SSH terminal sessions (PTY-backed) with live event streaming
+- Remote file blocks for SFTP/FTP/FTPS/SMB operations
+- RDP session blocks for remote desktop workflows
+- Internal Monaco editor + open in external editor
+- Google Drive sync for encrypted profile backup (appDataFolder + OAuth flow)
+- Custom desktop shell (header/sidebar/tabs/workspaces) in Tauri
 
-## Environment variables
+## Architecture
 
-Set these variables to enable Google Drive sync:
+- Frontend: `React + TypeScript + Zustand + Vite`
+- Backend: `Rust + Tauri 2`
+- Key backend modules:
+  - `src-tauri/src/lib.rs`: command surface and app bootstrap
+  - `src-tauri/src/ssh.rs`: SSH/SFTP session handling
+  - `src-tauri/src/libs/*`: shared libraries (vault, sync, transfers, tasks)
+  - `src-tauri/src/protocols/*`: protocol-specific adapters
 
-- `TERMOPEN_GOOGLE_CLIENT_ID`
-- `TERMOPEN_GOOGLE_CLIENT_SECRET` (optional, depending on OAuth client configuration)
+## Requirements
+
+- Node.js 20+ (or Bun)
+- Rust stable toolchain
+- Tauri v2 system prerequisites for your OS
 
 ## Development
+
+### Option 1: npm
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-## Build
+### Option 2: Bun
+
+```bash
+bun install
+bun run tauri dev
+```
+
+## Build and tests
+
+```bash
+bun run build
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+You can also use npm equivalents:
 
 ```bash
 npm run build
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+## Auth worker (Google OAuth broker)
+
+The optional auth worker lives in `server/` and is used by sync/auth flows.
+
+```bash
+cd server
+npm install
+npm run dev
+```
+
+Environment variables for the worker:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `ALLOWED_ORIGINS` (configured in `server/wrangler.toml`)
 
 ## Notes
 
-- OAuth is implemented through Google Device Authorization flow.
-- Sync uploads only the encrypted vault file (`termopen-vault.enc.json`) to Google Drive `appDataFolder`.
-- On remote/local divergence, `sync_pull` returns conflict once and requires a second pull to confirm cloud overwrite.
+- Deep link callback scheme: `openptl://auth`
+- Transfer progress events follow `transfer:progress:{id}`
+- Default auth server list is in `auth-servers.json`
