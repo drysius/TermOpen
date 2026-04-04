@@ -3041,6 +3041,7 @@ export function WorkspaceTabPage({ tabId, initialBlock, initialSourceId, initial
           acceptUnknownHost,
           passwordOverride,
           saveAuthChoice,
+          connectPurpose: "sftp",
         });
 
         if (result.status === "connected") {

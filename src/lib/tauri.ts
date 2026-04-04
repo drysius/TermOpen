@@ -21,6 +21,7 @@ import type {
   RdpSessionFocusInput,
   RdpSessionStartResult,
   SftpEntry,
+  SshConnectPurpose,
   SyncLoggedUser,
   SyncConflictDecision,
   SyncConflictPreview,
@@ -88,6 +89,7 @@ export const api = {
       passwordOverride?: string | null;
       keychainIdOverride?: string | null;
       saveAuthChoice?: boolean;
+      connectPurpose?: SshConnectPurpose;
     },
   ) =>
     invoke<SshConnectResult>("ssh_connect_ex", {
@@ -96,6 +98,7 @@ export const api = {
       passwordOverride: options?.passwordOverride,
       keychainIdOverride: options?.keychainIdOverride,
       saveAuthChoice: options?.saveAuthChoice,
+      connectPurpose: options?.connectPurpose,
     }),
   rdpSessionStart: (
     profileId: string,

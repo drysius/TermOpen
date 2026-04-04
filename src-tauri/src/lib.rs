@@ -22,7 +22,8 @@ use constants::{
 use libs::key_actions::{KeyActionsActiveTargetInput, KeyActionsService};
 use libs::models::{
     AppSettings, BinaryPreviewResult, ConnectionProfile, ConnectionProtocol, KeychainEntry,
-    KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectResult,
+    KnownHostEntry, RecoveryProbeResult, ReleaseCheckResult, SftpEntry, SshConnectPurpose,
+    SshConnectResult,
     SshSessionInfo, SyncConflictDecision, SyncConflictPreview, SyncLoggedUser, SyncState,
     VaultStatus, WindowState,
 };
@@ -177,8 +178,8 @@ fn normalize_debug_level(level: &str) -> &'static str {
     }
 }
 
-fn app_error(error: impl ToString) -> String {
-    let message = error.to_string();
+fn app_error(error: impl std::fmt::Display) -> String {
+    let message = format!("{:#}", error);
     push_debug_log(
         "error",
         "backend",
@@ -483,7 +484,9 @@ async fn endpoint_file_size(
         }
         RemoteTransferEndpointInput::SftpSession { session_id } => {
             let mut ssh = state.ssh.lock().await;
-            ssh.sftp_file_size(session_id, path).map_err(app_error)
+            ssh.sftp_file_size(session_id, path)
+                .await
+                .map_err(app_error)
         }
         RemoteTransferEndpointInput::Profile {
             profile_id,
@@ -541,6 +544,7 @@ where
             ssh.sftp_download_to_writer(session_id, path, writer, chunk_size, |bytes| {
                 on_chunk(bytes as u64)
             })
+            .await
             .map_err(app_error)
             .map(|_| ())
         }
@@ -622,6 +626,7 @@ where
             ssh.sftp_upload_from_reader(session_id, path, reader, chunk_size, |bytes| {
                 on_chunk(bytes as u64)
             })
+            .await
             .map_err(app_error)
             .map(|_| ())
         }
@@ -888,6 +893,7 @@ async fn ssh_connect(
 
     let mut ssh = state.ssh.lock().await;
     ssh.connect(&profile, Some(Path::new(&known_hosts_path)))
+        .await
         .map_err(app_error)
 }
 
@@ -899,6 +905,7 @@ async fn ssh_connect_ex(
     password_override: Option<String>,
     keychain_id_override: Option<String>,
     save_auth_choice: Option<bool>,
+    connect_purpose: Option<SshConnectPurpose>,
 ) -> Result<SshConnectResult, String> {
     let (profile, known_hosts_path) = {
         let mut vault = state.vault.lock().await;
@@ -955,7 +962,9 @@ async fn ssh_connect_ex(
         &profile,
         Some(Path::new(&known_hosts_path)),
         accept_unknown_host.unwrap_or(false),
+        connect_purpose.unwrap_or(SshConnectPurpose::Terminal),
     )
+    .await
     .map_err(app_error)
 }
 
@@ -1135,7 +1144,9 @@ async fn ssh_write(
 ) -> Result<String, String> {
     let output = {
         let mut ssh = state.ssh.lock().await;
-        ssh.run_command(&session_id, &data).map_err(app_error)?
+        ssh.run_command(&session_id, &data)
+            .await
+            .map_err(app_error)?
     };
 
     let event = format!("terminal:output:{}", session_id);
@@ -1151,7 +1162,9 @@ async fn ssh_resize(
     rows: u32,
 ) -> Result<(), String> {
     let mut ssh = state.ssh.lock().await;
-    ssh.resize_pty(&session_id, cols, rows).map_err(app_error)
+    ssh.resize_pty(&session_id, cols, rows)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -1162,7 +1175,7 @@ async fn ssh_disconnect(
 ) -> Result<(), String> {
     {
         let mut ssh = state.ssh.lock().await;
-        ssh.disconnect(&session_id);
+        ssh.disconnect(&session_id).await;
     }
 
     let event = format!("terminal:exit:{}", session_id);
@@ -1193,7 +1206,9 @@ async fn sftp_list(
     path: String,
 ) -> Result<Vec<SftpEntry>, String> {
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_list(&session_id, &path).map_err(app_error)
+    ssh.sftp_list(&session_id, &path)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -1205,6 +1220,7 @@ async fn sftp_read(
     let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
     let mut ssh = state.ssh.lock().await;
     ssh.sftp_read(&session_id, &path, chunk_size)
+        .await
         .map_err(app_error)
 }
 
@@ -1219,6 +1235,7 @@ async fn sftp_read_chunk(
     let mut ssh = state.ssh.lock().await;
     let (chunk, total, eof) = ssh
         .sftp_read_chunk(&session_id, &path, offset, chunk_size)
+        .await
         .map_err(app_error)?;
     let bytes_read = offset.saturating_add(chunk.len() as u64);
     Ok(TextReadChunkPayload {
@@ -1239,6 +1256,7 @@ async fn sftp_write(
     let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
     let mut ssh = state.ssh.lock().await;
     ssh.sftp_write(&session_id, &path, &content, chunk_size)
+        .await
         .map_err(app_error)
 }
 
@@ -1251,6 +1269,7 @@ async fn sftp_rename(
 ) -> Result<(), String> {
     let mut ssh = state.ssh.lock().await;
     ssh.sftp_rename(&session_id, &from_path, &to_path)
+        .await
         .map_err(app_error)
 }
 
@@ -1263,6 +1282,7 @@ async fn sftp_delete(
 ) -> Result<(), String> {
     let mut ssh = state.ssh.lock().await;
     ssh.sftp_delete(&session_id, &path, is_dir)
+        .await
         .map_err(app_error)
 }
 
@@ -1273,7 +1293,9 @@ async fn sftp_mkdir(
     path: String,
 ) -> Result<(), String> {
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_mkdir(&session_id, &path).map_err(app_error)
+    ssh.sftp_mkdir(&session_id, &path)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -1283,7 +1305,9 @@ async fn sftp_create_file(
     path: String,
 ) -> Result<(), String> {
     let mut ssh = state.ssh.lock().await;
-    ssh.sftp_create_file(&session_id, &path).map_err(app_error)
+    ssh.sftp_create_file(&session_id, &path)
+        .await
+        .map_err(app_error)
 }
 
 #[tauri::command]
@@ -1571,6 +1595,7 @@ async fn remote_transfer(
             let remote_copy = {
                 let mut ssh = state.ssh.lock().await;
                 ssh.sftp_copy_between_sessions(from_session, to_session, &from_path, &to_path)
+                    .await
             };
 
             if remote_copy.is_ok() {
@@ -1710,6 +1735,7 @@ async fn sftp_transfer(
     let source_size = if let Some(session_id) = from_session_id.as_ref() {
         let mut ssh = state.ssh.lock().await;
         ssh.sftp_file_size(session_id, &from_path)
+            .await
             .map_err(app_error)?
     } else {
         let source = resolve_local_path(Some(&from_path))?;
@@ -1742,6 +1768,7 @@ async fn sftp_transfer(
                 let remote_copy = {
                     let mut ssh = state.ssh.lock().await;
                     ssh.sftp_copy_between_sessions(from_session, to_session, &from_path, &to_path)
+                        .await
                 };
 
                 if remote_copy.is_ok() {
@@ -1764,6 +1791,7 @@ async fn sftp_transfer(
                         emit_transfer_progress(&app, &progress_event, transferred, progress_total);
                     },
                 )
+                .await
                 .map_err(app_error)?;
             }
 
@@ -1774,6 +1802,7 @@ async fn sftp_transfer(
                 transferred = transferred.saturating_add(bytes);
                 emit_transfer_progress(&app, &progress_event, transferred, progress_total);
             })
+            .await
             .map_err(app_error)?;
         }
         (Some(from_session), None) => {
@@ -1794,6 +1823,7 @@ async fn sftp_transfer(
                 transferred = transferred.saturating_add(bytes);
                 emit_transfer_progress(&app, &progress_event, transferred, progress_total);
             })
+            .await
             .map_err(app_error)?;
         }
         (None, Some(to_session)) => {
@@ -1811,6 +1841,7 @@ async fn sftp_transfer(
                 transferred = transferred.saturating_add(bytes);
                 emit_transfer_progress(&app, &progress_event, transferred, progress_total);
             })
+            .await
             .map_err(app_error)?;
         }
         (None, None) => {
@@ -2011,13 +2042,17 @@ async fn sftp_read_binary_preview(
     let chunk_size = resolve_sftp_chunk_size_bytes(&state).await?;
 
     let mut ssh = state.ssh.lock().await;
-    let remote_size = ssh.sftp_file_size(&session_id, &path).map_err(app_error)?;
+    let remote_size = ssh
+        .sftp_file_size(&session_id, &path)
+        .await
+        .map_err(app_error)?;
     if let Some(size) = remote_size.filter(|size| *size > limit) {
         return Ok(BinaryPreviewResult::TooLarge { size, limit });
     }
 
     let content = ssh
         .sftp_read_bytes_with_limit(&session_id, &path, chunk_size, limit)
+        .await
         .map_err(app_error)?;
 
     match content {

@@ -929,7 +929,9 @@ async fn handle_dispatch_event(app: &AppHandle, event: DispatchEvent) {
             {
                 return;
             }
-            let _ = ssh.write_raw_input(session_id.as_str(), bytes.as_slice());
+            let _ = ssh
+                .write_raw_input(session_id.as_str(), bytes.as_slice())
+                .await;
         }
     }
 }

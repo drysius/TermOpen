@@ -1,8 +1,7 @@
-﻿use std::{
+use std::{
     collections::HashMap,
     env, fs,
-    io::{ErrorKind, Read, Seek, SeekFrom, Write},
-    net::TcpStream,
+    io::{Read, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Arc, Mutex},
@@ -16,12 +15,27 @@ use std::os::windows::process::CommandExt;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
+use russh::{
+    client,
+    ChannelMsg, ChannelReadHalf, ChannelWriteHalf,
+    keys::{
+        self,
+        known_hosts::{check_known_hosts_path, learn_known_hosts_path},
+        PrivateKeyWithHashAlg, PublicKeyBase64,
+    },
+    Disconnect,
+};
+use russh_sftp::client::SftpSession;
 use sha2::{Digest, Sha256};
-use ssh2::{Channel, CheckResult, ExtendedData, KnownHostFileKind, Session};
-use tempfile::NamedTempFile;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    task::JoinHandle,
+    time::sleep,
+};
 
 use crate::libs::models::{
-    ConnectionProfile, KnownHostEntry, SftpEntry, SshConnectResult, SshSessionInfo,
+    ConnectionProfile, KnownHostEntry, SftpEntry, SshConnectPurpose, SshConnectResult,
+    SshSessionInfo,
 };
 
 pub struct SshManager {
@@ -29,678 +43,102 @@ pub struct SshManager {
     local_sessions: HashMap<String, LocalManagedSession>,
 }
 
-struct ManagedSession {
-    info: SshSessionInfo,
-    session: Session,
-    shell: Channel,
-    mouse_sgr_enabled: bool,
-}
-
-struct LocalManagedSession {
-    info: SshSessionInfo,
-    child: Child,
-    stdin: ChildStdin,
-    output: Arc<Mutex<Vec<u8>>>,
-}
-
-enum AuthFailure {
-    NeedsInput(String),
-    Fatal(String),
-}
-
-impl SshManager {
-    pub fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-            local_sessions: HashMap::new(),
-        }
-    }
-
-    pub fn list_sessions(&self) -> Vec<SshSessionInfo> {
-        let mut sessions = self
-            .sessions
-            .values()
-            .map(|item| item.info.clone())
-            .collect::<Vec<_>>();
-        sessions.extend(self.local_sessions.values().map(|item| item.info.clone()));
-        sessions
-    }
-
-    pub fn connect(
-        &mut self,
-        profile: &ConnectionProfile,
-        known_hosts_path: Option<&Path>,
-    ) -> Result<SshSessionInfo> {
-        match self.connect_ex(profile, known_hosts_path, true)? {
-            SshConnectResult::Connected { session } => Ok(session),
-            SshConnectResult::UnknownHostChallenge { message, .. } => Err(anyhow!(message)),
-            SshConnectResult::AuthRequired { message } => Err(anyhow!(message)),
-            SshConnectResult::Error { message } => Err(anyhow!(message)),
-        }
-    }
-
-    pub fn connect_ex(
-        &mut self,
-        profile: &ConnectionProfile,
-        known_hosts_path: Option<&Path>,
-        accept_unknown_host: bool,
-    ) -> Result<SshConnectResult> {
-        let mut session = establish_handshake(profile)?;
-        let known_hosts_file = resolve_known_hosts_path(
-            known_hosts_path
-                .map(|path| path.to_string_lossy().to_string())
-                .as_deref(),
-        )?;
-        ensure_known_hosts_file(&known_hosts_file)?;
-
-        match verify_known_host(&session, profile, &known_hosts_file, accept_unknown_host)? {
-            Some(challenge) => return Ok(challenge),
-            None => {}
-        }
-
-        match authenticate_session(&mut session, profile) {
-            Ok(()) => {}
-            Err(AuthFailure::NeedsInput(message)) => {
-                return Ok(SshConnectResult::AuthRequired { message });
-            }
-            Err(AuthFailure::Fatal(message)) => {
-                return Ok(SshConnectResult::Error { message });
-            }
-        }
-
-        if !session.authenticated() {
-            return Ok(SshConnectResult::AuthRequired {
-                message: "Falha ao autenticar sessao SSH.".to_string(),
-            });
-        }
-
-        session.set_blocking(true);
-
-        let mut shell = session
-            .channel_session()
-            .context("Falha ao abrir canal shell SSH")?;
-        shell
-            .handle_extended_data(ExtendedData::Merge)
-            .context("Falha ao configurar stderr do shell SSH")?;
-        shell
-            .request_pty("xterm", None, Some((160, 48, 0, 0)))
-            .context("Falha ao solicitar PTY SSH")?;
-        shell.shell().context("Falha ao iniciar shell SSH")?;
-        shell.flush().ok();
-
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let info = SshSessionInfo {
-            session_id: session_id.clone(),
-            profile_id: profile.id.clone(),
-            connected_at: Utc::now().timestamp(),
-            session_kind: "ssh".to_string(),
-        };
-
-        self.sessions.insert(
-            session_id,
-            ManagedSession {
-                info: info.clone(),
-                session,
-                shell,
-                mouse_sgr_enabled: false,
-            },
-        );
-
-        Ok(SshConnectResult::Connected { session: info })
-    }
-
-    pub fn connect_local(&mut self, start_path: Option<&Path>) -> Result<SshSessionInfo> {
-        let (child, stdin, stdout, stderr) = spawn_local_shell(start_path)?;
-        let output = Arc::new(Mutex::new(Vec::new()));
-        pump_reader_into_buffer(stdout, Arc::clone(&output));
-        pump_reader_into_buffer(stderr, Arc::clone(&output));
-
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let info = SshSessionInfo {
-            session_id: session_id.clone(),
-            profile_id: "local".to_string(),
-            connected_at: Utc::now().timestamp(),
-            session_kind: "local".to_string(),
-        };
-
-        let local = LocalManagedSession {
-            info: info.clone(),
-            child,
-            stdin,
-            output,
-        };
-        self.local_sessions.insert(session_id, local);
-
-        Ok(info)
-    }
-
-    pub fn disconnect(&mut self, session_id: &str) {
-        if let Some(mut managed) = self.sessions.remove(session_id) {
-            let _ = managed.shell.close();
-            let _ = managed.shell.wait_close();
-            return;
-        }
-
-        if let Some(mut local) = self.local_sessions.remove(session_id) {
-            let _ = local.stdin.flush();
-            let _ = local.child.kill();
-            let _ = local.child.wait();
-        }
-    }
-
-    pub fn run_command(&mut self, session_id: &str, command: &str) -> Result<String> {
-        if let Some(managed) = self.sessions.get_mut(session_id) {
-            let payload = command.replace('\r', "\n");
-            if !payload.is_empty() {
-                managed
-                    .shell
-                    .write_all(payload.as_bytes())
-                    .context("Falha ao enviar entrada para shell SSH")?;
-                managed
-                    .shell
-                    .flush()
-                    .context("Falha ao flush da shell SSH")?;
-            }
-
-            let output = read_shell_output(managed, Duration::from_millis(140))?;
-            update_mouse_sgr_mode(&output, &mut managed.mouse_sgr_enabled);
-            return Ok(output);
-        }
-
-        let local = self
-            .local_sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-
-        let payload = command.replace('\r', "\n");
-        if !payload.is_empty() {
-            local
-                .stdin
-                .write_all(payload.as_bytes())
-                .context("Falha ao enviar entrada para terminal local")?;
-            local
-                .stdin
-                .flush()
-                .context("Falha ao flush do terminal local")?;
-        }
-
-        thread::sleep(Duration::from_millis(80));
-        Ok(drain_local_output(&local.output))
-    }
-
-    pub fn write_raw_input(&mut self, session_id: &str, bytes: &[u8]) -> Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(managed) = self.sessions.get_mut(session_id) {
-            managed
-                .shell
-                .write_all(bytes)
-                .context("Falha ao enviar input bruto para shell SSH")?;
-            managed
-                .shell
-                .flush()
-                .context("Falha ao flush de input bruto SSH")?;
-            return Ok(());
-        }
-
-        if let Some(local) = self.local_sessions.get_mut(session_id) {
-            local
-                .stdin
-                .write_all(bytes)
-                .context("Falha ao enviar input bruto para terminal local")?;
-            local
-                .stdin
-                .flush()
-                .context("Falha ao flush de input bruto local")?;
-            return Ok(());
-        }
-
-        Err(anyhow!("Sessao {} nao encontrada", session_id))
-    }
-
-    pub fn is_mouse_sgr_enabled(&self, session_id: &str) -> Result<bool> {
-        if let Some(managed) = self.sessions.get(session_id) {
-            return Ok(managed.mouse_sgr_enabled);
-        }
-        if self.local_sessions.contains_key(session_id) {
-            return Ok(false);
-        }
-        Err(anyhow!("Sessao {} nao encontrada", session_id))
-    }
-
-    pub fn resize_pty(&mut self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
-        if let Some(managed) = self.sessions.get_mut(session_id) {
-            return managed
-                .shell
-                .request_pty_size(cols, rows, None, None)
-                .context("Falha ao redimensionar PTY SSH");
-        }
-        if self.local_sessions.contains_key(session_id) {
-            return Ok(());
-        }
-        Err(anyhow!("Sessao {} nao encontrada", session_id))
-    }
-
-    pub fn sftp_list(&mut self, session_id: &str, path: &str) -> Result<Vec<SftpEntry>> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-
-        let sftp = managed
-            .session
-            .sftp()
+async fn ensure_sftp_session(managed: &mut ManagedSession) -> Result<&mut SftpSession> {
+    if managed.sftp.is_none() {
+        let channel = managed
+            .handle
+            .channel_open_session()
+            .await
             .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .context("Falha ao iniciar subsistema SFTP")?;
+        let sftp = SftpSession::new(channel.into_stream())
+            .await
+            .context("Falha ao inicializar sessao SFTP")?;
+        managed.sftp = Some(sftp);
+    }
 
-        let entries = sftp
-            .readdir(&target)
-            .with_context(|| format!("Falha ao listar diretorio remoto: {}", target.display()))?;
+    managed
+        .sftp
+        .as_mut()
+        .ok_or_else(|| anyhow!("Falha ao inicializar sessao SFTP"))
+}
 
-        let mapped = entries
-            .into_iter()
-            .map(|(pathbuf, stat)| {
-                let name = pathbuf
-                    .file_name()
-                    .map(|item| item.to_string_lossy().to_string())
-                    .unwrap_or_else(|| pathbuf.to_string_lossy().to_string());
-                let permissions = stat.perm;
-                let is_dir = permissions
-                    .map(|value| (value & 0o170000) == 0o040000)
-                    .unwrap_or(false);
+async fn open_terminal_session(handle: &client::Handle<SshClientHandler>) -> Result<TerminalSession> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .context("Falha ao abrir canal shell SSH")?;
+    channel
+        .request_pty(true, "xterm", 160, 48, 0, 0, &[])
+        .await
+        .context("Falha ao solicitar PTY SSH")?;
+    channel
+        .request_shell(true)
+        .await
+        .context("Falha ao iniciar shell SSH")?;
 
-                SftpEntry {
-                    name,
-                    path: pathbuf.to_string_lossy().replace('\\', "/"),
-                    is_dir,
-                    size: stat.size.unwrap_or_default(),
-                    permissions,
-                    modified_at: stat.mtime.map(|value| value as i64),
+    let (read_half, write_half) = channel.split();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_task = spawn_terminal_reader(read_half, Arc::clone(&output));
+
+    Ok(TerminalSession {
+        writer: write_half,
+        output,
+        reader_task,
+    })
+}
+
+fn spawn_terminal_reader(mut read_half: ChannelReadHalf, output: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(message) = read_half.wait().await {
+            match message {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    if let Ok(mut guard) = output.lock() {
+                        guard.extend_from_slice(data.as_ref());
+                    } else {
+                        break;
+                    }
                 }
-            })
-            .collect::<Vec<_>>();
-
-        Ok(mapped)
-    }
-
-    pub fn sftp_read(&mut self, session_id: &str, path: &str, chunk_size: usize) -> Result<String> {
-        let bytes = self.sftp_read_bytes(session_id, path, chunk_size)?;
-        Ok(String::from_utf8_lossy(&bytes).to_string())
-    }
-
-    pub fn sftp_read_bytes(
-        &mut self,
-        session_id: &str,
-        path: &str,
-        chunk_size: usize,
-    ) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        self.sftp_download_to_writer(session_id, path, &mut bytes, chunk_size, |_| {})?;
-
-        Ok(bytes)
-    }
-
-    pub fn sftp_read_bytes_with_limit(
-        &mut self,
-        session_id: &str,
-        path: &str,
-        chunk_size: usize,
-        max_bytes: u64,
-    ) -> Result<Option<Vec<u8>>> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-
-        let mut file = sftp
-            .open(&target)
-            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target.display()))?;
-
-        let mut bytes = Vec::new();
-        let mut total = 0u64;
-        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
-        loop {
-            let size = file
-                .read(&mut buffer)
-                .with_context(|| format!("Falha ao ler arquivo remoto: {}", target.display()))?;
-            if size == 0 {
-                break;
+                ChannelMsg::Eof | ChannelMsg::Close => break,
+                _ => {}
             }
-
-            total = total.saturating_add(size as u64);
-            if total > max_bytes {
-                return Ok(None);
-            }
-            bytes.extend_from_slice(&buffer[..size]);
         }
-
-        Ok(Some(bytes))
-    }
-
-    pub fn sftp_read_chunk(
-        &mut self,
-        session_id: &str,
-        path: &str,
-        offset: u64,
-        chunk_size: usize,
-    ) -> Result<(Vec<u8>, u64, bool)> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-        let total = sftp
-            .stat(&target)
-            .ok()
-            .and_then(|stat| stat.size)
-            .unwrap_or(0);
-
-        let mut file = sftp
-            .open(&target)
-            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target.display()))?;
-        file.seek(SeekFrom::Start(offset)).with_context(|| {
-            format!("Falha ao posicionar leitura remota em {}", target.display())
-        })?;
-
-        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
-        let size = file
-            .read(&mut buffer)
-            .with_context(|| format!("Falha ao ler chunk remoto: {}", target.display()))?;
-        buffer.truncate(size);
-        let bytes_read = offset.saturating_add(size as u64);
-        let eof = size == 0 || bytes_read >= total;
-
-        Ok((buffer, total, eof))
-    }
-
-    pub fn sftp_write(
-        &mut self,
-        session_id: &str,
-        path: &str,
-        content: &str,
-        chunk_size: usize,
-    ) -> Result<()> {
-        self.sftp_write_bytes(session_id, path, content.as_bytes(), chunk_size)
-    }
-
-    pub fn sftp_rename(&mut self, session_id: &str, from_path: &str, to_path: &str) -> Result<()> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let from = normalize_remote_path(from_path);
-        let to = normalize_remote_path(to_path);
-        sftp.rename(&from, &to, None).with_context(|| {
-            format!(
-                "Falha ao renomear item remoto de {} para {}",
-                from.display(),
-                to.display()
-            )
-        })?;
-        Ok(())
-    }
-
-    pub fn sftp_delete(&mut self, session_id: &str, path: &str, is_dir: bool) -> Result<()> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-
-        if is_dir {
-            sftp.rmdir(&target)
-                .with_context(|| format!("Falha ao remover pasta remota: {}", target.display()))?;
-        } else {
-            sftp.unlink(&target).with_context(|| {
-                format!("Falha ao remover arquivo remoto: {}", target.display())
-            })?;
-        }
-        Ok(())
-    }
-
-    pub fn sftp_mkdir(&mut self, session_id: &str, path: &str) -> Result<()> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-        sftp.mkdir(&target, 0o755)
-            .with_context(|| format!("Falha ao criar pasta remota: {}", target.display()))?;
-        Ok(())
-    }
-
-    pub fn sftp_create_file(&mut self, session_id: &str, path: &str) -> Result<()> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-        let _ = sftp
-            .create(&target)
-            .with_context(|| format!("Falha ao criar arquivo remoto: {}", target.display()))?;
-        Ok(())
-    }
-
-    pub fn sftp_write_bytes(
-        &mut self,
-        session_id: &str,
-        path: &str,
-        content: &[u8],
-        chunk_size: usize,
-    ) -> Result<()> {
-        let mut cursor = std::io::Cursor::new(content);
-        self.sftp_upload_from_reader(session_id, path, &mut cursor, chunk_size, |_| {})?;
-        Ok(())
-    }
-
-    pub fn sftp_file_size(&mut self, session_id: &str, path: &str) -> Result<Option<u64>> {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-
-        match sftp.stat(&target) {
-            Ok(stat) => Ok(stat.size),
-            Err(_) => Ok(None),
-        }
-    }
-
-    pub fn sftp_download_to_writer<W, F>(
-        &mut self,
-        session_id: &str,
-        path: &str,
-        writer: &mut W,
-        chunk_size: usize,
-        mut on_chunk: F,
-    ) -> Result<u64>
-    where
-        W: Write,
-        F: FnMut(u64),
-    {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-
-        let mut file = sftp
-            .open(&target)
-            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target.display()))?;
-
-        let mut transferred = 0u64;
-        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
-
-        loop {
-            let size = file
-                .read(&mut buffer)
-                .with_context(|| format!("Falha ao ler arquivo remoto: {}", target.display()))?;
-            if size == 0 {
-                break;
-            }
-
-            writer.write_all(&buffer[..size]).with_context(|| {
-                format!("Falha ao escrever chunk recebido de {}", target.display())
-            })?;
-            transferred = transferred.saturating_add(size as u64);
-            on_chunk(size as u64);
-        }
-
-        Ok(transferred)
-    }
-
-    pub fn sftp_upload_from_reader<R, F>(
-        &mut self,
-        session_id: &str,
-        path: &str,
-        reader: &mut R,
-        chunk_size: usize,
-        mut on_chunk: F,
-    ) -> Result<u64>
-    where
-        R: Read,
-        F: FnMut(u64),
-    {
-        let managed = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
-
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let target = normalize_remote_path(path);
-
-        let mut file = sftp
-            .create(&target)
-            .with_context(|| format!("Falha ao criar arquivo remoto: {}", target.display()))?;
-
-        let mut transferred = 0u64;
-        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
-        loop {
-            let size = reader.read(&mut buffer).with_context(|| {
-                format!("Falha ao ler origem para upload: {}", target.display())
-            })?;
-            if size == 0 {
-                break;
-            }
-
-            file.write_all(&buffer[..size]).with_context(|| {
-                format!("Falha ao escrever arquivo remoto: {}", target.display())
-            })?;
-
-            transferred = transferred.saturating_add(size as u64);
-            on_chunk(size as u64);
-        }
-
-        Ok(transferred)
-    }
-
-    pub fn sessions_share_profile(&self, left_session_id: &str, right_session_id: &str) -> bool {
-        let left = self.sessions.get(left_session_id);
-        let right = self.sessions.get(right_session_id);
-        match (left, right) {
-            (Some(left_session), Some(right_session)) => {
-                left_session.info.profile_id == right_session.info.profile_id
-            }
-            _ => false,
-        }
-    }
-
-    pub fn sftp_copy_between_sessions(
-        &mut self,
-        from_session_id: &str,
-        to_session_id: &str,
-        from_path: &str,
-        to_path: &str,
-    ) -> Result<()> {
-        if from_session_id != to_session_id
-            && !self.sessions_share_profile(from_session_id, to_session_id)
-        {
-            return Err(anyhow!(
-                "Copia remota otimizada requer sessoes no mesmo perfil"
-            ));
-        }
-
-        let managed = self
-            .sessions
-            .get_mut(from_session_id)
-            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", from_session_id))?;
-
-        let sftp = managed
-            .session
-            .sftp()
-            .context("Falha ao abrir canal SFTP")?;
-        let source = normalize_remote_path(from_path);
-        let target = normalize_remote_path(to_path);
-        if source == target {
-            return Ok(());
-        }
-
-        let stat = sftp
-            .stat(&source)
-            .with_context(|| format!("Falha ao obter metadata remota: {}", source.display()))?;
-        let source_is_dir = stat
-            .perm
-            .map(|value| (value & 0o170000) == 0o040000)
-            .unwrap_or(false);
-        drop(sftp);
-
-        run_remote_copy_command(&managed.session, &source, &target, source_is_dir)
-    }
+    })
 }
 
-fn run_remote_copy_command(
-    session: &Session,
-    source: &Path,
-    target: &Path,
+fn drain_remote_output(output: &Arc<Mutex<Vec<u8>>>) -> String {
+    if let Ok(mut guard) = output.lock() {
+        if guard.is_empty() {
+            return String::new();
+        }
+        let bytes = guard.drain(..).collect::<Vec<_>>();
+        return String::from_utf8_lossy(&bytes).to_string();
+    }
+    String::new()
+}
+
+async fn write_to_remote_channel(writer: &ChannelWriteHalf<client::Msg>, bytes: &[u8]) -> Result<()> {
+    let cursor = std::io::Cursor::new(bytes.to_vec());
+    writer
+        .data(cursor)
+        .await
+        .context("Falha ao escrever no canal SSH")
+}
+
+async fn run_remote_copy_command(
+    handle: &client::Handle<SshClientHandler>,
+    source: &str,
+    target: &str,
     source_is_dir: bool,
 ) -> Result<()> {
-    let source_quoted = shell_quote_posix(source.to_string_lossy().as_ref());
-    let target_quoted = shell_quote_posix(target.to_string_lossy().as_ref());
+    let source_quoted = shell_quote_posix(source);
+    let target_quoted = shell_quote_posix(target);
 
     let cp_a = format!("cp -a -- {} {}", source_quoted, target_quoted);
-    if run_remote_exec(session, cp_a.as_str()).is_ok() {
+    if run_remote_exec(handle, cp_a.as_str()).await.is_ok() {
         return Ok(());
     }
 
@@ -713,31 +151,37 @@ fn run_remote_copy_command(
             recursive_flag, source_quoted, target_quoted
         )
     };
-    run_remote_exec(session, cp_r.as_str())
+    run_remote_exec(handle, cp_r.as_str()).await
 }
 
-fn run_remote_exec(session: &Session, command: &str) -> Result<()> {
-    let mut channel = session
-        .channel_session()
+async fn run_remote_exec(handle: &client::Handle<SshClientHandler>, command: &str) -> Result<()> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
         .context("Falha ao abrir canal exec SSH")?;
     channel
-        .handle_extended_data(ExtendedData::Merge)
-        .context("Falha ao configurar stderr para exec SSH")?;
-    channel
-        .exec(command)
+        .exec(true, command)
+        .await
         .with_context(|| format!("Falha ao executar comando remoto: {}", command))?;
 
     let mut output = Vec::new();
-    channel
-        .read_to_end(&mut output)
-        .context("Falha ao ler saida de comando remoto")?;
+    let mut exit_status = None::<u32>;
 
-    channel
-        .wait_close()
-        .context("Falha ao finalizar comando remoto")?;
-    let status = channel
-        .exit_status()
-        .context("Falha ao ler status do comando remoto")?;
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                output.extend_from_slice(data.as_ref());
+            }
+            ChannelMsg::ExitStatus { exit_status: status } => {
+                exit_status = Some(status);
+            }
+            ChannelMsg::Eof => {}
+            ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+
+    let status = exit_status.unwrap_or(255);
     if status == 0 {
         return Ok(());
     }
@@ -749,6 +193,7 @@ fn run_remote_exec(session: &Session, command: &str) -> Result<()> {
             status
         ));
     }
+
     Err(anyhow!(
         "Comando remoto retornou status {}: {}",
         status,
@@ -840,31 +285,22 @@ pub fn known_hosts_add(
 }
 
 fn verify_known_host(
-    session: &Session,
+    server_key: &keys::PublicKey,
     profile: &ConnectionProfile,
     known_hosts_path: &Path,
     accept_unknown_host: bool,
 ) -> Result<Option<SshConnectResult>> {
-    let (key, key_type) = session
-        .host_key()
-        .ok_or_else(|| anyhow!("Servidor SSH nao retornou host key"))?;
-    let key_type_label = host_key_type_label(key_type);
-    let fingerprint = host_fingerprint(key);
+    let key_type_label = server_key.algorithm().to_string();
+    let fingerprint = host_fingerprint(&server_key.public_key_bytes());
 
-    let mut known_hosts = session
-        .known_hosts()
-        .context("Falha ao inicializar known_hosts")?;
-    let _ = known_hosts.read_file(known_hosts_path, KnownHostFileKind::OpenSSH);
-
-    let check = known_hosts.check_port(&profile.host, profile.port, key);
-    match check {
-        CheckResult::Match => Ok(None),
-        CheckResult::NotFound => {
+    match check_known_hosts_path(&profile.host, profile.port, server_key, known_hosts_path) {
+        Ok(true) => Ok(None),
+        Ok(false) => {
             if !accept_unknown_host {
                 return Ok(Some(SshConnectResult::UnknownHostChallenge {
                     host: profile.host.clone(),
                     port: profile.port,
-                    key_type: key_type_label.to_string(),
+                    key_type: key_type_label,
                     fingerprint,
                     known_hosts_path: known_hosts_path.to_string_lossy().to_string(),
                     message:
@@ -873,26 +309,21 @@ fn verify_known_host(
                 }));
             }
 
-            let host_token = known_host_token(&profile.host, profile.port);
-            known_hosts
-                .add(&host_token, key, &profile.host, key_type.into())
+            learn_known_hosts_path(&profile.host, profile.port, server_key, known_hosts_path)
                 .context("Falha ao adicionar host ao known_hosts")?;
-            known_hosts
-                .write_file(known_hosts_path, KnownHostFileKind::OpenSSH)
-                .context("Falha ao persistir known_hosts")?;
             Ok(None)
         }
-        CheckResult::Mismatch => Ok(Some(SshConnectResult::Error {
+        Err(keys::Error::KeyChanged { .. }) => Ok(Some(SshConnectResult::Error {
             message: "Host key divergente. Possivel alteracao remota ou risco de MITM.".to_string(),
         })),
-        CheckResult::Failure => Ok(Some(SshConnectResult::Error {
-            message: "Falha ao validar host key no known_hosts.".to_string(),
+        Err(error) => Ok(Some(SshConnectResult::Error {
+            message: format!("Falha ao validar host key no known_hosts: {}", error),
         })),
     }
 }
 
-fn authenticate_session(
-    session: &mut Session,
+async fn authenticate_session(
+    handle: &mut client::Handle<SshClientHandler>,
     profile: &ConnectionProfile,
 ) -> Result<(), AuthFailure> {
     let key_data = profile
@@ -915,28 +346,48 @@ fn authenticate_session(
 
     if let Some(private_key) = key_data {
         let key_result =
-            auth_with_private_key(session, &profile.username, private_key, password_data);
-        if key_result.is_ok() && session.authenticated() {
+            auth_with_private_key(handle, &profile.username, private_key, password_data).await;
+
+        if let Ok(true) = key_result {
             return Ok(());
         }
+
         if password_data.is_none() {
-            return Err(AuthFailure::NeedsInput(
-                "Falha na autenticacao com chave privada. Verifique passphrase ou selecione outro keychain."
-                    .to_string(),
-            ));
+            let message = match key_result {
+                Ok(false) => {
+                    "Falha na autenticacao com chave privada. Verifique passphrase ou selecione outro keychain."
+                        .to_string()
+                }
+                Ok(true) => {
+                    "Falha inesperada na autenticacao com chave privada.".to_string()
+                }
+                Err(error) => format!(
+                    "Falha na autenticacao com chave privada: {}. Verifique passphrase ou keychain.",
+                    error
+                ),
+            };
+            return Err(AuthFailure::NeedsInput(message));
         }
     }
 
     if let Some(password) = password_data {
-        session
-            .userauth_password(&profile.username, password)
+        let auth = handle
+            .authenticate_password(&profile.username, password)
+            .await
             .map_err(|error| {
                 AuthFailure::NeedsInput(format!(
                     "Falha na autenticacao por senha: {}. Informe nova senha ou keychain.",
                     error
                 ))
             })?;
-        return Ok(());
+
+        if auth.success() {
+            return Ok(());
+        }
+
+        return Err(AuthFailure::NeedsInput(
+            "Falha na autenticacao por senha. Informe nova senha ou keychain.".to_string(),
+        ));
     }
 
     Err(AuthFailure::Fatal(
@@ -996,18 +447,6 @@ fn host_fingerprint(host_key: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(host_key);
     format!("SHA256:{}", BASE64.encode(hasher.finalize()))
-}
-
-fn host_key_type_label(host_key_type: ssh2::HostKeyType) -> &'static str {
-    match host_key_type {
-        ssh2::HostKeyType::Rsa => "ssh-rsa",
-        ssh2::HostKeyType::Dss => "ssh-dss",
-        ssh2::HostKeyType::Ecdsa256 => "ecdsa-sha2-nistp256",
-        ssh2::HostKeyType::Ecdsa384 => "ecdsa-sha2-nistp384",
-        ssh2::HostKeyType::Ecdsa521 => "ecdsa-sha2-nistp521",
-        ssh2::HostKeyType::Ed25519 => "ssh-ed25519",
-        ssh2::HostKeyType::Unknown => "unknown",
-    }
 }
 
 fn known_host_token(host: &str, port: u16) -> String {
@@ -1107,45 +546,6 @@ fn update_mouse_sgr_mode(output: &str, enabled: &mut bool) {
     }
 }
 
-fn read_shell_output(managed: &mut ManagedSession, timeout: Duration) -> Result<String> {
-    managed.session.set_blocking(false);
-
-    let started = std::time::Instant::now();
-    let mut output = Vec::new();
-    let mut buffer = [0u8; 4096];
-
-    loop {
-        match managed.shell.read(&mut buffer) {
-            Ok(0) => {
-                if started.elapsed() >= timeout {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(12));
-            }
-            Ok(size) => {
-                output.extend_from_slice(&buffer[..size]);
-                if started.elapsed() >= timeout {
-                    break;
-                }
-            }
-            Err(error) => {
-                if error.kind() == ErrorKind::WouldBlock {
-                    if started.elapsed() >= timeout {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(12));
-                    continue;
-                }
-                managed.session.set_blocking(true);
-                return Err(anyhow!("Falha ao ler saida da shell SSH: {}", error));
-            }
-        }
-    }
-
-    managed.session.set_blocking(true);
-    Ok(String::from_utf8_lossy(&output).to_string())
-}
-
 fn spawn_local_shell(
     start_path: Option<&Path>,
 ) -> Result<(Child, ChildStdin, ChildStdout, ChildStderr)> {
@@ -1226,42 +626,54 @@ fn drain_local_output(output: &Arc<Mutex<Vec<u8>>>) -> String {
     String::new()
 }
 
-fn establish_handshake(profile: &ConnectionProfile) -> Result<Session> {
-    let address = format!("{}:{}", profile.host, profile.port);
-    let tcp = TcpStream::connect(&address)
-        .with_context(|| format!("Falha ao conectar em {}", address))?;
-    tcp.set_read_timeout(Some(Duration::from_secs(15))).ok();
-    tcp.set_write_timeout(Some(Duration::from_secs(15))).ok();
-
-    let mut session = Session::new().context("Falha ao iniciar sessao SSH")?;
-    session.set_tcp_stream(tcp);
-    session.handshake().context("Handshake SSH falhou")?;
-    Ok(session)
-}
-
-fn auth_with_private_key(
-    session: &mut Session,
+async fn auth_with_private_key(
+    handle: &mut client::Handle<SshClientHandler>,
     username: &str,
     private_key: &str,
     passphrase: Option<&str>,
-) -> Result<()> {
-    let mut temp_key =
-        NamedTempFile::new().context("Falha ao criar arquivo temporario para chave privada")?;
-    temp_key
-        .write_all(private_key.as_bytes())
-        .context("Falha ao escrever chave privada temporaria")?;
+) -> Result<bool> {
+    let key = keys::decode_secret_key(private_key, passphrase)
+        .context("Falha ao carregar chave privada SSH")?;
 
-    session
-        .userauth_pubkey_file(username, None, temp_key.path(), passphrase)
-        .context("Falha ao autenticar com chave privada")
+    let hash_alg = if key.algorithm().is_rsa() {
+        handle
+            .best_supported_rsa_hash()
+            .await
+            .context("Falha ao negociar algoritmo RSA com servidor SSH")?
+            .flatten()
+    } else {
+        None
+    };
+
+    let auth = handle
+        .authenticate_publickey(
+            username,
+            PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
+        )
+        .await
+        .context("Falha ao autenticar com chave privada")?;
+
+    Ok(auth.success())
 }
 
-fn normalize_remote_path(path: &str) -> PathBuf {
+fn normalize_remote_path(path: &str) -> String {
     let trimmed = path.trim().replace('\\', "/");
     if trimmed.is_empty() {
-        Path::new("/").to_path_buf()
+        "/".to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed
     } else {
-        Path::new(&trimmed).to_path_buf()
+        format!("/{}", trimmed)
+    }
+}
+
+fn join_remote_path(base: &str, child: &str) -> String {
+    let base = normalize_remote_path(base);
+    let child = child.trim().trim_start_matches('/');
+    if base == "/" {
+        format!("/{}", child)
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), child)
     }
 }
 
@@ -1295,3 +707,732 @@ mod tests {
     }
 }
 
+struct ManagedSession {
+    info: SshSessionInfo,
+    handle: client::Handle<SshClientHandler>,
+    terminal: Option<TerminalSession>,
+    sftp: Option<SftpSession>,
+    mouse_sgr_enabled: bool,
+}
+
+struct TerminalSession {
+    writer: ChannelWriteHalf<client::Msg>,
+    output: Arc<Mutex<Vec<u8>>>,
+    reader_task: JoinHandle<()>,
+}
+
+struct LocalManagedSession {
+    info: SshSessionInfo,
+    child: Child,
+    stdin: ChildStdin,
+    output: Arc<Mutex<Vec<u8>>>,
+}
+
+#[derive(Clone, Default)]
+struct HostKeyCapture {
+    inner: Arc<Mutex<Option<keys::PublicKey>>>,
+}
+
+impl HostKeyCapture {
+    fn set(&self, key: &keys::PublicKey) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = Some(key.clone());
+        }
+    }
+
+    fn get(&self) -> Option<keys::PublicKey> {
+        self.inner.lock().ok().and_then(|guard| guard.clone())
+    }
+}
+
+struct SshClientHandler {
+    host_key_capture: HostKeyCapture,
+}
+
+impl client::Handler for SshClientHandler {
+    type Error = anyhow::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &keys::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        self.host_key_capture.set(server_public_key);
+        Ok(true)
+    }
+}
+
+enum AuthFailure {
+    NeedsInput(String),
+    Fatal(String),
+}
+
+impl SshManager {
+    pub fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            local_sessions: HashMap::new(),
+        }
+    }
+
+    pub fn list_sessions(&self) -> Vec<SshSessionInfo> {
+        let mut sessions = self
+            .sessions
+            .values()
+            .map(|item| item.info.clone())
+            .collect::<Vec<_>>();
+        sessions.extend(self.local_sessions.values().map(|item| item.info.clone()));
+        sessions
+    }
+
+    pub async fn connect(
+        &mut self,
+        profile: &ConnectionProfile,
+        known_hosts_path: Option<&Path>,
+    ) -> Result<SshSessionInfo> {
+        match self
+            .connect_ex(
+                profile,
+                known_hosts_path,
+                true,
+                SshConnectPurpose::Terminal,
+            )
+            .await?
+        {
+            SshConnectResult::Connected { session } => Ok(session),
+            SshConnectResult::UnknownHostChallenge { message, .. } => Err(anyhow!(message)),
+            SshConnectResult::AuthRequired { message } => Err(anyhow!(message)),
+            SshConnectResult::Error { message } => Err(anyhow!(message)),
+        }
+    }
+
+    pub async fn connect_ex(
+        &mut self,
+        profile: &ConnectionProfile,
+        known_hosts_path: Option<&Path>,
+        accept_unknown_host: bool,
+        connect_purpose: SshConnectPurpose,
+    ) -> Result<SshConnectResult> {
+        let known_hosts_file = resolve_known_hosts_path(
+            known_hosts_path
+                .map(|path| path.to_string_lossy().to_string())
+                .as_deref(),
+        )?;
+        ensure_known_hosts_file(&known_hosts_file)?;
+
+        let host_key_capture = HostKeyCapture::default();
+        let handler = SshClientHandler {
+            host_key_capture: host_key_capture.clone(),
+        };
+        let config = Arc::new(client::Config::default());
+
+        let mut handle = client::connect(config, (profile.host.as_str(), profile.port), handler)
+            .await
+            .with_context(|| {
+                format!(
+                    "Handshake SSH falhou ao conectar em {}:{}",
+                    profile.host, profile.port
+                )
+            })?;
+
+        let server_key = host_key_capture
+            .get()
+            .ok_or_else(|| anyhow!("Servidor SSH nao retornou host key"))?;
+
+        if let Some(challenge) =
+            verify_known_host(&server_key, profile, &known_hosts_file, accept_unknown_host)?
+        {
+            let _ = handle
+                .disconnect(Disconnect::ByApplication, "Disconnected", "pt-BR")
+                .await;
+            return Ok(challenge);
+        }
+
+        match authenticate_session(&mut handle, profile).await {
+            Ok(()) => {}
+            Err(AuthFailure::NeedsInput(message)) => {
+                let _ = handle
+                    .disconnect(Disconnect::ByApplication, "Disconnected", "pt-BR")
+                    .await;
+                return Ok(SshConnectResult::AuthRequired { message });
+            }
+            Err(AuthFailure::Fatal(message)) => {
+                let _ = handle
+                    .disconnect(Disconnect::ByApplication, "Disconnected", "pt-BR")
+                    .await;
+                return Ok(SshConnectResult::Error { message });
+            }
+        }
+
+        let terminal = if connect_purpose == SshConnectPurpose::Terminal {
+            Some(open_terminal_session(&handle).await?)
+        } else {
+            None
+        };
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let info = SshSessionInfo {
+            session_id: session_id.clone(),
+            profile_id: profile.id.clone(),
+            connected_at: Utc::now().timestamp(),
+            session_kind: "ssh".to_string(),
+        };
+
+        self.sessions.insert(
+            session_id,
+            ManagedSession {
+                info: info.clone(),
+                handle,
+                terminal,
+                sftp: None,
+                mouse_sgr_enabled: false,
+            },
+        );
+
+        Ok(SshConnectResult::Connected { session: info })
+    }
+
+    pub fn connect_local(&mut self, start_path: Option<&Path>) -> Result<SshSessionInfo> {
+        let (child, stdin, stdout, stderr) = spawn_local_shell(start_path)?;
+        let output = Arc::new(Mutex::new(Vec::new()));
+        pump_reader_into_buffer(stdout, Arc::clone(&output));
+        pump_reader_into_buffer(stderr, Arc::clone(&output));
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let info = SshSessionInfo {
+            session_id: session_id.clone(),
+            profile_id: "local".to_string(),
+            connected_at: Utc::now().timestamp(),
+            session_kind: "local".to_string(),
+        };
+
+        let local = LocalManagedSession {
+            info: info.clone(),
+            child,
+            stdin,
+            output,
+        };
+        self.local_sessions.insert(session_id, local);
+
+        Ok(info)
+    }
+
+    pub async fn disconnect(&mut self, session_id: &str) {
+        if let Some(mut managed) = self.sessions.remove(session_id) {
+            if let Some(terminal) = managed.terminal.take() {
+                let _ = terminal.writer.eof().await;
+                let _ = terminal.writer.close().await;
+                terminal.reader_task.abort();
+            }
+
+            if let Some(sftp) = managed.sftp.take() {
+                let _ = sftp.close().await;
+            }
+
+            let _ = managed
+                .handle
+                .disconnect(Disconnect::ByApplication, "Disconnected", "pt-BR")
+                .await;
+            return;
+        }
+
+        if let Some(mut local) = self.local_sessions.remove(session_id) {
+            let _ = local.stdin.flush();
+            let _ = local.child.kill();
+            let _ = local.child.wait();
+        }
+    }
+
+    pub async fn run_command(&mut self, session_id: &str, command: &str) -> Result<String> {
+        if let Some(managed) = self.sessions.get_mut(session_id) {
+            let terminal = managed
+                .terminal
+                .as_mut()
+                .ok_or_else(|| anyhow!("Sessao {} nao suporta shell interativo", session_id))?;
+
+            let payload = command.replace('\r', "\n");
+            if !payload.is_empty() {
+                write_to_remote_channel(&terminal.writer, payload.as_bytes())
+                    .await
+                    .context("Falha ao enviar entrada para shell SSH")?;
+            }
+
+            sleep(Duration::from_millis(140)).await;
+            let output = drain_remote_output(&terminal.output);
+            update_mouse_sgr_mode(&output, &mut managed.mouse_sgr_enabled);
+            return Ok(output);
+        }
+
+        let local = self
+            .local_sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let payload = command.replace('\r', "\n");
+        if !payload.is_empty() {
+            local
+                .stdin
+                .write_all(payload.as_bytes())
+                .context("Falha ao enviar entrada para terminal local")?;
+            local
+                .stdin
+                .flush()
+                .context("Falha ao flush do terminal local")?;
+        }
+
+        thread::sleep(Duration::from_millis(80));
+        Ok(drain_local_output(&local.output))
+    }
+
+    pub async fn write_raw_input(&mut self, session_id: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(managed) = self.sessions.get_mut(session_id) {
+            let terminal = managed
+                .terminal
+                .as_mut()
+                .ok_or_else(|| anyhow!("Sessao {} nao suporta shell interativo", session_id))?;
+            write_to_remote_channel(&terminal.writer, bytes)
+                .await
+                .context("Falha ao enviar input bruto para shell SSH")?;
+            return Ok(());
+        }
+
+        if let Some(local) = self.local_sessions.get_mut(session_id) {
+            local
+                .stdin
+                .write_all(bytes)
+                .context("Falha ao enviar input bruto para terminal local")?;
+            local
+                .stdin
+                .flush()
+                .context("Falha ao flush de input bruto local")?;
+            return Ok(());
+        }
+
+        Err(anyhow!("Sessao {} nao encontrada", session_id))
+    }
+
+    pub fn is_mouse_sgr_enabled(&self, session_id: &str) -> Result<bool> {
+        if let Some(managed) = self.sessions.get(session_id) {
+            return Ok(managed.mouse_sgr_enabled);
+        }
+        if self.local_sessions.contains_key(session_id) {
+            return Ok(false);
+        }
+        Err(anyhow!("Sessao {} nao encontrada", session_id))
+    }
+
+    pub async fn resize_pty(&mut self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
+        if let Some(managed) = self.sessions.get_mut(session_id) {
+            let terminal = managed
+                .terminal
+                .as_mut()
+                .ok_or_else(|| anyhow!("Sessao {} nao suporta redimensionamento PTY", session_id))?;
+            terminal
+                .writer
+                .window_change(cols, rows, 0, 0)
+                .await
+                .context("Falha ao redimensionar PTY SSH")?;
+            return Ok(());
+        }
+
+        if self.local_sessions.contains_key(session_id) {
+            return Ok(());
+        }
+
+        Err(anyhow!("Sessao {} nao encontrada", session_id))
+    }
+
+    pub async fn sftp_list(&mut self, session_id: &str, path: &str) -> Result<Vec<SftpEntry>> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+        let read_dir = sftp
+            .read_dir(target.clone())
+            .await
+            .with_context(|| format!("Falha ao listar diretorio remoto: {}", target))?;
+
+        let mut mapped = Vec::new();
+        for entry in read_dir {
+            let name = entry.file_name();
+            let metadata = entry.metadata();
+            mapped.push(SftpEntry {
+                name: name.clone(),
+                path: join_remote_path(&target, &name),
+                is_dir: metadata.is_dir(),
+                size: metadata.size.unwrap_or_default(),
+                permissions: metadata.permissions,
+                modified_at: metadata.mtime.map(|value| value as i64),
+            });
+        }
+
+        Ok(mapped)
+    }
+
+    pub async fn sftp_read(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        chunk_size: usize,
+    ) -> Result<String> {
+        let bytes = self.sftp_read_bytes(session_id, path, chunk_size).await?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    pub async fn sftp_read_bytes(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        chunk_size: usize,
+    ) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.sftp_download_to_writer(session_id, path, &mut bytes, chunk_size, |_| {})
+            .await?;
+
+        Ok(bytes)
+    }
+
+    pub async fn sftp_read_bytes_with_limit(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        chunk_size: usize,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+
+        let mut file = sftp
+            .open(target.clone())
+            .await
+            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target))?;
+
+        let mut bytes = Vec::new();
+        let mut total = 0u64;
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+
+        loop {
+            let size = file
+                .read(&mut buffer)
+                .await
+                .with_context(|| format!("Falha ao ler arquivo remoto: {}", target))?;
+            if size == 0 {
+                break;
+            }
+
+            total = total.saturating_add(size as u64);
+            if total > max_bytes {
+                return Ok(None);
+            }
+
+            bytes.extend_from_slice(&buffer[..size]);
+        }
+
+        Ok(Some(bytes))
+    }
+
+    pub async fn sftp_read_chunk(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        offset: u64,
+        chunk_size: usize,
+    ) -> Result<(Vec<u8>, u64, bool)> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+
+        let total = sftp
+            .metadata(target.clone())
+            .await
+            .ok()
+            .and_then(|metadata| metadata.size)
+            .unwrap_or(0);
+
+        let mut file = sftp
+            .open(target.clone())
+            .await
+            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target))?;
+
+        file.seek(SeekFrom::Start(offset)).await.with_context(|| {
+            format!("Falha ao posicionar leitura remota em {}", target)
+        })?;
+
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+        let size = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("Falha ao ler chunk remoto: {}", target))?;
+        buffer.truncate(size);
+
+        let bytes_read = offset.saturating_add(size as u64);
+        let eof = size == 0 || bytes_read >= total;
+
+        Ok((buffer, total, eof))
+    }
+
+    pub async fn sftp_write(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+        chunk_size: usize,
+    ) -> Result<()> {
+        self.sftp_write_bytes(session_id, path, content.as_bytes(), chunk_size)
+            .await
+    }
+
+    pub async fn sftp_rename(
+        &mut self,
+        session_id: &str,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let from = normalize_remote_path(from_path);
+        let to = normalize_remote_path(to_path);
+        let sftp = ensure_sftp_session(managed).await?;
+        sftp.rename(from.clone(), to.clone()).await.with_context(|| {
+            format!("Falha ao renomear item remoto de {} para {}", from, to)
+        })?;
+        Ok(())
+    }
+
+    pub async fn sftp_delete(&mut self, session_id: &str, path: &str, is_dir: bool) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+
+        if is_dir {
+            sftp.remove_dir(target.clone())
+                .await
+                .with_context(|| format!("Falha ao remover pasta remota: {}", target))?;
+        } else {
+            sftp.remove_file(target.clone())
+                .await
+                .with_context(|| format!("Falha ao remover arquivo remoto: {}", target))?;
+        }
+        Ok(())
+    }
+
+    pub async fn sftp_mkdir(&mut self, session_id: &str, path: &str) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+        sftp.create_dir(target.clone())
+            .await
+            .with_context(|| format!("Falha ao criar pasta remota: {}", target))?;
+        Ok(())
+    }
+
+    pub async fn sftp_create_file(&mut self, session_id: &str, path: &str) -> Result<()> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+        let mut file = sftp
+            .create(target.clone())
+            .await
+            .with_context(|| format!("Falha ao criar arquivo remoto: {}", target))?;
+        let _ = file.shutdown().await;
+        Ok(())
+    }
+
+    pub async fn sftp_write_bytes(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        content: &[u8],
+        chunk_size: usize,
+    ) -> Result<()> {
+        let mut cursor = std::io::Cursor::new(content);
+        self.sftp_upload_from_reader(session_id, path, &mut cursor, chunk_size, |_| {})
+            .await?;
+        Ok(())
+    }
+
+    pub async fn sftp_file_size(&mut self, session_id: &str, path: &str) -> Result<Option<u64>> {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+
+        match sftp.metadata(target).await {
+            Ok(metadata) => Ok(metadata.size),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub async fn sftp_download_to_writer<W, F>(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        writer: &mut W,
+        chunk_size: usize,
+        mut on_chunk: F,
+    ) -> Result<u64>
+    where
+        W: Write,
+        F: FnMut(u64),
+    {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+
+        let mut file = sftp
+            .open(target.clone())
+            .await
+            .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target))?;
+
+        let mut transferred = 0u64;
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+
+        loop {
+            let size = file
+                .read(&mut buffer)
+                .await
+                .with_context(|| format!("Falha ao ler arquivo remoto: {}", target))?;
+            if size == 0 {
+                break;
+            }
+
+            writer.write_all(&buffer[..size]).with_context(|| {
+                format!("Falha ao escrever chunk recebido de {}", target)
+            })?;
+
+            transferred = transferred.saturating_add(size as u64);
+            on_chunk(size as u64);
+        }
+
+        Ok(transferred)
+    }
+
+    pub async fn sftp_upload_from_reader<R, F>(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        reader: &mut R,
+        chunk_size: usize,
+        mut on_chunk: F,
+    ) -> Result<u64>
+    where
+        R: Read,
+        F: FnMut(u64),
+    {
+        let managed = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", session_id))?;
+
+        let target = normalize_remote_path(path);
+        let sftp = ensure_sftp_session(managed).await?;
+        let mut file = sftp
+            .create(target.clone())
+            .await
+            .with_context(|| format!("Falha ao criar arquivo remoto: {}", target))?;
+
+        let mut transferred = 0u64;
+        let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
+        loop {
+            let size = reader
+                .read(&mut buffer)
+                .with_context(|| format!("Falha ao ler origem para upload: {}", target))?;
+            if size == 0 {
+                break;
+            }
+
+            file.write_all(&buffer[..size])
+                .await
+                .with_context(|| format!("Falha ao escrever arquivo remoto: {}", target))?;
+
+            transferred = transferred.saturating_add(size as u64);
+            on_chunk(size as u64);
+        }
+
+        file.shutdown()
+            .await
+            .with_context(|| format!("Falha ao finalizar arquivo remoto: {}", target))?;
+
+        Ok(transferred)
+    }
+
+    pub fn sessions_share_profile(&self, left_session_id: &str, right_session_id: &str) -> bool {
+        let left = self.sessions.get(left_session_id);
+        let right = self.sessions.get(right_session_id);
+        match (left, right) {
+            (Some(left_session), Some(right_session)) => {
+                left_session.info.profile_id == right_session.info.profile_id
+            }
+            _ => false,
+        }
+    }
+
+    pub async fn sftp_copy_between_sessions(
+        &mut self,
+        from_session_id: &str,
+        to_session_id: &str,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<()> {
+        if from_session_id != to_session_id
+            && !self.sessions_share_profile(from_session_id, to_session_id)
+        {
+            return Err(anyhow!(
+                "Copia remota otimizada requer sessoes no mesmo perfil"
+            ));
+        }
+
+        let managed = self
+            .sessions
+            .get_mut(from_session_id)
+            .ok_or_else(|| anyhow!("Sessao {} nao encontrada", from_session_id))?;
+
+        let source = normalize_remote_path(from_path);
+        let target = normalize_remote_path(to_path);
+        if source == target {
+            return Ok(());
+        }
+
+        let source_is_dir = {
+            let sftp = ensure_sftp_session(managed).await?;
+            let stat = sftp
+                .metadata(source.clone())
+                .await
+                .with_context(|| format!("Falha ao obter metadata remota: {}", source))?;
+            stat.is_dir()
+        };
+
+        run_remote_copy_command(&managed.handle, &source, &target, source_is_dir).await
+    }
+}

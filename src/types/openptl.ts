@@ -378,6 +378,8 @@ export interface KnownHostEntry {
   path: string;
 }
 
+export type SshConnectPurpose = "terminal" | "sftp";
+
 export type SshConnectResult =
   | {
       status: "connected";
