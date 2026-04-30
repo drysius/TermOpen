@@ -1,4 +1,4 @@
-﻿use tauri::State;
+use tauri::State;
 
 use crate::constants::{AUTH_SERVERS_LOCAL_FALLBACK_JSON, AUTH_SERVERS_REMOTE_URL};
 use crate::libs::models::AuthServer;
@@ -69,5 +69,3 @@ fn load_local_servers() -> Vec<AuthServer> {
     serde_json::from_str(AUTH_SERVERS_LOCAL_FALLBACK_JSON)
         .unwrap_or_else(|_| vec![AuthServer::default_server()])
 }
-
-

@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::libs::transfer::{AdaptiveChunkController, TransferJobConfig, DEFAULT_INITIAL_CHUNK_SIZE};
+use crate::libs::transfer::{
+    AdaptiveChunkController, TransferJobConfig, DEFAULT_INITIAL_CHUNK_SIZE,
+};
 
 #[test]
 fn adaptive_chunk_grows_when_throughput_improves_with_stable_rtt() {

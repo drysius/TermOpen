@@ -544,10 +544,10 @@ fn run_rdp_session_worker_inner(
                     if was_focused && !focus_state.focused {
                         let _ = emit_control_event(
                             control_channel,
-                RdpSessionControlEvent::ReleasedCapture {
-                    session_id: session_id.to_string(),
-                    message: BackendMessage::key("rdp_capture_released"),
-                },
+                            RdpSessionControlEvent::ReleasedCapture {
+                                session_id: session_id.to_string(),
+                                message: BackendMessage::key("rdp_capture_released"),
+                            },
                         );
                     }
                 }

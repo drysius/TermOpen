@@ -20,10 +20,7 @@ impl BackendMessage {
         }
     }
 
-    pub fn with_params(
-        message: impl Into<String>,
-        params: HashMap<String, String>,
-    ) -> Self {
+    pub fn with_params(message: impl Into<String>, params: HashMap<String, String>) -> Self {
         Self {
             message: message.into(),
             params: Some(params),

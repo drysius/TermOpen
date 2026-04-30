@@ -17,13 +17,12 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
 use russh::{
     client,
-    ChannelMsg, ChannelReadHalf, ChannelWriteHalf,
     keys::{
         self,
         known_hosts::{check_known_hosts_path, learn_known_hosts_path},
         PrivateKeyWithHashAlg, PublicKeyBase64,
     },
-    Disconnect,
+    ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect,
 };
 use russh_sftp::client::SftpSession;
 use sha2::{Digest, Sha256};
@@ -66,7 +65,9 @@ async fn ensure_sftp_session(managed: &mut ManagedSession) -> Result<&mut SftpSe
         .ok_or_else(|| anyhow!("Falha ao inicializar sessao SFTP"))
 }
 
-async fn open_terminal_session(handle: &client::Handle<SshClientHandler>) -> Result<TerminalSession> {
+async fn open_terminal_session(
+    handle: &client::Handle<SshClientHandler>,
+) -> Result<TerminalSession> {
     let channel = handle
         .channel_open_session()
         .await
@@ -91,7 +92,10 @@ async fn open_terminal_session(handle: &client::Handle<SshClientHandler>) -> Res
     })
 }
 
-fn spawn_terminal_reader(mut read_half: ChannelReadHalf, output: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()> {
+fn spawn_terminal_reader(
+    mut read_half: ChannelReadHalf,
+    output: Arc<Mutex<Vec<u8>>>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(message) = read_half.wait().await {
             match message {
@@ -120,7 +124,10 @@ fn drain_remote_output(output: &Arc<Mutex<Vec<u8>>>) -> String {
     String::new()
 }
 
-async fn write_to_remote_channel(writer: &ChannelWriteHalf<client::Msg>, bytes: &[u8]) -> Result<()> {
+async fn write_to_remote_channel(
+    writer: &ChannelWriteHalf<client::Msg>,
+    bytes: &[u8],
+) -> Result<()> {
     let cursor = std::io::Cursor::new(bytes.to_vec());
     writer
         .data(cursor)
@@ -172,7 +179,9 @@ async fn run_remote_exec(handle: &client::Handle<SshClientHandler>, command: &st
             ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
                 output.extend_from_slice(data.as_ref());
             }
-            ChannelMsg::ExitStatus { exit_status: status } => {
+            ChannelMsg::ExitStatus {
+                exit_status: status,
+            } => {
                 exit_status = Some(status);
             }
             ChannelMsg::Eof => {}
@@ -788,12 +797,7 @@ impl SshManager {
         known_hosts_path: Option<&Path>,
     ) -> Result<SshSessionInfo> {
         match self
-            .connect_ex(
-                profile,
-                known_hosts_path,
-                true,
-                SshConnectPurpose::Terminal,
-            )
+            .connect_ex(profile, known_hosts_path, true, SshConnectPurpose::Terminal)
             .await?
         {
             SshConnectResult::Connected { session } => Ok(session),
@@ -1026,10 +1030,9 @@ impl SshManager {
 
     pub async fn resize_pty(&mut self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
         if let Some(managed) = self.sessions.get_mut(session_id) {
-            let terminal = managed
-                .terminal
-                .as_mut()
-                .ok_or_else(|| anyhow!("Sessao {} nao suporta redimensionamento PTY", session_id))?;
+            let terminal = managed.terminal.as_mut().ok_or_else(|| {
+                anyhow!("Sessao {} nao suporta redimensionamento PTY", session_id)
+            })?;
             terminal
                 .writer
                 .window_change(cols, rows, 0, 0)
@@ -1167,9 +1170,9 @@ impl SshManager {
             .await
             .with_context(|| format!("Falha ao abrir arquivo remoto: {}", target))?;
 
-        file.seek(SeekFrom::Start(offset)).await.with_context(|| {
-            format!("Falha ao posicionar leitura remota em {}", target)
-        })?;
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .with_context(|| format!("Falha ao posicionar leitura remota em {}", target))?;
 
         let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
         let size = file
@@ -1208,9 +1211,9 @@ impl SshManager {
         let from = normalize_remote_path(from_path);
         let to = normalize_remote_path(to_path);
         let sftp = ensure_sftp_session(managed).await?;
-        sftp.rename(from.clone(), to.clone()).await.with_context(|| {
-            format!("Falha ao renomear item remoto de {} para {}", from, to)
-        })?;
+        sftp.rename(from.clone(), to.clone())
+            .await
+            .with_context(|| format!("Falha ao renomear item remoto de {} para {}", from, to))?;
         Ok(())
     }
 
@@ -1327,9 +1330,9 @@ impl SshManager {
                 break;
             }
 
-            writer.write_all(&buffer[..size]).with_context(|| {
-                format!("Falha ao escrever chunk recebido de {}", target)
-            })?;
+            writer
+                .write_all(&buffer[..size])
+                .with_context(|| format!("Falha ao escrever chunk recebido de {}", target))?;
 
             transferred = transferred.saturating_add(size as u64);
             on_chunk(size as u64);

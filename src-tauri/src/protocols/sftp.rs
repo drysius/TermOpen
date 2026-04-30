@@ -1,4 +1,4 @@
-﻿#![allow(dead_code)]
+#![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
 
@@ -46,7 +46,9 @@ pub async fn write(
     content: &str,
     chunk_size: usize,
 ) -> Result<()> {
-    manager.sftp_write(session_id, path, content, chunk_size).await
+    manager
+        .sftp_write(session_id, path, content, chunk_size)
+        .await
 }
 
 pub fn ensure_supported_session_id(session_id: &str) -> Result<()> {
@@ -55,4 +57,3 @@ pub fn ensure_supported_session_id(session_id: &str) -> Result<()> {
     }
     Ok(())
 }
-

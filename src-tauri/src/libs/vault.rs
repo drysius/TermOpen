@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -1439,5 +1439,3 @@ mod tests {
         assert!(!status.locked, "vault should be unlocked after restoring X");
     }
 }
-
-

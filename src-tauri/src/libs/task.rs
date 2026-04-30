@@ -156,7 +156,10 @@ impl TaskManager {
             TaskProtocol::Smb,
             TaskProtocol::Rdp,
         ] {
-            protocol_limits.insert(protocol, Arc::new(Semaphore::new(per_protocol_limit.max(1))));
+            protocol_limits.insert(
+                protocol,
+                Arc::new(Semaphore::new(per_protocol_limit.max(1))),
+            );
         }
 
         let (updates, _) = broadcast::channel(256);

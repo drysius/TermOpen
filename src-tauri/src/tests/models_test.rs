@@ -1,4 +1,4 @@
-﻿use crate::libs::models::{AppSettings, KeychainEntry, KeychainEntryType};
+use crate::libs::models::{AppSettings, KeychainEntry, KeychainEntryType};
 
 #[test]
 fn should_default_terminal_interaction_settings() {
@@ -29,4 +29,3 @@ fn should_serialize_keychain_password_field() {
         .unwrap_or_default();
     assert_eq!(password, "super-secret");
 }
-

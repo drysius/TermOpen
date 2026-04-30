@@ -76,7 +76,9 @@ fn resolve_smb_path(profile: &ConnectionProfile, input_path: &str) -> Result<(St
     let mut segments = trimmed.split('/');
     let share = segments.next().unwrap_or_default().trim().to_string();
     if share.is_empty() {
-        return Err(anyhow!("Compartilhamento SMB nao informado no caminho remoto."));
+        return Err(anyhow!(
+            "Compartilhamento SMB nao informado no caminho remoto."
+        ));
     }
     let inner = segments.collect::<Vec<_>>().join("\\");
     Ok((share, inner))
@@ -138,7 +140,9 @@ pub async fn smb_list(profile: &ConnectionProfile, path: &str) -> Result<Vec<Sft
     let resource = client
         .create_file(
             &target_path,
-            &FileCreateArgs::make_open_existing(DirAccessMask::new().with_list_directory(true).into()),
+            &FileCreateArgs::make_open_existing(
+                DirAccessMask::new().with_list_directory(true).into(),
+            ),
         )
         .await
         .with_context(|| format!("Falha ao abrir diretorio SMB {}", target_path))?;
@@ -211,7 +215,10 @@ where
         .with_context(|| format!("Falha ao abrir arquivo SMB {}", target_path))?;
     let file = resource.unwrap_file();
 
-    let total = file.get_len().await.map_err(|error| anyhow!(error.to_string()))?;
+    let total = file
+        .get_len()
+        .await
+        .map_err(|error| anyhow!(error.to_string()))?;
     let mut offset = 0u64;
     let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
     while offset < total {
@@ -283,13 +290,21 @@ where
     Ok(offset)
 }
 
-pub async fn smb_read(profile: &ConnectionProfile, path: &str, chunk_size: usize) -> Result<String> {
+pub async fn smb_read(
+    profile: &ConnectionProfile,
+    path: &str,
+    chunk_size: usize,
+) -> Result<String> {
     let mut bytes = Vec::new();
     smb_download_to_writer(profile, path, &mut bytes, chunk_size, |_| {}).await?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
-pub async fn smb_read_bytes(profile: &ConnectionProfile, path: &str, chunk_size: usize) -> Result<Vec<u8>> {
+pub async fn smb_read_bytes(
+    profile: &ConnectionProfile,
+    path: &str,
+    chunk_size: usize,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     smb_download_to_writer(profile, path, &mut bytes, chunk_size, |_| {}).await?;
     Ok(bytes)
@@ -336,7 +351,10 @@ pub async fn smb_read_chunk(
         .await
         .with_context(|| format!("Falha ao abrir arquivo SMB {}", target_path))?;
     let file = resource.unwrap_file();
-    let total = file.get_len().await.map_err(|error| anyhow!(error.to_string()))?;
+    let total = file
+        .get_len()
+        .await
+        .map_err(|error| anyhow!(error.to_string()))?;
     let mut buffer = vec![0u8; normalize_chunk_size(chunk_size)];
     let read = file
         .read_at(&mut buffer, offset.min(total))

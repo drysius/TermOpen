@@ -1,4 +1,4 @@
-﻿use crate::libs::sync::request_sync_cancel;
+use crate::libs::sync::request_sync_cancel;
 
 #[test]
 fn should_return_cancelled_sync_state() {
@@ -6,4 +6,3 @@ fn should_return_cancelled_sync_state() {
     assert_eq!(state.status, "idle");
     assert_eq!(state.message.message, "sync_cancelled");
 }
-

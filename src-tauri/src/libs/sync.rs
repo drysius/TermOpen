@@ -1,4 +1,4 @@
-﻿use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use keyring::Entry;
 use reqwest::Client;
@@ -303,10 +303,7 @@ impl SyncManager {
         metadata.last_local_change = now.timestamp();
         vault.set_sync_metadata(metadata.clone())?;
 
-        let state = SyncState::ok(
-            "sync_push_success",
-            metadata.last_sync_at,
-        );
+        let state = SyncState::ok("sync_push_success", metadata.last_sync_at);
         emit_sync_progress(app, "complete", None, total_steps, total_steps);
         app.emit("sync:status", &state).ok();
         Ok(state)
@@ -371,10 +368,7 @@ impl SyncManager {
         next_metadata.last_local_change = now.timestamp();
         vault.set_sync_metadata(next_metadata.clone())?;
 
-        let state = SyncState::ok(
-            "sync_pull_success",
-            next_metadata.last_sync_at,
-        );
+        let state = SyncState::ok("sync_pull_success", next_metadata.last_sync_at);
         emit_sync_progress(app, "complete", None, total_steps, total_steps);
         app.emit("sync:status", &state).ok();
         Ok(state)
@@ -532,10 +526,7 @@ impl SyncManager {
         next_metadata.last_local_change = now.timestamp();
         vault.set_sync_metadata(next_metadata.clone())?;
 
-        let state = SyncState::ok(
-            "sync_conflicts_resolved",
-            next_metadata.last_sync_at,
-        );
+        let state = SyncState::ok("sync_conflicts_resolved", next_metadata.last_sync_at);
         app.emit("sync:status", &state).ok();
         Ok(state)
     }
@@ -1240,5 +1231,3 @@ struct DriveFileMetadata {
     #[serde(rename = "modifiedTime")]
     modified_time: Option<String>,
 }
-
-

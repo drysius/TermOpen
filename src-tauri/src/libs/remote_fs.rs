@@ -80,8 +80,12 @@ pub fn prepare_staging_area(task_id: &str) -> Result<RemoteFsStagingArea> {
 
     let root_dir = transfer_cache_root().join(normalized_task_id.as_str());
     let chunks_dir = root_dir.join(STAGING_CHUNKS_DIR);
-    fs::create_dir_all(&chunks_dir)
-        .with_context(|| format!("Falha ao criar staging de transferencia {}", root_dir.display()))?;
+    fs::create_dir_all(&chunks_dir).with_context(|| {
+        format!(
+            "Falha ao criar staging de transferencia {}",
+            root_dir.display()
+        )
+    })?;
 
     Ok(RemoteFsStagingArea {
         task_id: normalized_task_id,
@@ -96,13 +100,21 @@ pub fn open_spool_writer(area: &RemoteFsStagingArea) -> Result<File> {
     if let Some(parent) = area.spool_file.parent() {
         fs::create_dir_all(parent)?;
     }
-    File::create(&area.spool_file)
-        .with_context(|| format!("Falha ao abrir spool para escrita {}", area.spool_file.display()))
+    File::create(&area.spool_file).with_context(|| {
+        format!(
+            "Falha ao abrir spool para escrita {}",
+            area.spool_file.display()
+        )
+    })
 }
 
 pub fn open_spool_reader(area: &RemoteFsStagingArea) -> Result<File> {
-    File::open(&area.spool_file)
-        .with_context(|| format!("Falha ao abrir spool para leitura {}", area.spool_file.display()))
+    File::open(&area.spool_file).with_context(|| {
+        format!(
+            "Falha ao abrir spool para leitura {}",
+            area.spool_file.display()
+        )
+    })
 }
 
 pub fn spool_file_size(area: &RemoteFsStagingArea) -> Result<u64> {
@@ -121,7 +133,8 @@ pub fn write_spool_from_reader<R: Read>(
     config: TransferJobConfig,
 ) -> Result<u64> {
     let mut writer = open_spool_writer(area)?;
-    let metrics = transfer_reader_to_writer(reader, &mut writer, config, |_bytes, _chunk, _rtt| {})?;
+    let metrics =
+        transfer_reader_to_writer(reader, &mut writer, config, |_bytes, _chunk, _rtt| {})?;
     Ok(metrics.total_bytes)
 }
 
@@ -285,8 +298,12 @@ pub fn cleanup_task_cache(task_id: &str) -> Result<()> {
     let normalized_task_id = sanitize_task_id_for_fs(task_id);
     let target = transfer_cache_root().join(normalized_task_id.as_str());
     if target.exists() {
-        fs::remove_dir_all(&target)
-            .with_context(|| format!("Falha ao limpar cache de transferencia {}", target.display()))?;
+        fs::remove_dir_all(&target).with_context(|| {
+            format!(
+                "Falha ao limpar cache de transferencia {}",
+                target.display()
+            )
+        })?;
     }
     Ok(())
 }

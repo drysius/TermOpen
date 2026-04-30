@@ -173,25 +173,28 @@ impl SharedFsBridge {
     {
         let bridge = self.clone();
         let protocol = job.to_task_protocol();
-        self.task_manager.spawn(protocol, move |context| async move {
-            let task_id = context.id().to_string();
-            let mut task_job = job;
-            task_job.task_id = task_id.clone();
-            let download = download_to_spool;
-            let upload = upload_from_spool;
+        self.task_manager
+            .spawn(protocol, move |context| async move {
+                let task_id = context.id().to_string();
+                let mut task_job = job;
+                task_job.task_id = task_id.clone();
+                let download = download_to_spool;
+                let upload = upload_from_spool;
 
-            let result = context
-                .run_blocking(move || bridge.copy_via_openptl_staging(task_job, download, upload))
-                .await;
+                let result = context
+                    .run_blocking(move || {
+                        bridge.copy_via_openptl_staging(task_job, download, upload)
+                    })
+                    .await;
 
-            match result {
-                Ok(_metrics) => {
-                    context.emit_progress(100);
-                    Ok(())
+                match result {
+                    Ok(_metrics) => {
+                        context.emit_progress(100);
+                        Ok(())
+                    }
+                    Err(message) => Err(message),
                 }
-                Err(message) => Err(message),
-            }
-        })
+            })
     }
 }
 
